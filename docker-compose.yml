@@ -1,0 +1,69 @@
+# The self-hosting contract: `docker compose up` gives a working control plane
+# and relay with no further steps. If that stops being true, treat it as a
+# release blocker — it is the entire first impression of the project.
+
+name: meshp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meshp
+      POSTGRES_PASSWORD: meshp
+      POSTGRES_DB: meshp
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meshp -d meshp"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  control:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        VERSION: ${MESHP_VERSION:-dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MESHP_DATABASE_URL: postgres://meshp:meshp@postgres:5432/meshp?sslmode=disable
+      MESHP_LISTEN_ADDR: ":8080"
+      MESHP_CONTROL_URL: ${MESHP_CONTROL_URL:-http://localhost:8080}
+      MESHP_SECRET_KEY: ${MESHP_SECRET_KEY:-dev-only-insecure-key-change-me}
+      MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
+      MESHP_LOG_FORMAT: ${MESHP_LOG_FORMAT:-text}
+      MESHP_DEFAULT_ULA_PREFIX: ${MESHP_DEFAULT_ULA_PREFIX:-fd7c:6d65:7368::/48}
+      MESHP_DEFAULT_V4_PREFIX: ${MESHP_DEFAULT_V4_PREFIX:-100.90.0.0/16}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  relay:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+    entrypoint: ["/usr/local/bin/meshp-relay"]
+    depends_on:
+      control:
+        condition: service_started
+    environment:
+      MESHP_CONTROL_URL: http://control:8080
+      MESHP_RELAY_LISTEN_ADDR: ":3478"
+      MESHP_RELAY_ADMIN_ADDR: ":9090"
+      MESHP_RELAY_ADVERTISED_HOST: ${MESHP_RELAY_ADVERTISED_HOST:-localhost}
+      MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
+    ports:
+      - "3478:3478/udp"
+      - "9090:9090"
+
+volumes:
+  postgres-data:

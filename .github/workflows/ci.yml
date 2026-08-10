@@ -1,0 +1,124 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - run: go vet ./...
+      - run: make build
+      - run: make test
+      - name: binaries report their version
+        run: |
+          ./bin/meshp --version
+          ./bin/meshpd --version
+          ./bin/meshp-control --version
+          ./bin/meshp-relay --version
+
+  # Invariant 12: the open core must not depend on the commercial layer.
+  standalone:
+    name: standalone core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - run: make standalone-check
+
+  # The wire protocol is the most expensive thing to change once agents are
+  # deployed. Lint it, and refuse changes that break compatibility with main.
+  proto:
+    name: protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - run: make proto
+      - name: lint
+        run: go run github.com/bufbuild/buf/cmd/buf@v1.47.2 lint
+      - name: no breaking changes against main
+        if: github.event_name == 'pull_request'
+        run: go run github.com/bufbuild/buf/cmd/buf@v1.47.2 breaking --against '.git#branch=origin/main'
+
+  migrations:
+    name: migrations apply
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meshp
+          POSTGRES_PASSWORD: meshp
+          POSTGRES_DB: meshp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meshp -d meshp"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: apply every migration in order
+        env:
+          PGPASSWORD: meshp
+        run: |
+          for f in migrations/*.sql; do
+            echo "applying $f"
+            # Strip goose directives so the file applies with plain psql too.
+            sed '/^-- +goose Down/,$d' "$f" \
+              | psql -h localhost -U meshp -d meshp -v ON_ERROR_STOP=1
+          done
+      - name: schema is non-empty
+        env:
+          PGPASSWORD: meshp
+        run: |
+          count=$(psql -h localhost -U meshp -d meshp -tAc \
+            "select count(*) from information_schema.tables where table_schema='public'")
+          echo "tables: $count"
+          test "$count" -ge 20
+
+  dco:
+    name: dco sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: every commit is signed off
+        run: |
+          missing=0
+          while read -r sha; do
+            if ! git log -1 --format=%B "$sha" | grep -qi '^Signed-off-by: .\+ <.\+@.\+>'; then
+              echo "missing Signed-off-by: $(git log -1 --oneline "$sha")"
+              missing=1
+            fi
+          done < <(git rev-list origin/${{ github.base_ref }}..HEAD)
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "Sign commits with 'git commit -s'. To fix history:"
+            echo "  git rebase --signoff origin/${{ github.base_ref }}"
+            exit 1
+          fi

@@ -1,0 +1,422 @@
+syntax = "proto3";
+
+// The meshp device control protocol.
+//
+// This is the single most expensive thing in the system to change: agents in
+// the field will be older than the server, sometimes by a year. Rules:
+//
+//   1. Never remove or renumber a field. Reserve it.
+//   2. Never change a field's meaning. Add a new field.
+//   3. Every additive change must keep an N-2 agent working against an N
+//      server. meshp-testlab enforces this nightly.
+//
+// See docs/adr/0008-incremental-lazily-scoped-state.md
+package meshp.v1;
+
+option go_package = "github.com/meshpnet/meshp/proto/gen/meshp/v1;meshpv1";
+
+// ---------------------------------------------------------------------------
+// Channel envelopes
+//
+// The control channel is one long-lived duplex stream (WebSocket in v0). It
+// carries configuration, signalling and telemetry. It never carries user
+// traffic — see Invariant 2.
+// ---------------------------------------------------------------------------
+
+message ClientMessage {
+  oneof payload {
+    ClientHello hello = 1;
+    StateAck state_ack = 2;
+    SignalEnvelope signal = 3;
+    PathReport path_report = 4;
+    ReachabilityReport reachability_report = 5;
+    Heartbeat heartbeat = 6;
+  }
+}
+
+message ServerMessage {
+  oneof payload {
+    ServerHello hello = 1;
+    StateDelta state_delta = 2;
+    SignalEnvelope signal = 3;
+    Command command = 4;
+    HeartbeatAck heartbeat_ack = 5;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session establishment
+// ---------------------------------------------------------------------------
+
+message ClientHello {
+  // Long-lived Ed25519 device identity, distinct from any WireGuard key so
+  // that WireGuard keys can rotate without re-enrolment (ADR-0006).
+  bytes identity_public_key = 1;
+
+  // Signature over the server-issued challenge, proving possession of the
+  // identity private key.
+  bytes challenge_signature = 2;
+  bytes challenge = 3;
+
+  string agent_version = 4;
+  string os = 5;
+  string os_version = 6;
+  string hostname = 7;
+
+  // Which network membership this session is for. A device may hold several
+  // concurrent memberships, each with its own WireGuard interface and key
+  // (ADR-0004).
+  string membership_id = 8;
+
+  // Highest state version this agent has fully applied. The server sends a
+  // delta from here when it can, and a full snapshot when it cannot.
+  uint64 applied_state_version = 9;
+
+  AgentCapabilities capabilities = 10;
+}
+
+message AgentCapabilities {
+  bool ipv6 = 1;
+  bool kernel_wireguard = 2;
+  bool packet_filter = 3;   // can enforce port-level ACLs locally (ADR-0007)
+  bool can_advertise_routes = 4;
+  bool can_egress = 5;      // willing to act as an exit advertiser
+  bool local_failover = 6;  // understands candidate lists (ADR-0003)
+  bool split_dns = 7;
+}
+
+message ServerHello {
+  string session_id = 1;
+  string membership_id = 2;
+  string network_id = 3;
+
+  // Addresses assigned by IPAM. Stable for the lifetime of the membership.
+  repeated string addresses = 4;  // CIDR form, e.g. "100.90.0.7/32", "fd7c::7/128"
+
+  uint64 current_state_version = 5;
+
+  // True when the server is about to send a full snapshot rather than a delta.
+  bool snapshot_follows = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Desired state
+//
+// The server computes desired state; the agent converges toward it and
+// acknowledges the version it applied (Invariant 14). Deltas are scoped: an
+// agent is only sent peers its ACLs permit it to reach.
+// ---------------------------------------------------------------------------
+
+message StateDelta {
+  uint64 from_version = 1;  // 0 means this is a full snapshot
+  uint64 to_version = 2;
+
+  repeated Peer upsert_peers = 3;
+  repeated string remove_peer_keys = 4;  // WireGuard public keys, base64
+
+  // Present only when changed since from_version.
+  DnsConfig dns = 5;
+  PacketFilter filter = 6;
+  repeated RouteGroupAssignment route_groups = 7;
+  repeated string removed_route_group_ids = 8;
+  RelayConfig relays = 9;
+  TunnelConfig tunnel = 10;
+}
+
+message StateAck {
+  uint64 applied_version = 1;
+  // Set when the agent could not fully apply the state. The server keeps the
+  // previous version as authoritative and surfaces this in the dashboard
+  // rather than silently assuming convergence.
+  string error = 2;
+  repeated string unapplied_components = 3;
+}
+
+message Peer {
+  string public_key = 1;         // base64 WireGuard public key
+  repeated string allowed_ips = 2;
+  string preshared_key = 3;      // optional, per peer pair
+
+  // Endpoints the agent may try for a direct path, best first. Empty means
+  // relay-only for this peer.
+  repeated string endpoints = 4;
+
+  uint32 persistent_keepalive_seconds = 5;
+
+  // Relay to use until (or unless) a direct path is established. meshp is
+  // relay-first: connectivity never depends on hole punching succeeding
+  // (ADR-0002).
+  string relay_id = 6;
+
+  string device_name = 7;   // display only
+  repeated string tags = 8; // display and ACL context only; never authoritative
+}
+
+message TunnelConfig {
+  uint32 mtu = 1;
+
+  // Prefixes that must NOT enter the tunnel even when a default route is
+  // claimed: the exit's own endpoint, the physical default gateway, LAN,
+  // link-local, DHCP and mDNS. Getting this list wrong produces a routing
+  // loop, so the server computes it and the agent does not improvise.
+  repeated string excluded_prefixes = 2;
+
+  // Fail closed: while a default route is claimed and the tunnel is down, the
+  // agent blocks non-tunnel egress (ADR-0011).
+  bool fail_closed = 3;
+}
+
+message DnsConfig {
+  repeated string nameservers = 1;
+  repeated string search_domains = 2;
+
+  // Per-domain routing. Domains not listed fall through to the system
+  // resolver.
+  message Route {
+    string domain = 1;
+    repeated string nameservers = 2;
+  }
+  repeated Route routes = 3;
+
+  // Block plaintext DNS outside the tunnel while a default route is claimed.
+  bool prevent_leaks = 4;
+}
+
+// Compiled ACL. The control plane owns the policy document; the agent receives
+// only the rules it must enforce. Enforced at the destination so a compromised
+// client cannot bypass it (ADR-0007).
+message PacketFilter {
+  message Rule {
+    repeated string src_prefixes = 1;
+    repeated string dst_prefixes = 2;
+    string protocol = 3;       // "tcp" | "udp" | "icmp" | "any"
+    repeated string ports = 4; // "22", "8000-8100"
+    bool allow = 5;
+  }
+  repeated Rule inbound = 1;
+  repeated Rule outbound = 2;
+  bool default_deny = 3;
+}
+
+message RelayConfig {
+  message Relay {
+    string id = 1;
+    string region = 2;
+    repeated string endpoints = 3;
+    bytes public_key = 4;
+  }
+  repeated Relay relays = 1;
+  string preferred_relay_id = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Route groups
+//
+// One primitive covers internet egress, subnet routers and service gateways: a
+// prefix, plus an ordered set of pre-authorised advertisers (ADR-0001).
+// 0.0.0.0/0 is an exit; 192.168.1.0/24 is a subnet router.
+// ---------------------------------------------------------------------------
+
+message RouteGroupAssignment {
+  string route_group_id = 1;
+  string name = 2;
+  repeated string prefixes = 3;
+
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_FAILOVER = 1;  // ordered preference, first live candidate wins
+    MODE_PINNED = 2;    // never move; used when egress IP is allowlisted
+  }
+  Mode mode = 4;
+
+  // Ordered candidates, best first. Every candidate here is already authorised
+  // by policy AND has this device in its own WireGuard peer list, so the agent
+  // can switch without a control-plane round trip (ADR-0003). The server owns
+  // the set and the order; the agent decides only which are alive.
+  repeated RouteCandidate candidates = 5;
+
+  LocalFailoverPolicy local_failover = 6;
+
+  // Set when the group's egress address survives failover via a floating IP.
+  // Customers who allowlist an outbound IP depend on this.
+  string stable_egress_ip = 7;
+}
+
+message RouteCandidate {
+  string advertiser_id = 1;
+  string peer_public_key = 2;
+  uint32 priority = 3;  // lower is preferred
+  uint32 weight = 4;
+
+  enum Health {
+    HEALTH_UNSPECIFIED = 0;
+    HEALTH_HEALTHY = 1;
+    HEALTH_DEGRADED = 2;
+    HEALTH_UNHEALTHY = 3;
+    HEALTH_DRAINING = 4;  // keep existing users, take no new ones
+    HEALTH_OFFLINE = 5;
+  }
+  // The server's view. The agent's own probe result takes precedence for
+  // liveness; this is advice, not an order.
+  Health server_health = 5;
+
+  string region = 6;
+  string city = 7;
+  string display_name = 8;
+}
+
+message LocalFailoverPolicy {
+  bool enabled = 1;
+  uint32 probe_interval_ms = 2;
+  uint32 fail_threshold = 3;     // consecutive failures before moving on
+  uint32 recover_threshold = 4;  // consecutive successes before coming back
+  uint32 min_hold_seconds = 5;   // hysteresis: floor on time between switches
+
+  // Probe several diverse targets and require a quorum. A single target
+  // measures that target's path, not the exit's health.
+  repeated string probe_targets = 6;
+  uint32 probe_quorum = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Signalling
+//
+// ICE candidate exchange rides the control channel; there is no separate
+// signalling service. This is first-class from v0 because retrofitting it is
+// what makes NAT traversal an afterthought.
+// ---------------------------------------------------------------------------
+
+message SignalEnvelope {
+  string from_membership_id = 1;
+  string to_membership_id = 2;
+  string session_token = 3;  // correlates an offer/answer exchange
+
+  oneof payload {
+    IceOffer offer = 4;
+    IceAnswer answer = 5;
+    IceCandidates candidates = 6;
+    PathGiveUp give_up = 7;
+  }
+}
+
+message IceOffer {
+  repeated IceCandidate candidates = 1;
+  bytes ufrag = 2;
+  bytes pwd = 3;
+  bool supports_ipv6 = 4;
+}
+
+message IceAnswer {
+  repeated IceCandidate candidates = 1;
+  bytes ufrag = 2;
+  bytes pwd = 3;
+  bool accepted = 4;
+  string reject_reason = 5;
+}
+
+message IceCandidates {
+  repeated IceCandidate candidates = 1;
+}
+
+message IceCandidate {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_HOST = 1;
+    KIND_SERVER_REFLEXIVE = 2;
+    KIND_PORT_MAPPED = 3;  // discovered via UPnP / NAT-PMP / PCP
+    KIND_RELAY = 4;
+  }
+  Kind kind = 1;
+  string address = 2;
+  uint32 port = 3;
+  uint32 priority = 4;
+  string transport = 5;  // "udp" for now
+}
+
+message PathGiveUp {
+  string reason = 1;  // stay on the relay for this peer
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry
+//
+// Client-observed reachability is a first-class health input. A node can pass
+// every self-check while its forwarding is broken; the devices actually using
+// it are the only sensors that see what users see.
+// ---------------------------------------------------------------------------
+
+message PathReport {
+  message PeerPath {
+    string peer_public_key = 1;
+    enum Kind {
+      KIND_UNSPECIFIED = 0;
+      KIND_DIRECT = 1;
+      KIND_RELAY = 2;
+      KIND_DOWN = 3;
+    }
+    Kind kind = 2;
+    uint32 rtt_ms = 3;
+    string relay_id = 4;
+    uint64 tx_bytes = 5;
+    uint64 rx_bytes = 6;
+    int64 last_handshake_unix = 7;
+  }
+  repeated PeerPath paths = 1;
+  uint32 discovered_mtu = 2;
+}
+
+message ReachabilityReport {
+  string route_group_id = 1;
+  string advertiser_id = 2;  // the candidate this device is currently using
+  bool reachable = 3;
+  uint32 rtt_ms = 4;
+  uint32 consecutive_failures = 5;
+  repeated string failed_probe_targets = 6;
+
+  // Set when the agent moved itself between candidates. The server records the
+  // reason and emits an audit event rather than treating it as drift.
+  string switched_from_advertiser_id = 7;
+  string switch_reason = 8;
+}
+
+message Heartbeat {
+  uint64 applied_state_version = 1;
+  int64 sent_at_unix_ms = 2;
+}
+
+message HeartbeatAck {
+  uint64 current_state_version = 1;
+  int64 server_time_unix_ms = 2;
+  // Set when the server has newer state; the agent asks for a delta.
+  bool state_available = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+message Command {
+  oneof payload {
+    Revoke revoke = 1;
+    Reconnect reconnect = 2;
+    CollectDiagnostics collect_diagnostics = 3;
+  }
+}
+
+// Revocation must take effect on the device even though the authoritative
+// enforcement is removing it from every peer's allowed list.
+message Revoke {
+  string reason = 1;
+  bool wipe_local_state = 2;
+}
+
+message Reconnect {
+  string reason = 1;
+  uint32 after_ms = 2;
+}
+
+message CollectDiagnostics {
+  string upload_url = 1;
+  // Diagnostics are only ever uploaded after the user consents locally.
+  bool require_user_consent = 2;
+}

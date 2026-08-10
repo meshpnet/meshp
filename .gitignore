@@ -1,0 +1,38 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Generated protobuf Go code (run `make proto`)
+/proto/gen/
+
+# Generated database code (run `make sqlc`)
+/internal/store/gen/
+
+# Local environment
+.env
+.env.local
+*.local.yaml
+
+# Web
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# Local state written by meshpd during development
+/.meshp-state/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local assistant and agent configuration — never part of the project
+CLAUDE.md
+.claude/
+.cursor/
+.aider*
+.continue/
