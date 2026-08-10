@@ -1,0 +1,61 @@
+# Extended fuzzing, nightly.
+#
+# Pull requests run seed corpora only, which is fast and catches regressions but
+# finds nothing new. This job spends real time on each target and, when it finds
+# an input, uploads it. Anything found here should be committed to
+# testdata/fuzz/<Target>/ so the seed run keeps checking it forever.
+
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC, off the top of the hour to avoid the crowd
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "How long to fuzz each target"
+        required: false
+        default: "10m"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: ./internal/ipam
+            target: FuzzAllocatorOperations
+          - pkg: ./internal/health
+            target: FuzzMonitor
+          - pkg: ./internal/routes
+            target: FuzzSelect
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: fuzz
+        run: |
+          make fuzz \
+            PKG=${{ matrix.pkg }} \
+            FUZZ=${{ matrix.target }} \
+            TIME=${{ github.event.inputs.duration || '10m' }}
+
+      # Go writes any failing input under testdata/fuzz. Keep it even when the
+      # job fails, since the failing input is the entire point.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: failure()
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: |
+            **/testdata/fuzz/**
+          retention-days: 30
+          if-no-files-found: warn

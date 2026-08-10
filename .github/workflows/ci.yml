@@ -1,3 +1,12 @@
+# Actions are pinned to commit SHAs rather than tags. A tag is a movable
+# reference: whoever controls the action repository can change what `@v7` points
+# at, and CI runs with a token that can read this repository. For a networking
+# product that is not a theoretical concern. Dependabot keeps the pins current —
+# see .github/dependabot.yml.
+#
+# Every job carries a timeout. On a free organisation, private repositories share
+# 2,000 Actions minutes a month, and a single hung job can quietly eat the lot.
+
 name: ci
 
 on:
@@ -12,61 +21,140 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  GO_VERSION: "1.25"
+
 jobs:
-  go:
-    name: build and test
+  lint:
+    name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
-      - run: go vet ./...
+      - run: make lint
+
+  test:
+    name: test and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
       - run: make build
-      - run: make test
       - name: binaries report their version
+        run: for b in meshp meshpd meshp-control meshp-relay; do ./bin/$b --version; done
+
+      - name: test with the race detector
+        run: make test
+
+      # The packages that decide addressing and where traffic goes are gated, not
+      # merely measured. Everything else is reported for information.
+      - name: coverage floors
         run: |
-          ./bin/meshp --version
-          ./bin/meshpd --version
-          ./bin/meshp-control --version
-          ./bin/meshp-relay --version
+          {
+            echo "### Coverage"
+            echo
+            echo '```'
+            make cover-check
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # Invariant 12: the open core must not depend on the commercial layer.
-  standalone:
-    name: standalone core
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: total coverage
+        run: |
+          make cover
+          echo "total: $(go tool cover -func=cover.out | tail -1 | awk '{print $3}')" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
         with:
-          go-version: "1.24"
-          cache: true
-      - run: make standalone-check
+          name: coverage
+          path: cover.out
+          retention-days: 7
 
-  # The wire protocol is the most expensive thing to change once agents are
-  # deployed. Lint it, and refuse changes that break compatibility with main.
-  proto:
-    name: protocol
+  cross:
+    name: cross compile
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Go cross-compiles pure Go cleanly, so one Linux runner catches almost
+      # every platform break at a fraction of the cost of a native matrix —
+      # macOS runners bill at ten times the rate. Native runners become necessary
+      # once there is platform code that must actually run: WireGuard interface
+      # manipulation, firewall rules, DNS integration. There is none yet, and
+      # this comment is here so that adding it does not go unnoticed.
+      #
+      # ios/arm64 is absent because it requires cgo and an Xcode toolchain. It is
+      # compiled by the meshp-ios repository.
+      - name: every shipping platform compiles
+        run: |
+          {
+            echo "### Cross compilation"
+            echo
+            echo '```'
+            make cross
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  proto:
+    name: protocol compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.24"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
-      - run: make proto
+
       - name: lint
         run: go run github.com/bufbuild/buf/cmd/buf@v1.47.2 lint
-      - name: no breaking changes against main
+
+      # Agents in the field are older than the server, sometimes by a year. A
+      # field that is removed or renumbered breaks every one of them, so this is
+      # a hard gate rather than advice.
+      - name: no changes that break deployed agents
         if: github.event_name == 'pull_request'
-        run: go run github.com/bufbuild/buf/cmd/buf@v1.47.2 breaking --against '.git#branch=origin/main'
+        run: |
+          git fetch --no-tags origin ${{ github.base_ref }}
+          go run github.com/bufbuild/buf/cmd/buf@v1.47.2 breaking \
+            --against ".git#branch=origin/${{ github.base_ref }}"
+
+      # Generated bindings are committed (ADR-0013), so the only thing that can go
+      # wrong is drift: a .proto edited without regenerating, or generated code
+      # edited by hand. Regenerating and diffing catches both.
+      - name: committed bindings match the protos
+        run: |
+          make proto
+          if ! git diff --exit-code -- proto/; then
+            echo
+            echo "proto/gen is out of date. run 'make proto' and commit the result."
+            exit 1
+          fi
+          echo "committed bindings match"
+
+      - name: generated code compiles
+        run: go build ./... && go vet ./...
 
   migrations:
-    name: migrations apply
+    name: migrations
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
@@ -79,46 +167,137 @@ jobs:
           --health-cmd "pg_isready -U meshp -d meshp"
           --health-interval 3s --health-timeout 3s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - name: apply every migration in order
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: apply, roll back and re-apply
         env:
-          PGPASSWORD: meshp
+          MESHP_TEST_DATABASE_URL: postgres://meshp:meshp@localhost:5432/meshp?sslmode=disable
         run: |
-          for f in migrations/*.sql; do
-            echo "applying $f"
-            # Strip goose directives so the file applies with plain psql too.
-            sed '/^-- +goose Down/,$d' "$f" \
-              | psql -h localhost -U meshp -d meshp -v ON_ERROR_STOP=1
-          done
-      - name: schema is non-empty
-        env:
-          PGPASSWORD: meshp
+          chmod +x scripts/migrate-check.sh
+          {
+            echo "### Migrations"
+            echo
+            echo '```'
+            make migrate-check
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  migrations-immutable:
+    name: migrations are append only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      # Editing a migration that has already been merged means databases that ran
+      # the old version and databases that ran the new one disagree, with nothing
+      # recording which is which. New behaviour goes in a new file.
+      #
+      # This runs on pull requests only. Before the first tagged release no
+      # database anywhere has run these migrations, so a maintainer pushing
+      # directly to main may still amend them — and did, once, to move 'draining'
+      # out of advertiser_health. From v0.1.0 onward that stops being true and
+      # this check is the whole of the policy.
+      - name: no edits to already-merged migrations
         run: |
-          count=$(psql -h localhost -U meshp -d meshp -tAc \
-            "select count(*) from information_schema.tables where table_schema='public'")
-          echo "tables: $count"
-          test "$count" -ge 20
+          git fetch --no-tags origin ${{ github.base_ref }}
+          changed=$(git diff --name-only --diff-filter=MDR \
+            "origin/${{ github.base_ref }}...HEAD" -- migrations/ || true)
+          if [ -n "$changed" ]; then
+            echo "these migrations already exist on ${{ github.base_ref }} and must not be changed:"
+            echo "$changed" | sed 's/^/  /'
+            echo
+            echo "add a new migration instead."
+            exit 1
+          fi
+          echo "no existing migrations were modified"
+
+  standalone:
+    name: core builds standalone
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # Invariant 12. The commercial layer talks to this over HTTP and is never
+      # linked into it, so self-hosters run exactly the binary we run.
+      - run: make standalone-check
+
+  vuln:
+    name: vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: make vuln
+
+  fuzz-seeds:
+    name: fuzz seed corpora
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # Seeds only, which is fast. Extended fuzzing runs nightly in fuzz.yml, and
+      # any input it finds is committed here as a seed so it can never regress.
+      - run: make fuzz-seeds
 
   dco:
     name: dco sign-off
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: every commit is signed off
         run: |
+          git fetch --no-tags origin ${{ github.base_ref }}
           missing=0
           while read -r sha; do
-            if ! git log -1 --format=%B "$sha" | grep -qi '^Signed-off-by: .\+ <.\+@.\+>'; then
+            if ! git log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
               echo "missing Signed-off-by: $(git log -1 --oneline "$sha")"
               missing=1
             fi
-          done < <(git rev-list origin/${{ github.base_ref }}..HEAD)
+          done < <(git rev-list "origin/${{ github.base_ref }}..HEAD")
           if [ "$missing" -ne 0 ]; then
             echo
-            echo "Sign commits with 'git commit -s'. To fix history:"
+            echo "sign commits with 'git commit -s', or fix history with:"
             echo "  git rebase --signoff origin/${{ github.base_ref }}"
             exit 1
           fi
+          echo "all commits are signed off"
+
+  # A single check for branch protection to require. Without this, protection has
+  # to name every job, and renaming or adding one silently stops being enforced.
+  ci-required:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [lint, test, cross, proto, migrations, migrations-immutable, standalone, vuln, fuzz-seeds, dco]
+    steps:
+      - name: report
+        run: |
+          echo "results: ${{ join(needs.*.result, ', ') }}"
+          # Skipped is acceptable: the pull-request-only jobs do not run on pushes
+          # to main. Failure and cancellation are not.
+          if echo "${{ join(needs.*.result, ',') }}" | grep -qE 'failure|cancelled'; then
+            echo "at least one required job did not pass"
+            exit 1
+          fi
+          echo "all required jobs passed"

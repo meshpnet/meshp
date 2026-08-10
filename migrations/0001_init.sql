@@ -313,10 +313,19 @@ CREATE INDEX route_advertisers_group_idx ON route_advertisers (route_group_id, p
 
 CREATE TABLE advertiser_health (
     advertiser_id   uuid PRIMARY KEY REFERENCES route_advertisers (id) ON DELETE CASCADE,
+    -- Observed health only. 'draining' and 'disabled' are administrative states
+    -- and live on route_advertisers.admin_state; keeping them out of here means
+    -- an operator draining a node and a health check observing it cannot race
+    -- to write the same column. Whether an advertiser may be selected is a
+    -- function of both, computed at selection time.
     state           text NOT NULL DEFAULT 'unknown'
-                    CHECK (state IN ('unknown', 'healthy', 'degraded', 'unhealthy', 'draining', 'offline')),
+                    CHECK (state IN ('unknown', 'healthy', 'degraded', 'unhealthy', 'offline')),
     consecutive_ok  integer NOT NULL DEFAULT 0,
     consecutive_fail integer NOT NULL DEFAULT 0,
+    consecutive_partial integer NOT NULL DEFAULT 0,
+    -- Improvements are rate limited to stop flapping; degradations are not,
+    -- because being slow to distrust a broken node is the expensive direction.
+    last_improved_at timestamptz,
     -- Health is a fusion of the node's self-report, the control plane's probe
     -- and what client agents actually observe through it. The last of these is
     -- the only one that measures what users experience.

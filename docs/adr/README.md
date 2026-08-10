@@ -21,6 +21,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0010](0010-mobile-clients.md) | Mobile clients wrap the official WireGuard tunnel libraries and are relay-only |
 | [0011](0011-fail-closed.md) | Full-tunnel devices fail closed |
 | [0012](0012-presence-and-bus-interface.md) | Presence and pub/sub sit behind an interface with in-memory and Redis implementations |
+| [0013](0013-commit-generated-code.md) | Generated protobuf and database code is committed |
 
 ## Format
 

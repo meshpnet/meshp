@@ -1,0 +1,97 @@
+name: Bug report
+description: Something behaves differently from how it is documented or intended.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        meshp is pre-alpha and much of it is unimplemented. If a command exits
+        saying it is not implemented yet, that is expected rather than a bug.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part is misbehaving? All meshp repositories file here, so this is how issues get routed.
+      options:
+        - meshpd (device agent)
+        - meshp (CLI)
+        - meshp-control (control plane)
+        - meshp-relay
+        - Web dashboard
+        - iOS client
+        - Android client
+        - Addressing / IPAM
+        - Route groups, egress or failover
+        - Policy / ACL
+        - DNS
+        - Self-hosting, Docker or migrations
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `meshp --version`, or the commit you built from.
+      placeholder: meshp 0.1.0 (f253f11) linux/amd64 go1.24.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options: [Linux, macOS, Windows, Android, iOS, Docker, Kubernetes]
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Include the exact error, not a paraphrase of it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up
+        2. meshp join <token>
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics
+      description: |
+        Output of `meshp doctor`, which collects routes, DNS state, MTU, firewall
+        rules, tunnel status and the applied configuration version. It is worth
+        far more than a description of the symptom. Check it for anything you
+        would rather not publish before pasting.
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: This is not a security vulnerability. (Those go through a private advisory.)
+          required: true

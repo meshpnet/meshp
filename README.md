@@ -15,12 +15,16 @@
 
 ## Status
 
-**Pre-alpha. Nothing works end to end yet.** This repository currently contains
-the schema, the device protocol, the architectural decision records and the
-binary skeletons. It is public from the first commit because the design
-decisions are the interesting part and we would rather be argued with early.
+**Pre-alpha. Nothing works end to end yet.** What exists is the schema, the device
+protocol, the decision records, and the logic that decides addressing and where
+traffic goes — IPAM, advertiser health, and route-group selection, all tested.
+What does not exist is everything that moves a packet: no WireGuard, no relay, no
+control channel. The four binaries build and report their version.
 
-Do not deploy this. Watch the repo or read [`docs/adr/`](docs/adr/) instead.
+It is public from the first commit because the design decisions are the
+interesting part and we would rather be argued with early.
+
+Do not deploy this. Read [`docs/adr/`](docs/adr/) instead.
 
 ## What it is
 
@@ -66,7 +70,7 @@ architecture makes up for it yet.
 
 ## Quick start
 
-Requires Go 1.24+, Docker and Node 20+.
+Requires Go 1.25+, Docker and Node 20+.
 
 ```bash
 git clone https://github.com/meshpnet/meshp.git
@@ -79,11 +83,33 @@ docker compose up
 `http://localhost:8080/healthz` should answer. Nothing else does yet.
 
 ```bash
-make help              # every available target
-make test              # unit tests
-make proto             # regenerate Go from proto/
-make standalone-check  # verify the core has no proprietary dependencies
+make help    # every available target
+make ci      # everything CI runs, except the jobs that need Postgres
 ```
+
+## How this is tested
+
+The claims in [`docs/INVARIANTS.md`](docs/INVARIANTS.md) are meant to be checked
+by machines, not asserted in a README. So the interesting tests are properties
+rather than examples:
+
+| Invariant | How it is checked |
+|---|---|
+| An unhealthy advertiser gets no new assignments (8) | 3,000 randomised combinations of health and administrative state, asserting nothing failing, disabled, or draining-for-someone-else is ever offered |
+| Failover never flaps (10) | Randomised observation sequences asserting no advertiser's health may improve twice inside one cooldown, plus a simulated hour of an advertiser breaking and recovering as fast as it can be observed |
+| An address is not reissued immediately after release (17) | A model-based test running an allocator against a naive shadow implementation, checking every rule after every operation |
+| Selection is deterministic | Shuffling the input 200 times must not change the output — a weak comparator would otherwise leak Go's randomised map order onto the wire |
+| Capacity changes are minimally disruptive | 10,000 devices: removing 1 of 5 advertisers must move ~1/5 of them and leave the rest untouched |
+
+Anything that depends on elapsed time uses an injected clock, so a test for "does
+not fail back for five minutes" takes microseconds and actually proves something.
+Three fuzz targets run their seed corpora on every pull request and get real time
+nightly.
+
+Two of these tests have already earned their place. The minimal-disruption test
+caught a hash whose distribution was skewed enough that adding one advertiser to
+four moved half the fleet instead of a fifth. The IPAM model test independently
+found an allocation sweep that reported a full pool while an address was free.
 
 ## Architecture
 

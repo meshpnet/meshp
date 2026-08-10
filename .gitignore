@@ -5,11 +5,11 @@
 *.test
 *.out
 
-# Generated protobuf Go code (run `make proto`)
-/proto/gen/
-
-# Generated database code (run `make sqlc`)
-/internal/store/gen/
+# Generated code IS committed — see docs/adr/0013-commit-generated-code.md.
+# `go build ./...` and `go install` have to work on a fresh clone, and the
+# protocol package is meant to be imported by meshp-sdk and the mobile clients.
+# CI verifies that regenerating produces no diff, so committed output cannot
+# drift from its source.
 
 # Local environment
 .env

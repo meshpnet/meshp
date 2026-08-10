@@ -1,0 +1,60 @@
+name: Feature request
+description: Something meshp should do that it does not.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The roadmap and the reasoning behind the current design live in
+        [docs/adr](https://github.com/meshpnet/meshp/tree/main/docs/adr). If a
+        request conflicts with a decision recorded there, say so — an argument
+        against an ADR is more useful to us than a request that works around it.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - Device agent
+        - CLI
+        - Control plane
+        - Relay
+        - Web dashboard
+        - Mobile clients
+        - Addressing / IPAM
+        - Route groups, egress or failover
+        - Policy / ACL
+        - DNS
+        - Self-hosting and operations
+        - Multi-tenancy / managed service provider features
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the feature. What are you doing today, and what goes wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like meshp to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried or considered?
+      description: Including whether another tool already does this well.
+
+  - type: input
+    id: scale
+    attributes:
+      label: Scale
+      description: Roughly how many devices, networks and users? It changes which answers are reasonable.
+      placeholder: 3 networks, 60 devices, one office gateway

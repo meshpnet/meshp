@@ -1,0 +1,24 @@
+# Review ownership.
+#
+# Deliberately a person rather than a team for now: a CODEOWNERS entry naming a
+# team that does not exist shows as a warning on every pull request. Replace these
+# with @meshpnet/core and @meshpnet/mobile once the teams are created.
+
+*                       @aswinsam
+
+# The two things that are expensive to get wrong and hard to fix afterwards: the
+# wire protocol, which deployed agents depend on, and the schema, which live
+# databases depend on.
+/proto/                 @aswinsam
+/migrations/            @aswinsam
+
+# Security-relevant surfaces.
+/internal/acl/          @aswinsam
+/internal/ipam/         @aswinsam
+/internal/routes/       @aswinsam
+/docs/INVARIANTS.md     @aswinsam
+/docs/adr/              @aswinsam
+
+# CI is a supply-chain surface: it runs with a token that can read this
+# repository, and it is where pinned action SHAs live.
+/.github/workflows/     @aswinsam

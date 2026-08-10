@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/version"
 )
 
@@ -59,7 +60,10 @@ func main() {
 func run(ctx context.Context, log *slog.Logger, adminAddr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"status":"ok","version":%q}`+"\n", version.Version())
+		httpx.WriteJSON(w, log, http.StatusOK, map[string]string{
+			"status":  "ok",
+			"version": version.Version(),
+		})
 	})
 
 	srv := &http.Server{

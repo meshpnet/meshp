@@ -1,0 +1,14 @@
+# Every meshp repository routes its issues here. Twelve trackers would mean users
+# guessing which one to use and maintainers triaging in twelve places, so the
+# satellite repositories have Issues disabled and point at this one.
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/meshpnet/meshp/discussions
+    about: How do I…, is this supposed to…, would you consider… — all welcome here.
+  - name: Security vulnerability
+    url: https://github.com/meshpnet/meshp/security/advisories/new
+    about: Report privately. Please do not open a public issue for a vulnerability.
+  - name: Architecture decisions
+    url: https://github.com/meshpnet/meshp/tree/main/docs/adr
+    about: Why things work the way they do. Disagreement with an ADR is welcome as a discussion.

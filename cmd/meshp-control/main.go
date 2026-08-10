@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/version"
 )
 
@@ -66,26 +67,26 @@ func run(ctx context.Context, log *slog.Logger, addr string) error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","version":%q}`+"\n", version.Version())
+		httpx.WriteJSON(w, log, http.StatusOK, map[string]string{
+			"status":  "ok",
+			"version": version.Version(),
+		})
 	})
 
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if !ready.Load() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, `{"status":"not_ready","reason":"subsystems not registered"}`+"\n")
+			httpx.Error(w, log, http.StatusServiceUnavailable,
+				"not_ready", "subsystems are not registered yet")
 			return
 		}
-		fmt.Fprint(w, `{"status":"ready"}`+"\n")
+		httpx.WriteJSON(w, log, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
 	// The device control channel and the versioned admin API mount here. The
 	// admin API is the only interface the commercial layer is permitted to use.
-	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprint(w, `{"error":"not_implemented"}`+"\n")
+	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+		httpx.Error(w, log, http.StatusNotImplemented,
+			"not_implemented", "no handler for "+r.Method+" "+r.URL.Path)
 	})
 
 	srv := &http.Server{

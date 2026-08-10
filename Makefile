@@ -1,12 +1,14 @@
 # meshp — development makefile
 #
-# Tool versions are pinned here so CI and laptops agree. Tools are fetched on
-# demand with `go run`; nothing needs to be installed globally except Go,
-# Docker and Node.
+# CI calls these targets rather than reimplementing them in YAML, so anything
+# that fails on a pull request fails the same way on a laptop. Tool versions are
+# pinned here and fetched on demand with `go run`; nothing needs installing
+# globally except Go, Docker and Node.
 
 BUF_VERSION      := v1.47.2
 SQLC_VERSION     := v1.27.0
-GOLANGCI_VERSION := v1.62.2
+GOLANGCI_VERSION := v2.12.2
+GOVULN_VERSION   := v1.6.0
 
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -15,10 +17,25 @@ LDFLAGS  := -X github.com/meshpnet/meshp/internal/version.version=$(VERSION) \
 
 BINARIES := meshp meshpd meshp-control meshp-relay
 
+# Every platform meshp ships on, minus iOS: ios/arm64 needs cgo and an Xcode
+# toolchain, so it is compiled by meshp-ios rather than here. A target dropping
+# off this list is a platform we have quietly stopped supporting.
+CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
+                 darwin/amd64 darwin/arm64 \
+                 windows/amd64 windows/arm64 \
+                 freebsd/amd64 android/arm64
+
+# Packages carrying an invariant. These hold the logic that decides addressing
+# and where traffic goes, so their coverage is a gate rather than a statistic.
+COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes
+COVER_FLOOR      := 90
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
-		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+
+## --- build ----------------------------------------------------------------
 
 .PHONY: build
 build: $(addprefix bin/,$(BINARIES)) ## Build all four binaries
@@ -27,21 +44,84 @@ bin/%:
 	@mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/$*
 
+.PHONY: cross
+cross: ## Verify every shipping platform still compiles
+	@fail=0; \
+	for t in $(CROSS_TARGETS); do \
+	  os=$${t%/*}; arch=$${t#*/}; \
+	  if GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -o /dev/null ./... 2>/dev/null; then \
+	    printf "  %-16s ok\n" "$$t"; \
+	  else \
+	    printf "  %-16s FAILED\n" "$$t"; fail=1; \
+	  fi; \
+	done; \
+	exit $$fail
+
+.PHONY: clean
+clean:
+	rm -rf bin dist cover.out proto/gen internal/store/gen
+
+## --- test -----------------------------------------------------------------
+
 .PHONY: test
-test: ## Run unit tests
+test: ## Run unit tests with the race detector
 	go test ./... -race -count=1
 
+.PHONY: cover
+cover: ## Run tests with coverage and print the total
+	go test ./... -covermode=atomic -coverprofile=cover.out -count=1
+	@go tool cover -func=cover.out | tail -1
+
+.PHONY: cover-check
+cover-check: ## Fail if an invariant-bearing package drops below the floor
+	@fail=0; \
+	for pkg in $(COVER_FLOOR_PKGS); do \
+	  pct=$$(go test ./$$pkg/ -cover -count=1 2>/dev/null | sed -n 's/.*coverage: \([0-9.]*\)%.*/\1/p'); \
+	  if [ -z "$$pct" ]; then printf "  %-22s no coverage reported\n" "$$pkg"; fail=1; continue; fi; \
+	  if [ "$$(awk -v p=$$pct -v f=$(COVER_FLOOR) 'BEGIN{print (p+0>=f+0)}')" = "1" ]; then \
+	    printf "  %-22s %6s%%  ok\n" "$$pkg" "$$pct"; \
+	  else \
+	    printf "  %-22s %6s%%  below the %s%% floor\n" "$$pkg" "$$pct" "$(COVER_FLOOR)"; fail=1; \
+	  fi; \
+	done; \
+	exit $$fail
+
+.PHONY: fuzz-seeds
+fuzz-seeds: ## Run every fuzz target against its seed corpus (fast)
+	go test ./... -run '^Fuzz' -count=1
+
+.PHONY: fuzz
+fuzz: ## Fuzz one target: make fuzz PKG=./internal/ipam FUZZ=FuzzAllocatorOperations TIME=60s
+	@test -n "$(PKG)" -a -n "$(FUZZ)" || { echo "usage: make fuzz PKG=./internal/ipam FUZZ=FuzzX [TIME=60s]"; exit 2; }
+	go test $(PKG) -run '^$$' -fuzz '^$(FUZZ)$$' -fuzztime $(or $(TIME),60s)
+
+## --- lint and generate ----------------------------------------------------
+
+.PHONY: fmt
+fmt: ## Format all Go code
+	gofmt -w .
+
+.PHONY: fmt-check
+fmt-check: ## Fail if any Go file is not gofmt clean
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then echo "not gofmt clean:"; echo "$$unformatted" | sed 's/^/  /'; exit 1; fi; \
+	echo "  all files are gofmt clean"
+
 .PHONY: lint
-lint: ## Run golangci-lint and go vet
+lint: fmt-check ## Run go vet and golangci-lint
 	go vet ./...
-	go run github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_VERSION) run
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run
+
+.PHONY: vuln
+vuln: ## Check dependencies and stdlib against the Go vulnerability database
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULN_VERSION) ./...
 
 .PHONY: proto
-proto: ## Generate Go code from proto/ (ADR-0008)
+proto: ## Generate Go code from proto/
 	go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION) generate
 
 .PHONY: proto-lint
-proto-lint: ## Lint protos and check backwards compatibility against main
+proto-lint: ## Lint protos and reject changes that break deployed agents
 	go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION) lint
 	go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION) breaking --against '.git#branch=main'
 
@@ -52,23 +132,31 @@ sqlc: ## Generate type-safe database access from migrations/ and queries/
 .PHONY: generate
 generate: proto sqlc ## Run all code generation
 
+## --- invariants -----------------------------------------------------------
+
+.PHONY: standalone-check
+standalone-check: ## Invariant 12: the core must not depend on the commercial layer
+	@if grep -rn --include='*.go' 'meshpnet/meshp-cloud' . ; then \
+	  echo "FAIL: the open core imports meshp-cloud"; exit 1; \
+	fi
+	@echo "  no proprietary imports"
+
+.PHONY: migrate-check
+migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TEST_DATABASE_URL
+	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
+	@./scripts/migrate-check.sh "$(MESHP_TEST_DATABASE_URL)"
+
+## --- aggregate ------------------------------------------------------------
+
+.PHONY: ci
+ci: lint standalone-check build cross test cover-check fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
+	@echo
+	@echo "  all local CI checks passed"
+
 .PHONY: dev
-dev: ## Bring up Postgres and meshp-control
+dev: ## Bring up Postgres, the control plane and a relay
 	docker compose up --build
 
 .PHONY: dev-down
 dev-down: ## Tear down the dev stack and its volumes
 	docker compose down -v
-
-.PHONY: standalone-check
-standalone-check: ## ADR-0009: the OSS core must build and test with no proprietary deps
-	@! grep -rn --include='*.go' 'meshpnet/meshp-cloud' . \
-		|| (echo "FAIL: OSS core imports meshp-cloud"; exit 1)
-	@echo "OK: no proprietary imports"
-
-.PHONY: license-boundary
-license-boundary: standalone-check ## Alias kept for CI readability
-
-.PHONY: clean
-clean:
-	rm -rf bin dist proto/gen internal/store/gen
