@@ -259,7 +259,13 @@ jobs:
     name: dco sign-off
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request'
+    # Bots do not sign off, and their pull requests only ever touch dependency
+    # manifests. Demanding a sign-off from them would leave every Dependabot pull
+    # request permanently red, which trains everyone to ignore a red check.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -268,12 +274,16 @@ jobs:
         run: |
           git fetch --no-tags origin ${{ github.base_ref }}
           missing=0
+          # --no-merges matters. For a pull_request event, HEAD is a merge commit
+          # GitHub synthesises to preview the result; nobody authored it and
+          # nobody can sign it off. Merges a contributor makes themselves are
+          # skipped for the same reason: they carry no content to attest to.
           while read -r sha; do
             if ! git log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
               echo "missing Signed-off-by: $(git log -1 --oneline "$sha")"
               missing=1
             fi
-          done < <(git rev-list "origin/${{ github.base_ref }}..HEAD")
+          done < <(git rev-list --no-merges "origin/${{ github.base_ref }}..HEAD")
           if [ "$missing" -ne 0 ]; then
             echo
             echo "sign commits with 'git commit -s', or fix history with:"
