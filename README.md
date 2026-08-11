@@ -166,22 +166,33 @@ it is not a fork and it does not unlock features that are disabled here.
 
 Related repositories:
 
-| Repo | What |
-|---|---|
-| [`meshp`](https://github.com/meshpnet/meshp) | this one — agent, CLI, control plane, relay |
-| `meshp-ios` | iOS client |
-| `meshp-android` | Android client |
-| `meshp-testlab` | network-namespace conformance suite, including NAT types and failover |
-| `meshp-sdk` | generated API clients |
-| `meshp-web` | website and documentation |
+| Repo | What | Status |
+|---|---|---|
+| [`meshp`](https://github.com/meshpnet/meshp) | this one — agent, CLI, control plane, relay | public |
+| `meshp-ios` | iOS client | not started |
+| `meshp-android` | Android client | not started |
+| `meshp-testlab` | network-namespace conformance suite, including NAT types and failover | not started |
+| `meshp-sdk` | generated API clients | not started |
+| `meshp-web` | website and documentation | private, empty |
 
-Issues and discussions for **all** of these live in this repository.
+Issues and discussions for **all** of these live in this repository — the
+satellite repositories have their issue trackers disabled on purpose, so there is
+one place to look rather than twelve.
 
 ## Contributing
 
 Read [`docs/adr/`](docs/adr/) first — if you disagree with a decision there,
-that disagreement is more valuable to us than a patch. Contributions require a
-DCO sign-off (`git commit -s`).
+that disagreement is more valuable to us than a patch.
+
+```bash
+make ci        # everything the pull request will check, minus the Postgres jobs
+git commit -s  # sign-off is required and enforced
+```
+
+`main` is protected: changes arrive by pull request, the aggregate `ci` check has
+to pass, and force-pushes and deletions are refused. Branches must be current with
+`main` before merging, so expect to rebase rather than merge. Squash and rebase
+merges only — history stays linear.
 
 ## Security
 
