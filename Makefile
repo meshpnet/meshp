@@ -160,3 +160,8 @@ dev: ## Bring up Postgres, the control plane and a relay
 .PHONY: dev-down
 dev-down: ## Tear down the dev stack and its volumes
 	docker compose down -v
+
+.PHONY: protect
+protect: ## Apply branch and tag protection: make protect REPO=meshp
+	@test -n "$(REPO)" || { echo "usage: make protect REPO=meshp [ENFORCEMENT=active|disabled]"; exit 2; }
+	@./scripts/protect-repo.sh "$(REPO)" $(or $(ENFORCEMENT),active)
