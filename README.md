@@ -15,14 +15,18 @@
 
 ## Status
 
-**Pre-alpha. Nothing works end to end yet.** What exists is the schema, the device
-protocol, the decision records, the logic that decides addressing and where traffic
-goes — IPAM, advertiser health, route-group selection — and a control plane that
-connects to PostgreSQL, applies its own schema and reports honest readiness.
+**Pre-alpha. No packet has ever crossed a meshp network.** A device can now be
+enrolled — it gets an identity, a WireGuard key and an address, and a replayed token
+is refused — but nothing brings up a tunnel yet.
 
-What does not exist is everything that moves a packet: no WireGuard, no relay, no
-control channel, no enrolment. `meshp-control` starts and serves health endpoints;
-`meshpd` idles; the CLI tells you which commands are not implemented yet.
+What exists: the schema, the device protocol, the decision records, the logic that
+decides addressing and where traffic goes (IPAM, advertiser health, route-group
+selection), a control plane that applies its own schema and reports honest
+readiness, and enrolment end to end.
+
+What does not: WireGuard, the relay, the control channel, policy enforcement, DNS.
+`meshpd` still idles. `meshp status` reports a membership and says `(not up)`,
+because it is not.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
@@ -79,15 +83,48 @@ Requires Go 1.25+, Docker and Node 20+.
 git clone https://github.com/meshpnet/meshp.git
 cd meshp
 cp .env.example .env
+
+# Both are required. The control plane refuses to start without a secret key, and
+# leaves the administrative API switched off without an admin token.
+echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)" >> .env
+echo "MESHP_ADMIN_TOKEN=$(openssl rand -base64 32)" >> .env
+
 make build
-docker compose up
+docker compose up -d
 ```
 
-`http://localhost:8080/healthz` should answer. Nothing else does yet.
+Then enrol a device. There is no `network create` command yet, so the network and
+its address pools are seeded with SQL:
+
+```bash
+NETWORK=$(docker compose exec -T postgres psql -U meshp -d meshp -tAqc "
+  WITH o AS (INSERT INTO organizations (slug,name) VALUES ('acme','Acme') RETURNING id),
+       n AS (INSERT INTO networks (organization_id,slug,name) SELECT id,'hq','HQ' FROM o RETURNING id),
+       p AS (INSERT INTO address_pools (network_id,prefix,family,purpose)
+             SELECT id,'100.90.0.0/24'::cidr,4,'device' FROM n
+             UNION ALL SELECT id,'fd7c:6d65:7368::/120'::cidr,6,'device' FROM n
+             RETURNING network_id)
+  SELECT DISTINCT network_id FROM p")
+
+TOKEN=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_uses":1,"expires_in_seconds":600}' \
+  "http://localhost:8080/api/v1/networks/$NETWORK/enrollment-tokens" \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+sudo ./bin/meshp join "$TOKEN" --state-dir /var/lib/meshp
+sudo ./bin/meshp status --state-dir /var/lib/meshp
+```
+
+`join` needs write access to the state directory because it writes the device's
+private keys there. That moves behind meshpd's local socket shortly — keys belong to
+the privileged daemon, not to whoever runs the CLI.
 
 ```bash
 make help    # every available target
 make ci      # everything CI runs, except the jobs that need Postgres
+make e2e     # enrol a device against a real database, start to finish
 ```
 
 ## How this is tested

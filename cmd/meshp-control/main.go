@@ -5,8 +5,8 @@
 // device, device to relay, or device to route advertiser (Invariant 2).
 //
 // It also must build and run with no reference to any proprietary component. The
-// commercial layer talks to this process over its HTTP API and is never linked
-// into it (Invariant 12, enforced by `make standalone-check`).
+// commercial layer talks to this process over its HTTP API and is never linked into
+// it (Invariant 12, enforced by `make standalone-check`).
 package main
 
 import (
@@ -22,6 +22,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/api"
+	"github.com/meshpnet/meshp/internal/clock"
+	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/store"
 	"github.com/meshpnet/meshp/internal/version"
@@ -33,6 +36,8 @@ func main() {
 		showVersion = flag.Bool("version", false, "print build information and exit")
 		listenAddr  = flag.String("listen", envOr("MESHP_LISTEN_ADDR", ":8080"), "address to listen on")
 		databaseURL = flag.String("database-url", os.Getenv("MESHP_DATABASE_URL"), "PostgreSQL connection string")
+		secretKey   = flag.String("secret-key", os.Getenv("MESHP_SECRET_KEY"), "master secret for enrolment challenges and sessions")
+		adminToken  = flag.String("admin-token", os.Getenv("MESHP_ADMIN_TOKEN"), "bootstrap secret for the administrative API")
 		skipMigrate = flag.Bool("skip-migrations", envBool("MESHP_SKIP_MIGRATIONS"),
 			"do not apply migrations at startup; readiness still requires the schema to be current")
 		logLevel = flag.String("log-level", envOr("MESHP_LOG_LEVEL", "info"), "debug, info, warn or error")
@@ -46,41 +51,77 @@ func main() {
 
 	log := newLogger(*logLevel)
 
-	// A missing database URL is a configuration mistake rather than a transient
-	// condition, so it fails now and loudly. An unreachable database is the
-	// opposite: it is retried, because a control plane that exits when PostgreSQL
-	// restarts turns a brief database blip into an outage that needs a human.
+	// Missing configuration is a mistake rather than a transient condition, so it
+	// fails now and loudly. An unreachable database is the opposite and is retried.
 	if *databaseURL == "" {
 		log.Error("no database configured", "hint", "set MESHP_DATABASE_URL or pass --database-url")
+		os.Exit(2)
+	}
+	if len(*secretKey) < 16 {
+		log.Error("no usable secret key",
+			"hint", "set MESHP_SECRET_KEY to at least 16 bytes; generate one with: openssl rand -base64 32")
+		os.Exit(2)
+	}
+	if *adminToken == "" {
+		// Running with the administrative API switched off is a legitimate
+		// configuration, but it is not what most operators intend, so say so once.
+		log.Warn("administrative API disabled: MESHP_ADMIN_TOKEN is not set",
+			"effect", "enrolment tokens cannot be minted over HTTP")
+	} else if len(*adminToken) < 24 {
+		log.Error("administrative token is too short",
+			"hint", "MESHP_ADMIN_TOKEN should be at least 24 characters of randomness")
 		os.Exit(2)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, *listenAddr, *databaseURL, *skipMigrate); err != nil {
+	cfg := runConfig{
+		addr:        *listenAddr,
+		databaseURL: *databaseURL,
+		secretKey:   []byte(*secretKey),
+		adminToken:  *adminToken,
+		skipMigrate: *skipMigrate,
+	}
+	if err := run(ctx, log, cfg); err != nil {
 		log.Error("meshp-control exited with error", "error", err)
 		os.Exit(1)
 	}
 	log.Info("meshp-control stopped cleanly")
 }
 
-func run(ctx context.Context, log *slog.Logger, addr, databaseURL string, skipMigrate bool) error {
-	// The store is published once it is connected and migrated. Until then the
-	// process is alive but not ready, which is exactly what an orchestrator needs
-	// to know: keep it running, send it no traffic.
+type runConfig struct {
+	addr        string
+	databaseURL string
+	secretKey   []byte
+	adminToken  string
+	skipMigrate bool
+}
+
+func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
+	// The served handler is swapped once the database is ready. Until then only the
+	// probes answer, so the API cannot be reached half-initialised — an enrolment
+	// against a store that does not exist yet would be a nil dereference, and a
+	// control plane that panics on its first request is worse than one that says
+	// "not yet".
+	var handler atomic.Pointer[http.Handler]
 	var current atomic.Pointer[store.Store]
 
+	var bootstrap http.Handler = probeMux(log, &current)
+	handler.Store(&bootstrap)
+
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           newMux(log, &current),
+		Addr: cfg.addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			(*handler.Load()).ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", addr)
+		log.Info("listening", "addr", cfg.addr)
 		err := srv.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
@@ -91,19 +132,36 @@ func run(ctx context.Context, log *slog.Logger, addr, databaseURL string, skipMi
 	// Connecting happens alongside serving rather than before it, so the liveness
 	// probe answers while the database is still coming up.
 	go func() {
-		s, err := connect(ctx, log, databaseURL, skipMigrate)
+		st, err := connect(ctx, log, cfg)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Error("giving up connecting to the database", "error", err)
 			}
 			return
 		}
-		current.Store(s)
+		current.Store(st)
+
+		challenger, err := enroll.NewChallenger(cfg.secretKey, enroll.DefaultChallengeTTL, clock.System{})
+		if err != nil {
+			log.Error("could not derive the enrolment challenge key", "error", err)
+			return
+		}
+		apiServer := api.New(st, enroll.NewService(st, challenger, clock.System{}, log), api.Config{
+			AdminToken: cfg.adminToken,
+			Clock:      clock.System{},
+			Log:        log,
+		})
+
+		mux := probeMux(log, &current)
+		apiServer.Routes(mux)
+		var full http.Handler = mux
+		handler.Store(&full)
+		log.Info("api serving", "admin_enabled", cfg.adminToken != "")
 	}()
 
 	defer func() {
-		if s := current.Load(); s != nil {
-			s.Close()
+		if st := current.Load(); st != nil {
+			st.Close()
 		}
 	}()
 
@@ -120,7 +178,7 @@ func run(ctx context.Context, log *slog.Logger, addr, databaseURL string, skipMi
 
 // connect opens the store and applies migrations, retrying while the database is
 // unreachable. It returns only once it has succeeded or ctx is done.
-func connect(ctx context.Context, log *slog.Logger, databaseURL string, skipMigrate bool) (*store.Store, error) {
+func connect(ctx context.Context, log *slog.Logger, cfg runConfig) (*store.Store, error) {
 	const (
 		initialBackoff = 500 * time.Millisecond
 		maxBackoff     = 15 * time.Second
@@ -128,14 +186,14 @@ func connect(ctx context.Context, log *slog.Logger, databaseURL string, skipMigr
 
 	backoff := initialBackoff
 	for attempt := 1; ; attempt++ {
-		s, err := open(ctx, log, databaseURL, skipMigrate)
+		st, err := open(ctx, log, cfg)
 		if err == nil {
-			return s, nil
+			return st, nil
 		}
 
-		// A schema mismatch is not going to fix itself by waiting: either the
-		// migrations were edited after being applied, or this binary is older than
-		// the database. Both need a person.
+		// A schema mismatch will not fix itself by waiting: either the migrations were
+		// edited after being applied, or this binary is older than the database. Both
+		// need a person.
 		if errors.Is(err, store.ErrSchemaModified) || errors.Is(err, store.ErrMigrationOutOfOrder) {
 			return nil, err
 		}
@@ -157,24 +215,23 @@ func connect(ctx context.Context, log *slog.Logger, databaseURL string, skipMigr
 	}
 }
 
-func open(ctx context.Context, log *slog.Logger, databaseURL string, skipMigrate bool) (*store.Store, error) {
-	s, err := store.Open(ctx, store.DefaultConfig(databaseURL), migrations.FS, log)
+func open(ctx context.Context, log *slog.Logger, cfg runConfig) (*store.Store, error) {
+	st, err := store.Open(ctx, store.DefaultConfig(cfg.databaseURL), migrations.FS, log)
 	if err != nil {
 		return nil, err
 	}
 
-	if skipMigrate {
+	if cfg.skipMigrate {
 		log.Info("skipping migrations at operator request")
 	} else {
-		res, err := s.Migrate(ctx)
+		res, err := st.Migrate(ctx)
 		if err != nil {
-			s.Close()
+			st.Close()
 			return nil, err
 		}
-		switch {
-		case res.AlreadyAtHead:
+		if res.AlreadyAtHead {
 			log.Info("schema is current", "version", res.Version)
-		default:
+		} else {
 			for _, m := range res.Applied {
 				log.Info("migration applied", "version", m.Version, "name", m.Name)
 			}
@@ -182,22 +239,23 @@ func open(ctx context.Context, log *slog.Logger, databaseURL string, skipMigrate
 		}
 	}
 
-	// Readiness is not assumed from a successful migration: an operator running
-	// with --skip-migrations against an older database must still be told no.
-	if h := s.Health(ctx); !h.Ready() {
-		s.Close()
+	// Readiness is not assumed from a successful migration: an operator running with
+	// --skip-migrations against an older database must still be told no.
+	if h := st.Health(ctx); !h.Ready() {
+		st.Close()
 		return nil, fmt.Errorf("database is not usable: %s", h.Error)
 	}
 	log.Info("control plane ready")
-	return s, nil
+	return st, nil
 }
 
-func newMux(log *slog.Logger, current *atomic.Pointer[store.Store]) *http.ServeMux {
+// probeMux builds a mux carrying only the health endpoints.
+func probeMux(log *slog.Logger, current *atomic.Pointer[store.Store]) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Liveness. This answers as long as the process is running, whatever the
-	// database is doing — restarting a control plane because PostgreSQL is slow
-	// makes an outage worse, not better.
+	// Liveness. Answers as long as the process is running, whatever the database is
+	// doing — restarting a control plane because PostgreSQL is slow makes an outage
+	// worse, not better.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.WriteJSON(w, log, http.StatusOK, map[string]string{
 			"status":  "ok",
@@ -205,11 +263,11 @@ func newMux(log *slog.Logger, current *atomic.Pointer[store.Store]) *http.ServeM
 		})
 	})
 
-	// Readiness. Reports the database and schema state, because "not ready" with
-	// no reason is useless to whoever is paged.
+	// Readiness. Reports the database and schema state, because "not ready" with no
+	// reason is useless to whoever is paged.
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		s := current.Load()
-		if s == nil {
+		st := current.Load()
+		if st == nil {
 			httpx.Error(w, log, http.StatusServiceUnavailable,
 				"connecting", "still connecting to the database")
 			return
@@ -217,7 +275,7 @@ func newMux(log *slog.Logger, current *atomic.Pointer[store.Store]) *http.ServeM
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 
-		h := s.Health(ctx)
+		h := st.Health(ctx)
 		status := http.StatusOK
 		if !h.Ready() {
 			status = http.StatusServiceUnavailable
@@ -225,11 +283,9 @@ func newMux(log *slog.Logger, current *atomic.Pointer[store.Store]) *http.ServeM
 		httpx.WriteJSON(w, log, status, h)
 	})
 
-	// The device control channel and the versioned admin API mount here. The admin
-	// API is the only interface the commercial layer is permitted to use.
 	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
-		httpx.Error(w, log, http.StatusNotImplemented,
-			"not_implemented", "no handler for "+r.Method+" "+r.URL.Path)
+		httpx.Error(w, log, http.StatusServiceUnavailable,
+			"not_ready", "the control plane is still starting up")
 	})
 
 	return mux
