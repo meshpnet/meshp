@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/meshpnet/meshp/internal/logx"
 )
 
 // Handler is what the daemon implements to answer the CLI.
@@ -216,10 +218,12 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.handler.Join(r.Context(), req)
 	if err != nil {
-		// The daemon's own refusals and the control plane's are both reported here. The
-		// text comes from the control plane where there is one, because "that token has
-		// expired" is what the person at the terminal needs.
-		s.log.Info("join refused", "error", err)
+		// The daemon's own refusals and the control plane's are both reported here, and
+		// the text comes from the control plane where there is one — "that token has
+		// expired" is what the person at the terminal needs. It is also written by a
+		// server an agent can be pointed at, so it is bounded before it reaches a log.
+		s.log.Info("join refused",
+			"error", logx.SafeError(err), "control_url", logx.Safe(req.ControlURL))
 		s.fail(w, http.StatusBadGateway, "join_failed", err.Error())
 		return
 	}
