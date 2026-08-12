@@ -33,7 +33,7 @@ COVER_FLOOR      := 90
 # Packages whose tests need a real PostgreSQL. Their floor is checked separately,
 # because in a run without a database their tests skip and the coverage figure
 # would be meaningless rather than merely low.
-COVER_FLOOR_DB_PKGS := internal/store internal/enroll
+COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api
 COVER_FLOOR_DB      := 75
 
 .PHONY: help
@@ -177,6 +177,11 @@ standalone-check: ## Invariant 12: the core must not depend on the commercial la
 	  echo "FAIL: the open core imports meshp-cloud"; exit 1; \
 	fi
 	@echo "  no proprietary imports"
+
+.PHONY: e2e
+e2e: build ## Enrol a device end to end against MESHP_TEST_DATABASE_URL
+	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
+	@./scripts/e2e-enrol.sh "$(MESHP_TEST_DATABASE_URL)"
 
 .PHONY: migrate-check
 migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TEST_DATABASE_URL

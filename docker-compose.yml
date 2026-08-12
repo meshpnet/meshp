@@ -35,6 +35,9 @@ services:
       MESHP_LISTEN_ADDR: ":8080"
       MESHP_CONTROL_URL: ${MESHP_CONTROL_URL:-http://localhost:8080}
       MESHP_SECRET_KEY: ${MESHP_SECRET_KEY:-dev-only-insecure-key-change-me}
+      # Empty by default, which leaves the administrative API switched off. Set it
+      # in .env to mint enrolment tokens.
+      MESHP_ADMIN_TOKEN: ${MESHP_ADMIN_TOKEN:-}
       MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
       MESHP_LOG_FORMAT: ${MESHP_LOG_FORMAT:-text}
       MESHP_DEFAULT_ULA_PREFIX: ${MESHP_DEFAULT_ULA_PREFIX:-fd7c:6d65:7368::/48}
