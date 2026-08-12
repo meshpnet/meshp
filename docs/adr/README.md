@@ -22,6 +22,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0011](0011-fail-closed.md) | Full-tunnel devices fail closed |
 | [0012](0012-presence-and-bus-interface.md) | Presence and pub/sub sit behind an interface with in-memory and Redis implementations |
 | [0013](0013-commit-generated-code.md) | Generated protobuf and database code is committed |
+| [0014](0014-hand-written-migration-runner.md) | A hand-written migration runner that checksums what it applied |
 
 ## Format
 

@@ -30,8 +30,20 @@ Generated code is committed:
 
 The generators remain the source of truth. CI regenerates and fails if the result
 differs from what is committed, so the tree cannot drift from the `.proto` and
-`.sql` files it came from. Generator versions are pinned in the Makefile, which
-is what makes that check deterministic.
+`.sql` files it came from.
+
+**Every generator must be pinned, including the plugins a generator invokes.** The
+check is only meaningful if regeneration is deterministic, and the first version of
+this setup was not: `buf` itself was pinned in the Makefile while `buf.gen.yaml`
+named `remote: buf.build/protocolbuffers/go` with no version. Bindings were
+committed by protoc-gen-go v1.36.11 and CI regenerated them with v1.36.12 hours
+later, so a pull request that touched no `.proto` at all failed on a one-line
+version comment. A gate that fails for reasons unrelated to the change is a gate
+people learn to ignore.
+
+`protoc-gen-go` is therefore invoked locally through `go tool`, so its version is
+whatever `go.mod` pins — one number, visible to Dependabot, and necessarily the
+same version as the protobuf runtime the generated code is compiled against.
 
 ## Consequences
 

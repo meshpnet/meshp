@@ -30,6 +30,12 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes
 COVER_FLOOR      := 90
 
+# Packages whose tests need a real PostgreSQL. Their floor is checked separately,
+# because in a run without a database their tests skip and the coverage figure
+# would be meaningless rather than merely low.
+COVER_FLOOR_DB_PKGS := internal/store
+COVER_FLOOR_DB      := 75
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -37,10 +43,21 @@ help: ## Show this help
 
 ## --- build ----------------------------------------------------------------
 
+# Everything a binary is built from. Without prerequisites the bin/% rule is
+# considered up to date the moment the file exists, so `make build` silently stops
+# rebuilding after the first run and hands you a stale binary — which is exactly
+# what happened while wiring up the store. Declaring the targets .PHONY instead
+# does not work: make will not apply a pattern rule to a phony target, so nothing
+# builds at all.
+#
+# The .sql files are inputs too, because migrations are embedded into the binary.
+BUILD_INPUTS := $(shell find cmd internal migrations proto -name '*.go' -o -name '*.sql' 2>/dev/null) \
+                go.mod $(wildcard go.sum)
+
 .PHONY: build
 build: $(addprefix bin/,$(BINARIES)) ## Build all four binaries
 
-bin/%:
+bin/%: $(BUILD_INPUTS)
 	@mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/$*
 
@@ -82,6 +99,26 @@ cover-check: ## Fail if an invariant-bearing package drops below the floor
 	    printf "  %-22s %6s%%  ok\n" "$$pkg" "$$pct"; \
 	  else \
 	    printf "  %-22s %6s%%  below the %s%% floor\n" "$$pkg" "$$pct" "$(COVER_FLOOR)"; fail=1; \
+	  fi; \
+	done; \
+	exit $$fail
+
+.PHONY: integration
+integration: ## Run the tests that need PostgreSQL (set MESHP_TEST_DATABASE_URL)
+	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
+	go test ./... -race -count=1
+
+.PHONY: cover-check-db
+cover-check-db: ## Coverage floor for packages that need PostgreSQL
+	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
+	@fail=0; \
+	for pkg in $(COVER_FLOOR_DB_PKGS); do \
+	  pct=$$(go test ./$$pkg/ -cover -count=1 2>/dev/null | sed -n 's/.*coverage: \([0-9.]*\)%.*/\1/p'); \
+	  if [ -z "$$pct" ]; then printf "  %-22s no coverage reported\n" "$$pkg"; fail=1; continue; fi; \
+	  if [ "$$(awk -v p=$$pct -v f=$(COVER_FLOOR_DB) 'BEGIN{print (p+0>=f+0)}')" = "1" ]; then \
+	    printf "  %-22s %6s%%  ok\n" "$$pkg" "$$pct"; \
+	  else \
+	    printf "  %-22s %6s%%  below the %s%% floor\n" "$$pkg" "$$pct" "$(COVER_FLOOR_DB)"; fail=1; \
 	  fi; \
 	done; \
 	exit $$fail
