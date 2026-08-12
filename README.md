@@ -21,12 +21,13 @@ is refused — but nothing brings up a tunnel yet.
 
 What exists: the schema, the device protocol, the decision records, the logic that
 decides addressing and where traffic goes (IPAM, advertiser health, route-group
-selection), a control plane that applies its own schema and reports honest
-readiness, and enrolment end to end.
+selection), a control plane that applies its own schema and reports honest readiness,
+enrolment end to end, and a control channel — an agent holds a session, receives
+desired state and acknowledges the version it applied.
 
-What does not: WireGuard, the relay, the control channel, policy enforcement, DNS.
-`meshpd` still idles. `meshp status` reports a membership and says `(not up)`,
-because it is not.
+What does not: WireGuard, the relay, policy enforcement, DNS. An agent now knows about
+its peers and has no way to reach them. `meshp status` says `(not up)` because it is
+not.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
@@ -113,13 +114,17 @@ TOKEN=$(curl -fsS -X POST \
   "http://localhost:8080/api/v1/networks/$NETWORK/enrollment-tokens" \
   | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 
-sudo ./bin/meshp join "$TOKEN" --state-dir /var/lib/meshp
-sudo ./bin/meshp status --state-dir /var/lib/meshp
+sudo ./bin/meshpd &                # holds the keys and the sessions
+sudo ./bin/meshp join "$TOKEN"
+sudo ./bin/meshp status
 ```
 
-`join` needs write access to the state directory because it writes the device's
-private keys there. That moves behind meshpd's local socket shortly — keys belong to
-the privileged daemon, not to whoever runs the CLI.
+`meshp` is a thin client: every command that touches a key or the network stack is a
+request to `meshpd` over a local unix socket, and the daemon is what generates and
+stores key material. Both commands need `sudo` because that socket is owner-only by
+default — anything able to reach it can enrol this device and, once tunnels exist,
+decide where its traffic goes. `meshpd --socket-group <group>` relaxes that to a
+group, which is a privilege grant and should be read as one.
 
 ```bash
 make help    # every available target

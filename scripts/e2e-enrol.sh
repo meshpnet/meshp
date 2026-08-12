@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 #
-# The A2 gate, end to end, with the real binaries:
+# Enrolment and the control channel, end to end, with the real binaries:
 #
+#   meshpd comes up with no state at all and is still usable
 #   a token is minted over the administrative API
-#   `meshp join` enrols and is given an address
-#   the keys land with restrictive permissions
-#   `meshp status` reports the membership
+#   `meshp join` asks the daemon, which is what generates the keys
+#   the keys land with restrictive permissions, written by the daemon
+#   `meshp status` reports a live session, and says the tunnel is not up
 #   the same token is refused a second time
-#   the enrolment is in the audit trail
-#   no private key appears in the server's output
+#   the agent converges: applied version catches up with the network's
+#   the session is cleared when the agent exits
+#   no private key material appears where it should not
 #
 # Usage: e2e-enrol.sh <postgres-url>
 #
-# The unit tests cover each of these against a library. This covers the thing a
-# person actually runs, which is where the wiring mistakes are — the flag parsing,
-# the file modes, the exit codes.
+# The unit tests cover each of these against a library. This covers what a person
+# actually runs, which is where the wiring mistakes are — flag parsing, file modes,
+# socket permissions, exit codes.
 set -euo pipefail
 
 DB_URL="${1:?usage: e2e-enrol.sh <postgres-url>}"
@@ -23,21 +25,34 @@ BASE="http://127.0.0.1:${PORT}"
 ADMIN_TOKEN="e2e-administrative-token-not-a-secret"
 SECRET_KEY="e2e-deployment-secret-not-a-secret"
 
-WORK="$(mktemp -d)"
-LOG="$WORK/control.log"
-STATE_A="$WORK/device-a"
-STATE_B="$WORK/device-b"
+# Short paths on purpose: a unix socket path has a hard limit near 100 bytes, and mktemp
+# under a long temporary root can exceed it — which fails with "invalid argument" and no
+# hint about why.
+WORK="$(mktemp -d /tmp/mpe2e.XXXXXX)"
+CONTROL_LOG="$WORK/control.log"
+AGENT_LOG="$WORK/meshpd.log"
+STATE_DIR="$WORK/state"
+SOCKET="$WORK/d.sock"
 CONTROL_PID=""
+AGENT_PID=""
 
 cleanup() {
+  [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2>/dev/null || true
   [ -n "$CONTROL_PID" ] && kill "$CONTROL_PID" 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; echo "--- control plane log ---" >&2; cat "$LOG" >&2 || true; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  echo "--- control plane log ---" >&2; cat "$CONTROL_LOG" >&2 2>/dev/null || true
+  echo "--- agent log ---" >&2; cat "$AGENT_LOG" >&2 2>/dev/null || true
+  exit 1
+}
 
-for binary in ./bin/meshp ./bin/meshp-control; do
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+for binary in ./bin/meshp ./bin/meshpd ./bin/meshp-control; do
   [ -x "$binary" ] || fail "$binary is missing; run make build"
 done
 
@@ -46,18 +61,41 @@ MESHP_DATABASE_URL="$DB_URL" \
 MESHP_LISTEN_ADDR="127.0.0.1:${PORT}" \
 MESHP_SECRET_KEY="$SECRET_KEY" \
 MESHP_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  ./bin/meshp-control >"$LOG" 2>&1 &
+  ./bin/meshp-control >"$CONTROL_LOG" 2>&1 &
 CONTROL_PID=$!
 
 for _ in $(seq 1 30); do
-  if curl -fsS "${BASE}/readyz" >/dev/null 2>&1; then break; fi
+  curl -fsS "${BASE}/readyz" >/dev/null 2>&1 && break
   sleep 1
 done
 curl -fsS "${BASE}/readyz" >/dev/null 2>&1 || fail "control plane never became ready"
 
+echo "starting meshpd with no state at all"
+# Deliberately before enrolment. An agent that gives up when it has nothing to do cannot
+# be joined without restarting a service, which is a paper cut people script around.
+./bin/meshpd --state-dir "$STATE_DIR" --socket "$SOCKET" --log-level debug >"$AGENT_LOG" 2>&1 &
+AGENT_PID=$!
+
+for _ in $(seq 1 30); do
+  [ -S "$SOCKET" ] && ./bin/meshp status --socket "$SOCKET" >/dev/null 2>&1 && break
+  sleep 1
+done
+./bin/meshp status --socket "$SOCKET" >"$WORK/status-before.out" 2>&1 \
+  || fail "the daemon never answered on its socket"
+grep -q 'not enrolled' "$WORK/status-before.out" \
+  || fail "an unenrolled daemon did not say so: $(cat "$WORK/status-before.out")"
+echo "  socket answers: $(head -1 "$WORK/status-before.out")"
+
+echo "the socket is owner-only"
+# A privilege boundary: anything that can reach this socket can enrol the device and,
+# once tunnels exist, decide where its traffic goes.
+socket_mode="$(mode_of "$SOCKET")"
+[ "$socket_mode" = "600" ] || fail "the socket is ${socket_mode}, want 600"
+echo "  0${socket_mode}"
+
 echo "seeding a network with address pools"
-# Explicit casts: inside a UNION the literals have no inferable type, and cidr will
-# not accept text.
+# Explicit casts: inside a UNION the literals have no inferable type, and cidr will not
+# accept text.
 NETWORK_ID="$(psql "$DB_URL" -tAqc "
   WITH o AS (INSERT INTO organizations (slug, name) VALUES ('e2e', 'End To End') RETURNING id),
        n AS (INSERT INTO networks (organization_id, slug, name) SELECT id, 'e2e', 'End To End' FROM o RETURNING id),
@@ -90,78 +128,85 @@ status="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: appli
 [ "$status" = "401" ] || fail "minting without a token returned ${status}, want 401"
 
 echo "meshp join"
-./bin/meshp join "$TOKEN" --control-url "$BASE" --state-dir "$STATE_A" --name e2e-device \
+./bin/meshp join "$TOKEN" --control-url "$BASE" --socket "$SOCKET" --name e2e-device \
   >"$WORK/join.out" 2>&1 || fail "join failed: $(cat "$WORK/join.out")"
 sed 's/^/  /' "$WORK/join.out"
-
 grep -q 'enrolled in network' "$WORK/join.out" || fail "join did not report success"
 grep -qE 'address     100\.90\.0\.' "$WORK/join.out" || fail "join reported no IPv4 address"
 
-echo "the keys are not readable by anyone else"
-file_mode="$(stat -c '%a' "$STATE_A/state.json" 2>/dev/null || stat -f '%Lp' "$STATE_A/state.json")"
-dir_mode="$(stat -c '%a' "$STATE_A" 2>/dev/null || stat -f '%Lp' "$STATE_A")"
+echo "the keys were written by the daemon, and only it can read them"
+[ -f "$STATE_DIR/state.json" ] || fail "no state file was written"
+file_mode="$(mode_of "$STATE_DIR/state.json")"
+dir_mode="$(mode_of "$STATE_DIR")"
 [ "$file_mode" = "600" ] || fail "state file is ${file_mode}, want 600"
 [ "$dir_mode" = "700" ] || fail "state directory is ${dir_mode}, want 700"
 echo "  file 0${file_mode}, directory 0${dir_mode}"
 
-echo "meshp status"
-./bin/meshp status --state-dir "$STATE_A" >"$WORK/status.out" 2>&1 || fail "status failed"
+echo "no private key crossed the socket or reached a log"
+# Invariant 1. The CLI asked the daemon to enrol; it must not have been handed anything
+# secret in return, and the control plane must never have seen one.
+if grep -qiE 'private' "$WORK/join.out"; then fail "the CLI's output mentions a private key"; fi
+priv="$(sed -n 's/.*"wireguard_private_key": *"\([^"]*\)".*/\1/p' "$STATE_DIR/state.json" | head -1)"
+[ -n "$priv" ] || fail "could not read the stored private key to check for leaks"
+if grep -qF "$priv" "$WORK/join.out"; then fail "the CLI printed the WireGuard private key"; fi
+if grep -qF "$priv" "$CONTROL_LOG"; then fail "the control plane logged the WireGuard private key"; fi
+
+echo "meshp status reports a live session"
+connected=0
+for _ in $(seq 1 30); do
+  ./bin/meshp status --socket "$SOCKET" >"$WORK/status.out" 2>&1 || true
+  if grep -q 'session     connected' "$WORK/status.out"; then connected=1; break; fi
+  sleep 1
+done
+[ "$connected" = "1" ] || fail "status never reported a connected session: $(cat "$WORK/status.out")"
 sed 's/^/  /' "$WORK/status.out"
 grep -q "$NETWORK_ID" "$WORK/status.out" || fail "status does not mention the network"
+# A membership with an address is not a working tunnel, and status must not imply it is.
+grep -q 'interface   meshp0 (not up)' "$WORK/status.out" \
+  || fail "status does not say the tunnel is down"
+
+echo "the agent converges"
+lag_zero=0
+for _ in $(seq 1 30); do
+  lag="$(psql "$DB_URL" -tAqc "
+    SELECT coalesce(max(n.state_version - ms.applied_version), -1)
+    FROM membership_state ms JOIN networks n ON n.id = ms.network_id")"
+  if [ "$lag" = "0" ]; then lag_zero=1; break; fi
+  sleep 1
+done
+[ "$lag_zero" = "1" ] || fail "applied version never caught up with the network's"
+grep -q 'control channel established' "$AGENT_LOG" || fail "the agent never established a session"
+sed -n 's/.*msg="recorded desired state" \(.*\)/  \1/p' "$AGENT_LOG" | tail -1
 
 echo "the same token a second time"
-if ./bin/meshp join "$TOKEN" --control-url "$BASE" --state-dir "$STATE_B" >"$WORK/replay.out" 2>&1; then
+if ./bin/meshp join "$TOKEN" --control-url "$BASE" --socket "$SOCKET" >"$WORK/replay.out" 2>&1; then
   fail "a replayed token was accepted"
 fi
 sed 's/^/  /' "$WORK/replay.out"
 grep -q 'already been used' "$WORK/replay.out" || fail "the replay was refused for the wrong reason"
-[ -e "$STATE_B/state.json" ] && fail "a refused join still wrote state"
 
 echo "the enrolment is in the audit trail"
 events="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM audit_events WHERE action = 'device.enrolled'")"
 [ "$events" = "1" ] || fail "${events} device.enrolled events, want 1"
 
-echo "meshpd opens a control channel and acknowledges a version"
-# The gate for the control channel: the agent authenticates with its identity key,
-# receives a snapshot and reports the version it applied, and the control plane records
-# it. Convergence lag reaching zero is the single best signal that this works.
-./bin/meshpd --state-dir "$STATE_A" --log-level debug >"$WORK/meshpd.log" 2>&1 &
-MESHPD_PID=$!
-
-converged=0
-for _ in $(seq 1 30); do
-  lag="$(psql "$DB_URL" -tAqc "
-    SELECT coalesce(min(n.state_version - ms.applied_version), -1)
-    FROM membership_state ms JOIN networks n ON n.id = ms.network_id")"
-  if [ "$lag" = "0" ]; then converged=1; break; fi
+echo "the session is cleared when the agent goes away"
+kill "$AGENT_PID" 2>/dev/null || true
+wait "$AGENT_PID" 2>/dev/null || true
+AGENT_PID=""
+cleared=0
+for _ in $(seq 1 20); do
+  rows="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM membership_state WHERE control_session_id IS NOT NULL")"
+  if [ "$rows" = "0" ]; then cleared=1; break; fi
   sleep 1
 done
-kill "$MESHPD_PID" 2>/dev/null || true
-wait "$MESHPD_PID" 2>/dev/null || true
+[ "$cleared" = "1" ] || fail "a membership is still marked connected after the agent exited"
 
-if [ "$converged" != "1" ]; then
-  echo "--- meshpd log ---" >&2
-  cat "$WORK/meshpd.log" >&2
-  fail "meshpd never converged: applied version never caught up with the network's"
-fi
-grep -q 'control channel established' "$WORK/meshpd.log" || fail "meshpd never established a session"
-grep -q 'recorded desired state' "$WORK/meshpd.log" || fail "meshpd never recorded desired state"
-sed -n 's/.*msg="recorded desired state" \(.*\)/  \1/p' "$WORK/meshpd.log" | tail -1
+# Left behind, the next start would warn about a stale socket for no reason.
+if [ -S "$SOCKET" ]; then fail "the daemon left its socket behind on exit"; fi
 
-# A session that was established must also be cleared when the agent goes away, or the
-# dashboard shows devices as connected forever.
-session_rows="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM membership_state WHERE control_session_id IS NOT NULL")"
-[ "$session_rows" = "0" ] || fail "${session_rows} membership(s) still marked as connected after meshpd exited"
-
-echo "no private key material reached the server"
-# Invariant 1, checked against the thing that would betray it: the server's own output.
-if grep -qiE 'private[_ ]?key' "$LOG"; then
-  fail "the control plane log mentions a private key"
-fi
-# And the plaintext token must not be logged either, only its identifier.
-if grep -q "$TOKEN" "$LOG"; then
-  fail "the control plane logged the plaintext token"
-fi
+echo "no private key material reached the control plane"
+if grep -qiE 'private[_ ]?key' "$CONTROL_LOG"; then fail "the control plane log mentions a private key"; fi
+if grep -qF "$TOKEN" "$CONTROL_LOG"; then fail "the control plane logged the plaintext token"; fi
 
 echo
-echo "enrolment works end to end and a replayed token is refused"
+echo "enrolment and the control channel work end to end; a replayed token is refused"

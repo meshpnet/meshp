@@ -14,26 +14,37 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/keys"
 )
 
 // Client talks to a control plane's enrolment endpoints.
 type Client struct {
 	baseURL string
+	urlErr  error
 	http    *http.Client
 }
 
 // New returns a client for a control plane at baseURL.
+//
+// An unusable URL is kept and reported when it is used rather than at construction, so a
+// caller that builds a client early still gets one error at the point it matters.
 func New(baseURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: httpClient}
+	c := &Client{http: httpClient}
+	validated, err := controlurl.Validate(baseURL)
+	if err != nil {
+		c.urlErr = err
+		return c
+	}
+	c.baseURL = validated
+	return c
 }
 
 // APIError is a refusal the control plane explained.
@@ -133,6 +144,9 @@ func (c *Client) challenge(ctx context.Context, token string, identity keys.Iden
 }
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
+	if c.urlErr != nil {
+		return c.urlErr
+	}
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("enrollclient: encoding request: %w", err)

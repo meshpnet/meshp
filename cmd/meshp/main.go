@@ -4,10 +4,8 @@
 // meshpd over a local unix socket, so a user running `meshp status` never needs
 // root.
 //
-// `meshp join` is the exception, for now: it generates the device's keys and writes
-// them to the agent's state directory itself, because meshpd does not yet expose a
-// socket to ask. That makes it the one command needing write access to the state
-// directory, and it moves behind the daemon in A3 — private keys belong to the
+// Every command that touches a key or the network stack is a request to meshpd over its
+// local socket. Nothing here generates or stores key material: that belongs to the
 // privileged process, not to whoever happens to run the CLI.
 //
 // Command grammar is noun then verb, without exception:
@@ -29,14 +27,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/meshpnet/meshp/internal/agentstate"
-	"github.com/meshpnet/meshp/internal/enrollclient"
-	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/agentapi"
+	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/version"
 )
 
@@ -152,12 +148,17 @@ func runOrDie(fn func(context.Context, []string) error, args []string) {
 	}
 }
 
-// cmdJoin enrols this device into a network.
+// cmdJoin asks the daemon to enrol this device.
+//
+// The CLI no longer generates keys or writes them: that happens in meshpd, which runs
+// as root and is where private key material belongs. An unprivileged command holding a
+// device's identity key was the shortcut this replaces.
 func cmdJoin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("meshp join", flag.ContinueOnError)
 	controlURL := fs.String("control-url", envOr("MESHP_CONTROL_URL", "http://localhost:8080"),
 		"control plane to enrol against")
-	stateDir := fs.String("state-dir", defaultStateDir(), "where to keep this device's keys")
+	socket := fs.String("socket", envOr("MESHP_SOCKET", agentapi.DefaultSocketPath),
+		"meshpd's local socket")
 	name := fs.String("name", "", "name for this device (defaults to its hostname)")
 	positional, err := parseFlags(fs, args)
 	if err != nil {
@@ -166,131 +167,85 @@ func cmdJoin(ctx context.Context, args []string) error {
 	if len(positional) != 1 {
 		return errors.New("usage: meshp join <token> [--control-url URL]")
 	}
-	token := positional[0]
 
-	// An existing identity is reused, which is what lets one device hold memberships
-	// in several networks under one name (ADR-0004). A fresh one is generated only if
-	// this device has never enrolled anywhere.
-	state, err := agentstate.Load(*stateDir)
-	switch {
-	case errors.Is(err, agentstate.ErrNotEnrolled):
-		state = &agentstate.State{}
-		identity, err := keys.NewIdentity()
-		if err != nil {
-			return err
-		}
-		state.SetIdentity(identity)
-	case err != nil:
-		return err
-	}
-
-	identity, err := state.Identity()
+	// Checked here as well as in the daemon, so a mistyped URL is reported by the command
+	// that was mistyped rather than as a failure from a service.
+	validated, err := controlurl.Validate(*controlURL)
 	if err != nil {
 		return err
 	}
 
-	// A fresh WireGuard keypair per membership, never shared between them, so two
-	// networks cannot recognise this device by its key (Invariant 19).
-	wg, err := keys.NewWireGuardPair()
-	if err != nil {
-		return err
-	}
-
-	hostname, _ := os.Hostname()
-	deviceName := *name
-	if deviceName == "" {
-		deviceName = hostname
-	}
-
-	joinCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	res, err := enrollclient.New(*controlURL, nil).Join(joinCtx, enrollclient.JoinRequest{
-		Token:        token,
-		Identity:     identity,
-		WireGuard:    wg,
-		Name:         deviceName,
-		Hostname:     hostname,
-		OS:           runtime.GOOS,
-		OSVersion:    osVersion(),
-		AgentVersion: version.Version(),
+	client := agentapi.NewClient(*socket, 2*time.Minute)
+	res, err := client.Join(ctx, agentapi.JoinRequest{
+		Token:      positional[0],
+		ControlURL: validated,
+		Name:       *name,
 	})
 	if err != nil {
-		return err
-	}
-
-	membership := agentstate.Membership{
-		MembershipID:        res.MembershipID,
-		NetworkID:           res.NetworkID,
-		DeviceID:            res.DeviceID,
-		ControlURL:          *controlURL,
-		InterfaceName:       res.InterfaceName,
-		WireGuardPrivateKey: wg.Private.String(),
-		WireGuardPublicKey:  wg.Public.String(),
-		AppliedStateVersion: 0,
-		JoinedAt:            time.Now().UTC(),
-	}
-	if res.AddressV4 != nil {
-		membership.AddressV4 = res.AddressV4.String()
-	}
-	if res.AddressV6 != nil {
-		membership.AddressV6 = res.AddressV6.String()
-	}
-	state.AddMembership(membership)
-
-	if err := agentstate.Save(*stateDir, state); err != nil {
-		// The enrolment succeeded server-side but the keys could not be kept, which
-		// leaves a device registered that cannot prove who it is. Say so plainly
-		// rather than reporting success.
-		return fmt.Errorf("enrolled, but could not save this device's keys: %w\n"+
-			"  the device now exists in the network and must be revoked, then enrolled again\n"+
-			"  try a writable --state-dir, or run with sudo", err)
+		return describeDaemonError(err, *socket)
 	}
 
 	fmt.Printf("enrolled in network %s\n", res.NetworkID)
 	fmt.Printf("  device      %s\n", res.DeviceID)
 	fmt.Printf("  interface   %s\n", res.InterfaceName)
-	if res.AddressV4 != nil {
+	if res.AddressV4 != "" {
 		fmt.Printf("  address     %s\n", res.AddressV4)
 	}
-	if res.AddressV6 != nil {
+	if res.AddressV6 != "" {
 		fmt.Printf("              %s\n", res.AddressV6)
 	}
-	fmt.Printf("  keys        %s\n", agentstate.Path(*stateDir))
 	fmt.Println()
 	fmt.Println("No tunnel yet: meshpd does not bring up WireGuard in this build.")
 	fmt.Println("This device is registered and holds an address; nothing routes to it so far.")
 	return nil
 }
 
-// cmdStatus reports what this device knows locally.
-//
-// Local state only, deliberately. It has to work when the control plane is
-// unreachable (Invariant 15), which is exactly when somebody wants to run it.
-func cmdStatus(_ context.Context, args []string) error {
+// cmdStatus reports what the daemon is doing.
+func cmdStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("meshp status", flag.ContinueOnError)
-	stateDir := fs.String("state-dir", defaultStateDir(), "where this device's keys are kept")
+	socket := fs.String("socket", envOr("MESHP_SOCKET", agentapi.DefaultSocketPath),
+		"meshpd's local socket")
 	if _, err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
-	state, err := agentstate.Load(*stateDir)
-	if errors.Is(err, agentstate.ErrNotEnrolled) {
-		fmt.Println("not enrolled")
-		fmt.Printf("  run 'meshp join <token>' to join a network (state dir: %s)\n", *stateDir)
-		return nil
-	}
+	status, err := agentapi.NewClient(*socket, 15*time.Second).Status(ctx)
 	if err != nil {
-		return err
+		return describeDaemonError(err, *socket)
 	}
 
-	fmt.Printf("enrolled  %d network(s)\n", len(state.Memberships))
-	fmt.Printf("  identity  %s\n", truncate(state.IdentityPublicKey, 20))
-	for _, m := range state.Memberships {
+	if !status.Enrolled {
+		fmt.Println("not enrolled")
+		fmt.Println("  run 'meshp join <token>' to join a network")
+		return nil
+	}
+
+	fmt.Printf("enrolled  %d network(s)\n", len(status.Memberships))
+	fmt.Printf("  identity  %s\n", truncate(status.IdentityPublicKey, 20))
+	fmt.Printf("  daemon    %s, up since %s\n", status.Version, status.StartedAt.Format(time.RFC3339))
+
+	for _, m := range status.Memberships {
 		fmt.Println()
 		fmt.Printf("  network   %s\n", m.NetworkID)
 		fmt.Printf("    control     %s\n", m.ControlURL)
-		fmt.Printf("    interface   %s (not up)\n", m.InterfaceName)
+
+		// Two different things, reported separately on purpose. A control-channel session
+		// says configuration is arriving; it says nothing about whether traffic can flow.
+		if m.Connected {
+			fmt.Printf("    session     connected since %s\n", m.ConnectedSince.Format(time.RFC3339))
+		} else {
+			fmt.Printf("    session     not connected\n")
+		}
+		fmt.Printf("    applied     version %d\n", m.AppliedStateVersion)
+		if m.LastError != "" {
+			fmt.Printf("    last error  %s\n", m.LastError)
+		}
+
+		tunnel := "not up"
+		if m.TunnelUp {
+			tunnel = "up"
+		}
+		fmt.Printf("    interface   %s (%s)\n", m.InterfaceName, tunnel)
 		if m.AddressV4 != "" {
 			fmt.Printf("    address     %s\n", m.AddressV4)
 		}
@@ -303,6 +258,24 @@ func cmdStatus(_ context.Context, args []string) error {
 	return nil
 }
 
+// describeDaemonError turns a socket failure into an instruction.
+//
+// "connection refused" is not an answer anyone can act on. Whether meshpd is not
+// running, or is running and will not talk to this user, leads to entirely different
+// next steps, so they are named separately.
+func describeDaemonError(err error, socket string) error {
+	switch {
+	case errors.Is(err, agentapi.ErrNoDaemon):
+		return fmt.Errorf("meshpd is not running (socket %s)\n"+
+			"  start it with: sudo meshpd", socket)
+	case errors.Is(err, agentapi.ErrPermission):
+		return fmt.Errorf("not permitted to talk to meshpd on %s\n"+
+			"  run this with sudo, or start meshpd with --socket-group to allow a group", socket)
+	default:
+		return err
+	}
+}
+
 // truncate shortens a key for display. Public keys are not secret, but a terminal
 // full of base64 is unreadable.
 func truncate(s string, n int) string {
@@ -310,13 +283,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-func osVersion() string {
-	// Reading the real version means per-platform work that belongs in meshpd, which
-	// is where posture reporting will live. Reporting the architecture is honest and
-	// useful in the meantime.
-	return runtime.GOARCH
 }
 
 func contains(hay []string, needle string) bool {
@@ -333,21 +299,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// defaultStateDir mirrors meshpd's, because they share the file.
-func defaultStateDir() string {
-	if v := os.Getenv("MESHP_STATE_DIR"); v != "" {
-		return v
-	}
-	switch runtime.GOOS {
-	case "windows":
-		return `C:\ProgramData\meshp`
-	case "darwin":
-		return "/Library/Application Support/meshp"
-	default:
-		return "/var/lib/meshp"
-	}
 }
 
 func fail(format string, args ...any) {

@@ -17,14 +17,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/ipam"
+	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
 )
@@ -134,7 +132,7 @@ func (s *Server) adminOnly(next http.HandlerFunc) http.Handler {
 		// how long the comparison takes.
 		if subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.AdminToken)) != 1 {
 			s.log.Warn("administrative request rejected",
-				"path", forLog(r.URL.Path), "remote", forLog(clientKey(r)))
+				"path", logx.Safe(r.URL.Path), "remote", logx.Safe(clientKey(r)))
 			httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
 				"a valid administrative token is required")
 			return
@@ -168,43 +166,6 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) error {
 		return errors.New("request body: expected exactly one JSON object")
 	}
 	return nil
-}
-
-// forLog prepares an attacker-controlled string to be logged.
-//
-// CodeQL flags the request path reaching a log entry as log injection (CWE-117).
-// For the injection half that is a false positive here, and demonstrably so: slog's
-// text handler quotes values and escapes newlines, carriage returns and ANSI escapes,
-// and its JSON handler encodes them — a path carrying "\nlevel=ERROR msg=forged"
-// comes out inside one quoted value rather than as a second log line. There is a test
-// below that asserts it rather than trusting the claim.
-//
-// What is not handled by the handler is length. Without a bound, anyone who can reach
-// these endpoints can put eight kilobytes into the log on every rejected request,
-// which is a cheap way to fill a disk or a log bill. So values are bounded here, and
-// control characters are dropped as well — belt and braces, so the code stays correct
-// if a custom handler is ever substituted for slog's.
-func forLog(s string) string {
-	const max = 128
-
-	var b strings.Builder
-	b.Grow(min(len(s), max))
-	count := 0
-	for _, r := range s {
-		if count >= max {
-			b.WriteString("…(truncated)")
-			break
-		}
-		// Ranging over a string yields runes, so this cannot split one in half and
-		// emit invalid UTF-8 into the log.
-		if r == utf8.RuneError || unicode.IsControl(r) {
-			b.WriteRune('\uFFFD')
-		} else {
-			b.WriteRune(r)
-		}
-		count++
-	}
-	return b.String()
 }
 
 // failure describes how a known error is reported.
@@ -249,14 +210,14 @@ func (s *Server) respondError(w http.ResponseWriter, r *http.Request, err error)
 	for _, known := range knownFailures {
 		if errors.Is(err, known.err) {
 			s.log.Info("request refused",
-				"path", forLog(r.URL.Path), "code", known.code, "error", err)
+				"path", logx.Safe(r.URL.Path), "code", known.code, "error", err)
 			httpx.Error(w, s.log, known.status, known.code, known.message)
 			return
 		}
 	}
 
 	// Unrecognised: the client learns nothing, the operator learns everything.
-	s.log.Error("request failed", "path", forLog(r.URL.Path), "error", err)
+	s.log.Error("request failed", "path", logx.Safe(r.URL.Path), "error", err)
 	httpx.Error(w, s.log, http.StatusInternalServerError, "internal",
 		"the request could not be completed")
 }
