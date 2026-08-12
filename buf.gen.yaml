@@ -2,7 +2,20 @@ version: v2
 managed:
   enabled: true
 plugins:
-  - remote: buf.build/protocolbuffers/go
+  # The generator is invoked locally from the module graph rather than pulled from
+  # buf's remote registry, so its version is whatever go.mod pins and there is
+  # exactly one number to keep straight.
+  #
+  # An unpinned remote plugin — `remote: buf.build/protocolbuffers/go` — was the
+  # first version of this, and it broke the reproducibility check that ADR-0013
+  # depends on: generated code was committed by protoc-gen-go v1.36.11 and CI
+  # regenerated it with v1.36.12 hours later, so a pull request touching no proto
+  # at all failed on a one-line version comment. Pinning the remote plugin would
+  # fix that but leaves two versions to keep in step, and only one of them is
+  # something Dependabot can see.
+  #
+  # `go tool` requires the tool directive in go.mod, which `go get -tool` adds.
+  - local: ["go", "tool", "protoc-gen-go"]
     out: proto/gen
     opt: paths=source_relative
 inputs:
