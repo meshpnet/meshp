@@ -25,14 +25,20 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
                  windows/amd64 windows/arm64 \
                  freebsd/amd64 android/arm64
 
-# Packages carrying an invariant. These hold the logic that decides addressing
-# and where traffic goes, so their coverage is a gate rather than a statistic.
+# Three tiers, because the packages differ in what a coverage number is worth.
+#
+# Pure decision logic — addressing, health, selection, cryptography — has no I/O to
+# stub and no excuse for a gap, so it is held high. Packages that touch files, sockets
+# and processes have error paths that cost more to reach than they are worth, so they
+# are held lower rather than pretended into the top tier. Packages needing PostgreSQL
+# are checked separately: without a database their tests skip, and the figure would be
+# meaningless rather than merely low.
 COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge
 COVER_FLOOR      := 90
 
-# Packages whose tests need a real PostgreSQL. Their floor is checked separately,
-# because in a run without a database their tests skip and the coverage figure
-# would be meaningless rather than merely low.
+COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx
+COVER_FLOOR_IO      := 75
+
 COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api internal/session
 COVER_FLOOR_DB      := 75
 
@@ -123,6 +129,20 @@ cover-check-db: ## Coverage floor for packages that need PostgreSQL
 	done; \
 	exit $$fail
 
+.PHONY: cover-check-io
+cover-check-io: ## Coverage floor for packages that do local I/O
+	@fail=0; \
+	for pkg in $(COVER_FLOOR_IO_PKGS); do \
+	  pct=$$(go test ./$$pkg/ -cover -count=1 2>/dev/null | sed -n 's/.*coverage: \([0-9.]*\)%.*/\1/p'); \
+	  if [ -z "$$pct" ]; then printf "  %-22s no coverage reported\n" "$$pkg"; fail=1; continue; fi; \
+	  if [ "$$(awk -v p=$$pct -v f=$(COVER_FLOOR_IO) 'BEGIN{print (p+0>=f+0)}')" = "1" ]; then \
+	    printf "  %-22s %6s%%  ok\n" "$$pkg" "$$pct"; \
+	  else \
+	    printf "  %-22s %6s%%  below the %s%% floor\n" "$$pkg" "$$pct" "$(COVER_FLOOR_IO)"; fail=1; \
+	  fi; \
+	done; \
+	exit $$fail
+
 .PHONY: fuzz-seeds
 fuzz-seeds: ## Run every fuzz target against its seed corpus (fast)
 	go test ./... -run '^Fuzz' -count=1
@@ -191,7 +211,7 @@ migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TE
 ## --- aggregate ------------------------------------------------------------
 
 .PHONY: ci
-ci: lint standalone-check build cross test cover-check fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
+ci: lint standalone-check build cross test cover-check cover-check-io fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
 	@echo
 	@echo "  all local CI checks passed"
 
