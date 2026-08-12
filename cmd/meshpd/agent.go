@@ -13,6 +13,7 @@ import (
 
 	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/agentstate"
+	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/sessionclient"
@@ -222,9 +223,11 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 // privileged process, and the private halves never leave it — not to the CLI that asked,
 // and not to the control plane (Invariant 1).
 func (a *agent) Join(ctx context.Context, req agentapi.JoinRequest) (agentapi.JoinResponse, error) {
-	controlURL := req.ControlURL
-	if controlURL == "" {
-		return agentapi.JoinResponse{}, fmt.Errorf("meshpd: a control URL is required")
+	// Validated here because this is where it enters the system, and because a join sends
+	// an enrolment token to whatever address it is given.
+	controlURL, err := controlurl.Validate(req.ControlURL)
+	if err != nil {
+		return agentapi.JoinResponse{}, err
 	}
 
 	a.mu.Lock()

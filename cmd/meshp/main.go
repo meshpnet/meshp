@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
+	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/version"
 )
 
@@ -167,10 +168,17 @@ func cmdJoin(ctx context.Context, args []string) error {
 		return errors.New("usage: meshp join <token> [--control-url URL]")
 	}
 
+	// Checked here as well as in the daemon, so a mistyped URL is reported by the command
+	// that was mistyped rather than as a failure from a service.
+	validated, err := controlurl.Validate(*controlURL)
+	if err != nil {
+		return err
+	}
+
 	client := agentapi.NewClient(*socket, 2*time.Minute)
 	res, err := client.Join(ctx, agentapi.JoinRequest{
 		Token:      positional[0],
-		ControlURL: *controlURL,
+		ControlURL: validated,
 		Name:       *name,
 	})
 	if err != nil {

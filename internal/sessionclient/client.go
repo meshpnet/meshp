@@ -27,7 +27,9 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/logx"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
@@ -78,6 +80,7 @@ type Options struct {
 // Client maintains one control-channel session.
 type Client struct {
 	opts    Options
+	urlErr  error
 	log     *slog.Logger
 	httpc   *http.Client
 	applied int64
@@ -91,8 +94,14 @@ func New(opts Options) *Client {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: dialTimeout}
 	}
-	opts.ControlURL = strings.TrimRight(opts.ControlURL, "/")
-	return &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, applied: opts.AppliedVersion}
+	c := &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, applied: opts.AppliedVersion}
+	validated, err := controlurl.Validate(opts.ControlURL)
+	if err != nil {
+		c.urlErr = err
+		return c
+	}
+	c.opts.ControlURL = validated
+	return c
 }
 
 // AppliedVersion is the newest version this client has applied.
@@ -115,8 +124,12 @@ func (c *Client) Run(ctx context.Context, applier Applier) error {
 		}
 
 		wait := jitter(backoff)
+		// The error can carry text written by the control plane, which an agent may be
+		// pointed at rather than own.
 		c.log.Info("control channel lost; reconnecting",
-			"membership_id", c.opts.MembershipID, "retry_in", wait.Round(time.Millisecond), "error", err)
+			"membership_id", c.opts.MembershipID,
+			"retry_in", wait.Round(time.Millisecond),
+			"error", logx.SafeError(err))
 
 		select {
 		case <-ctx.Done():
@@ -143,6 +156,9 @@ func jitter(d time.Duration) time.Duration {
 
 // RunOnce establishes one session and serves it until it ends.
 func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
+	if c.urlErr != nil {
+		return c.urlErr
+	}
 	challenge, err := c.fetchChallenge(ctx)
 	if err != nil {
 		return fmt.Errorf("sessionclient: challenge: %w", err)
