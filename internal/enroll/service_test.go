@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +16,7 @@ import (
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/store"
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
+	"github.com/meshpnet/meshp/internal/testdb"
 	"github.com/meshpnet/meshp/migrations"
 )
 
@@ -37,10 +37,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	url := os.Getenv("MESHP_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set MESHP_TEST_DATABASE_URL to run enrolment integration tests")
-	}
+	url := testdb.URL(t, "enroll")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
