@@ -26,6 +26,7 @@ import (
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
+	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
 	"github.com/meshpnet/meshp/internal/version"
 	"github.com/meshpnet/meshp/migrations"
@@ -146,7 +147,17 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			log.Error("could not derive the enrolment challenge key", "error", err)
 			return
 		}
-		apiServer := api.New(st, enroll.NewService(st, challenger, clock.System{}, log), api.Config{
+		sessionServer, err := session.NewServer(st, session.NewHub(), session.Config{
+			MasterSecret: cfg.secretKey,
+			Clock:        clock.System{},
+			Log:          log,
+		})
+		if err != nil {
+			log.Error("could not start the control channel", "error", err)
+			return
+		}
+
+		apiServer := api.New(st, enroll.NewService(st, challenger, clock.System{}, log), sessionServer, api.Config{
 			AdminToken: cfg.adminToken,
 			Clock:      clock.System{},
 			Log:        log,

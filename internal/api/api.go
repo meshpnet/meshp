@@ -25,6 +25,7 @@ import (
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/ipam"
+	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
 )
 
@@ -55,16 +56,17 @@ type Config struct {
 
 // Server holds the dependencies the handlers need.
 type Server struct {
-	store  *store.Store
-	enroll *enroll.Service
-	cfg    Config
-	log    *slog.Logger
-	limit  *limiter
+	store   *store.Store
+	enroll  *enroll.Service
+	session *session.Server
+	cfg     Config
+	log     *slog.Logger
+	limit   *limiter
 }
 
 // New builds a Server. store and svc may not be nil; the caller waits until the
 // database is ready before constructing one.
-func New(st *store.Store, svc *enroll.Service, cfg Config) *Server {
+func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
@@ -78,11 +80,12 @@ func New(st *store.Store, svc *enroll.Service, cfg Config) *Server {
 		cfg.EnrolBurst = 20
 	}
 	return &Server{
-		store:  st,
-		enroll: svc,
-		cfg:    cfg,
-		log:    cfg.Log,
-		limit:  newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
+		store:   st,
+		enroll:  svc,
+		session: sess,
+		cfg:     cfg,
+		log:     cfg.Log,
+		limit:   newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
 	}
 }
 
@@ -90,6 +93,14 @@ func New(st *store.Store, svc *enroll.Service, cfg Config) *Server {
 func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/enroll/challenge", s.rateLimited(s.handleChallenge))
 	mux.Handle("POST /api/v1/enroll", s.rateLimited(s.handleRedeem))
+
+	// Sessions. The challenge endpoint is unauthenticated for the same reason
+	// enrolment's is — a device proves itself by signing what it gets back — so it is
+	// rate limited alongside them. The upgrade itself is not: it authenticates in its
+	// first frame, and throttling reconnects is how a brief control-plane outage turns
+	// into a long one when every agent comes back at once.
+	mux.Handle("POST /api/v1/session/challenge", s.rateLimited(s.handleSessionChallenge))
+	mux.Handle("GET /api/v1/session", http.HandlerFunc(s.handleSession))
 
 	mux.Handle("POST /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleCreateToken))
 	mux.Handle("GET /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleListTokens))

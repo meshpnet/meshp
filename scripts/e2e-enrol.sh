@@ -121,6 +121,38 @@ echo "the enrolment is in the audit trail"
 events="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM audit_events WHERE action = 'device.enrolled'")"
 [ "$events" = "1" ] || fail "${events} device.enrolled events, want 1"
 
+echo "meshpd opens a control channel and acknowledges a version"
+# The gate for the control channel: the agent authenticates with its identity key,
+# receives a snapshot and reports the version it applied, and the control plane records
+# it. Convergence lag reaching zero is the single best signal that this works.
+./bin/meshpd --state-dir "$STATE_A" --log-level debug >"$WORK/meshpd.log" 2>&1 &
+MESHPD_PID=$!
+
+converged=0
+for _ in $(seq 1 30); do
+  lag="$(psql "$DB_URL" -tAqc "
+    SELECT coalesce(min(n.state_version - ms.applied_version), -1)
+    FROM membership_state ms JOIN networks n ON n.id = ms.network_id")"
+  if [ "$lag" = "0" ]; then converged=1; break; fi
+  sleep 1
+done
+kill "$MESHPD_PID" 2>/dev/null || true
+wait "$MESHPD_PID" 2>/dev/null || true
+
+if [ "$converged" != "1" ]; then
+  echo "--- meshpd log ---" >&2
+  cat "$WORK/meshpd.log" >&2
+  fail "meshpd never converged: applied version never caught up with the network's"
+fi
+grep -q 'control channel established' "$WORK/meshpd.log" || fail "meshpd never established a session"
+grep -q 'recorded desired state' "$WORK/meshpd.log" || fail "meshpd never recorded desired state"
+sed -n 's/.*msg="recorded desired state" \(.*\)/  \1/p' "$WORK/meshpd.log" | tail -1
+
+# A session that was established must also be cleared when the agent goes away, or the
+# dashboard shows devices as connected forever.
+session_rows="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM membership_state WHERE control_session_id IS NOT NULL")"
+[ "$session_rows" = "0" ] || fail "${session_rows} membership(s) still marked as connected after meshpd exited"
+
 echo "no private key material reached the server"
 # Invariant 1, checked against the thing that would betray it: the server's own output.
 if grep -qiE 'private[_ ]?key' "$LOG"; then
