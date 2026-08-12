@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
@@ -254,3 +255,25 @@ var ErrNoRows = pgx.ErrNoRows
 
 // IsNotFound reports whether err means nothing matched.
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// IsUniqueViolation reports whether err is a PostgreSQL unique-constraint
+// violation. Callers use it to turn a race into a specific, actionable message —
+// "already enrolled in this network" rather than "constraint 23505".
+func IsUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
+}
+
+// ConstraintName returns the constraint a database error violated, or "".
+// Different unique constraints on the same table mean different things, and this is
+// how a caller tells them apart.
+func ConstraintName(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.ConstraintName
+	}
+	return ""
+}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type AclPolicy struct {
@@ -18,7 +17,7 @@ type AclPolicy struct {
 	Version         int32
 	Document        []byte
 	IsActive        bool
-	CreatedByUserID pgtype.UUID
+	CreatedByUserID *uuid.UUID
 	CreatedAt       time.Time
 }
 
@@ -29,7 +28,7 @@ type AddressAllocation struct {
 	Address         netip.Addr
 	State           string
 	HolderKind      string
-	HolderID        pgtype.UUID
+	HolderID        *uuid.UUID
 	AllocatedAt     time.Time
 	ReleasedAt      *time.Time
 	QuarantineUntil *time.Time
@@ -61,14 +60,14 @@ type AdvertiserHealth struct {
 
 type AuditEvent struct {
 	ID             int64
-	OrganizationID pgtype.UUID
-	NetworkID      pgtype.UUID
+	OrganizationID *uuid.UUID
+	NetworkID      *uuid.UUID
 	ActorKind      string
-	ActorID        pgtype.UUID
+	ActorID        *uuid.UUID
 	ActorLabel     string
 	Action         string
 	ResourceKind   string
-	ResourceID     pgtype.UUID
+	ResourceID     *uuid.UUID
 	SourceIp       *netip.Addr
 	Metadata       []byte
 	CreatedAt      time.Time
@@ -77,7 +76,7 @@ type AuditEvent struct {
 type Device struct {
 	ID                uuid.UUID
 	OrganizationID    uuid.UUID
-	UserID            pgtype.UUID
+	UserID            *uuid.UUID
 	Name              string
 	Hostname          string
 	Os                string
@@ -115,7 +114,7 @@ type DnsRecord struct {
 	Value        string
 	Ttl          int32
 	ManagedBy    string
-	ManagedRefID pgtype.UUID
+	ManagedRefID *uuid.UUID
 	CreatedAt    time.Time
 }
 
@@ -132,8 +131,8 @@ type EnrollmentToken struct {
 	NetworkID       uuid.UUID
 	OrganizationID  uuid.UUID
 	TokenHash       []byte
-	CreatedByUserID pgtype.UUID
-	ScopedUserID    pgtype.UUID
+	CreatedByUserID *uuid.UUID
+	ScopedUserID    *uuid.UUID
 	PreassignedTags []string
 	MaxUses         int32
 	Uses            int32
@@ -184,7 +183,7 @@ type Organization struct {
 	Slug                 string
 	Name                 string
 	Kind                 string
-	ParentOrganizationID pgtype.UUID
+	ParentOrganizationID *uuid.UUID
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 	DeletedAt            *time.Time
@@ -192,7 +191,7 @@ type Organization struct {
 
 type Relay struct {
 	ID         uuid.UUID
-	NetworkID  pgtype.UUID
+	NetworkID  *uuid.UUID
 	Slug       string
 	Region     string
 	Endpoints  []string
@@ -204,7 +203,7 @@ type Relay struct {
 
 type Role struct {
 	ID             uuid.UUID
-	OrganizationID pgtype.UUID
+	OrganizationID *uuid.UUID
 	Slug           string
 	Name           string
 	Permissions    []string
@@ -217,7 +216,7 @@ type RoleBinding struct {
 	RoleID         uuid.UUID
 	UserID         uuid.UUID
 	OrganizationID uuid.UUID
-	NetworkID      pgtype.UUID
+	NetworkID      *uuid.UUID
 	CreatedAt      time.Time
 }
 
@@ -242,7 +241,7 @@ type RouteAssignment struct {
 	ID             uuid.UUID
 	MembershipID   uuid.UUID
 	RouteGroupID   uuid.UUID
-	AdvertiserID   pgtype.UUID
+	AdvertiserID   *uuid.UUID
 	Version        int64
 	Reason         string
 	DecidedLocally bool

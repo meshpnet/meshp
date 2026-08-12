@@ -2,10 +2,10 @@ package store
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/testdb"
 	"github.com/meshpnet/meshp/migrations"
 )
 
@@ -22,11 +22,10 @@ import (
 // dropping the schema.
 func testDatabaseURL(t *testing.T) string {
 	t.Helper()
-	url := os.Getenv("MESHP_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set MESHP_TEST_DATABASE_URL to run store integration tests")
-	}
-	return url
+	// A database of this package's own. `go test ./...` runs packages in parallel
+	// and every database-backed package drops the schema on the way in, so sharing
+	// one database means tests that pass alone and fail together.
+	return testdb.URL(t, "store")
 }
 
 func testContext(t *testing.T) context.Context {

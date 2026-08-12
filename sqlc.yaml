@@ -11,8 +11,18 @@ sql:
         emit_pointers_for_null_types: true
         emit_json_tags: false
         overrides:
+          # Both nullability cases are spelled out for every type. Overriding only
+          # the non-null case leaves sqlc's default in place for the other, so a
+          # caller ends up holding uuid.UUID in one place and pgtype.UUID in
+          # another for what is conceptually the same column.
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true
           # Both nullability cases are overridden. Leaving the non-null case to
           # sqlc's default gives pgtype.Timestamptz for NOT NULL columns and
           # *time.Time for nullable ones, so every caller has to remember which
