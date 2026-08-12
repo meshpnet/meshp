@@ -18,7 +18,12 @@ linters:
         - name: exported
           disabled: true
     misspell:
-      locale: UK
+      # Deliberately no locale. Setting one turns misspell into a US/UK variant
+      # converter, and the two halves of this codebase legitimately disagree:
+      # prose is written in British English, while identifiers follow the SQL and
+      # HTTP-API convention of `organization_id`. With no locale it does the job
+      # it is here for — catching actual typos — and stops demanding that the
+      # schema be renamed.
 
 formatters:
   enable:

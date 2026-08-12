@@ -16,10 +16,13 @@
 ## Status
 
 **Pre-alpha. Nothing works end to end yet.** What exists is the schema, the device
-protocol, the decision records, and the logic that decides addressing and where
-traffic goes — IPAM, advertiser health, and route-group selection, all tested.
+protocol, the decision records, the logic that decides addressing and where traffic
+goes — IPAM, advertiser health, route-group selection — and a control plane that
+connects to PostgreSQL, applies its own schema and reports honest readiness.
+
 What does not exist is everything that moves a packet: no WireGuard, no relay, no
-control channel. The four binaries build and report their version.
+control channel, no enrolment. `meshp-control` starts and serves health endpoints;
+`meshpd` idles; the CLI tells you which commands are not implemented yet.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

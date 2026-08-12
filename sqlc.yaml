@@ -13,9 +13,17 @@ sql:
         overrides:
           - db_type: uuid
             go_type: github.com/google/uuid.UUID
+          # Both nullability cases are overridden. Leaving the non-null case to
+          # sqlc's default gives pgtype.Timestamptz for NOT NULL columns and
+          # *time.Time for nullable ones, so every caller has to remember which
+          # kind of timestamp it is holding.
           - db_type: timestamptz
             go_type:
               import: time
               type: Time
-              pointer: true
+          - db_type: timestamptz
             nullable: true
+            go_type:
+              import: time
+              type: Time
+              pointer: true

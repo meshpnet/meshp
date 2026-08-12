@@ -182,6 +182,73 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meshp
+          POSTGRES_PASSWORD: meshp
+          POSTGRES_DB: meshp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meshp -d meshp"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      MESHP_TEST_DATABASE_URL: postgres://meshp:meshp@localhost:5432/meshp?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The store package's interesting behaviour is behaviour PostgreSQL
+      # provides — advisory locks, transactional DDL, statement timeouts. Tested
+      # against a fake, these would assert only that the fake agrees with itself,
+      # so they skip without a database and are gated here instead.
+      - name: tests that need a database
+        run: make integration
+
+      - name: coverage floor
+        run: |
+          {
+            echo "### Integration coverage"
+            echo
+            echo '```'
+            make cover-check-db
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # A control plane that cannot start against a real database is not much of a
+      # control plane, and this is the cheapest place to find out.
+      - name: meshp-control starts, migrates and reports ready
+        run: |
+          make build
+          MESHP_DATABASE_URL="$MESHP_TEST_DATABASE_URL" \
+          MESHP_LISTEN_ADDR=127.0.0.1:8085 \
+            ./bin/meshp-control > control.log 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8085/readyz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+          echo "--- /healthz ---"
+          curl -fsS http://127.0.0.1:8085/healthz
+          echo "--- /readyz ---"
+          curl -fsS http://127.0.0.1:8085/readyz
+          echo "--- log ---"
+          cat control.log
+
+          # Readiness must reflect the schema, not merely that a process is up.
+          curl -fsS http://127.0.0.1:8085/readyz | grep -q '"up_to_date":true'
+
   migrations-immutable:
     name: migrations are append only
     runs-on: ubuntu-latest
@@ -299,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, migrations, migrations-immutable, standalone, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |
