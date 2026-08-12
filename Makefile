@@ -27,13 +27,13 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 
 # Packages carrying an invariant. These hold the logic that decides addressing
 # and where traffic goes, so their coverage is a gate rather than a statistic.
-COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys
+COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge
 COVER_FLOOR      := 90
 
 # Packages whose tests need a real PostgreSQL. Their floor is checked separately,
 # because in a run without a database their tests skip and the coverage figure
 # would be meaningless rather than merely low.
-COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api
+COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api internal/session
 COVER_FLOOR_DB      := 75
 
 .PHONY: help

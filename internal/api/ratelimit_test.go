@@ -134,7 +134,7 @@ func TestRateLimitedHandlerAnswers429(t *testing.T) {
 
 	// A server whose limiter is exhausted after one request.
 	challenger, _ := newTestChallengerFor(t, h)
-	tight := New(h.store, challenger, Config{
+	tight := New(h.store, challenger, nil, Config{
 		AdminToken:         testAdminToken,
 		Clock:              h.clk,
 		EnrolRatePerSecond: 0.001,
