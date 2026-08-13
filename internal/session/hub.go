@@ -33,6 +33,13 @@ const sendQueue = 16
 
 // Session is one connected membership.
 type Session struct {
+	// relayMu guards the relay credential, which the read loop writes and nothing else
+	// touches today — but a session is reachable from the hub, so the guarantee should not
+	// depend on that staying true.
+	relayMu  sync.Mutex
+	relayTok []byte
+	relayExp time.Time
+
 	ID           string
 	MembershipID uuid.UUID
 	NetworkID    uuid.UUID
@@ -68,6 +75,26 @@ func newSession(id string, membershipID, networkID, deviceID uuid.UUID, now time
 func (s *Session) AppliedVersion() int64 { return s.applied.Load() }
 
 func (s *Session) setApplied(v int64) { s.applied.Store(v) }
+
+// relayToken returns the credential this session was last issued, if it holds one.
+//
+// Kept on the session rather than in the database: it is derivable from the signing key at any
+// time, it expires within the hour, and storing a credential that need not be stored is a
+// liability with no benefit.
+func (s *Session) relayToken() ([]byte, time.Time, bool) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	if len(s.relayTok) == 0 {
+		return nil, time.Time{}, false
+	}
+	return s.relayTok, s.relayExp, true
+}
+
+func (s *Session) setRelayToken(token []byte, expires time.Time) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.relayTok, s.relayExp = token, expires
+}
 
 // Closed reports the channel that closes when the session ends.
 func (s *Session) Closed() <-chan struct{} { return s.closed }

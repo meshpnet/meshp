@@ -52,6 +52,11 @@ type Config struct {
 	// MasterSecret derives the session challenge key.
 	MasterSecret []byte
 
+	// RelayIssuer mints relay credentials when asked. Nil where a deployment has not
+	// configured relaying: enrolment and state still work, and an agent asking for a token
+	// is told relaying is unavailable rather than met with silence (ADR-0017).
+	RelayIssuer *RelayIssuer
+
 	Clock clock.Clock
 	Log   *slog.Logger
 }
@@ -62,6 +67,7 @@ type Server struct {
 	hub        *Hub
 	builder    *StateBuilder
 	challenger *challenge.Challenger
+	relay      *RelayIssuer
 	clk        clock.Clock
 	log        *slog.Logger
 }
@@ -83,6 +89,7 @@ func NewServer(st *store.Store, hub *Hub, cfg Config) (*Server, error) {
 		hub:        hub,
 		builder:    NewStateBuilder(st),
 		challenger: challenger,
+		relay:      cfg.RelayIssuer,
 		clk:        cfg.Clock,
 		log:        cfg.Log,
 	}, nil
@@ -327,6 +334,9 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn, sess *Sessi
 		switch payload := msg.Payload.(type) {
 		case *meshpv1.ClientMessage_StateAck:
 			s.handleAck(ctx, sess, payload.StateAck)
+
+		case *meshpv1.ClientMessage_RelayTokenRequest:
+			s.handleRelayTokenRequest(ctx, sess)
 
 		case *meshpv1.ClientMessage_Heartbeat:
 			s.handleHeartbeat(ctx, sess, payload.Heartbeat)

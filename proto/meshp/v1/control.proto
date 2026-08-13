@@ -31,6 +31,7 @@ message ClientMessage {
     PathReport path_report = 4;
     ReachabilityReport reachability_report = 5;
     Heartbeat heartbeat = 6;
+    RelayTokenRequest relay_token_request = 7;
   }
 }
 
@@ -41,6 +42,7 @@ message ServerMessage {
     SignalEnvelope signal = 3;
     Command command = 4;
     HeartbeatAck heartbeat_ack = 5;
+    RelayToken relay_token = 6;
   }
 }
 
@@ -196,6 +198,23 @@ message PacketFilter {
   repeated Rule inbound = 1;
   repeated Rule outbound = 2;
   bool default_deny = 3;
+}
+
+// The agent asks for a relay credential rather than the server pushing one (ADR-0017): the
+// agent is the only party that knows when its token is near expiry, whether it is relaying at
+// all, and whether a relay has just refused it.
+message RelayTokenRequest {
+  // Deliberately empty. The session already establishes which membership is asking, and
+  // adding a device identifier here would create a second, weaker way to say who you are.
+}
+
+message RelayToken {
+  bytes token = 1;             // opaque to the agent; the relay verifies it
+  int64 expires_at_unix = 2;   // so the agent knows when to ask again
+
+  // Set when the server declines. The agent should stop asking until something changes;
+  // retrying a refusal in a loop is how a control plane gets a self-inflicted load problem.
+  string error = 3;
 }
 
 message RelayConfig {
