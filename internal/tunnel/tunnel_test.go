@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/wglink"
@@ -59,7 +60,27 @@ func (f *fakeLink) Apply(_ string, op wgplan.Op) error {
 		f.observed.MTU = op.Device.MTU
 		f.observed.ListenPort = 43521 // as a kernel does when asked for any
 	case wgplan.SetPeer:
-		f.observed.Peers = append(f.observed.Peers, op.Peer)
+		// Replace by key, and treat an empty endpoint as "leave the endpoint alone" — both
+		// as the kernel does. A fake that appended instead would hold duplicates, and one
+		// that cleared the endpoint would hide the roaming case entirely.
+		next := op.Peer
+		replaced := false
+		for i, existing := range f.observed.Peers {
+			if existing.PublicKey != next.PublicKey {
+				continue
+			}
+			if next.Endpoint == "" {
+				next.Endpoint = existing.Endpoint
+				next.HasHandshake = existing.HasHandshake
+				next.HandshakeAge = existing.HandshakeAge
+			}
+			f.observed.Peers[i] = next
+			replaced = true
+			break
+		}
+		if !replaced {
+			f.observed.Peers = append(f.observed.Peers, next)
+		}
 	case wgplan.RemovePeer:
 		var kept []wgplan.Peer
 		for _, p := range f.observed.Peers {
@@ -513,5 +534,41 @@ func TestReapplyingTheSameStateRepairsADamagedInterface(t *testing.T) {
 	}
 	if len(link.applied) != 0 {
 		t.Errorf("the repair did not converge; a third pass still wants: %v", link.applied)
+	}
+}
+
+// The reconciler must not undo roaming. A peer that moved and is talking from its new
+// address keeps it, even though the control plane still names the old one — otherwise every
+// reconcile tick would break a working path (see wgplan's endpoint rules, and wglink's
+// TestALearnedEndpointIsNotTreatedAsDrift against a real kernel).
+func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil)
+
+	p := peer(bobKey, "100.90.0.2/32")
+	p.Endpoints = []string{"203.0.113.2:51820"}
+	state := stateWith(3, p)
+
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bob has moved, and the device knows because his traffic arrives from somewhere else.
+	for i := range link.observed.Peers {
+		link.observed.Peers[i].Endpoint = "198.51.100.9:33445"
+		link.observed.Peers[i].HasHandshake = true
+		link.observed.Peers[i].HandshakeAge = 20 * time.Second
+	}
+	link.applied = nil
+
+	// The control plane has not caught up and still says the old address.
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if len(link.applied) != 0 {
+		t.Errorf("reconciling replaced a working endpoint with a stale one: %v", link.applied)
+	}
+	if got := link.observed.Peers[0].Endpoint; got != "198.51.100.9:33445" {
+		t.Errorf("the peer's endpoint is now %q, want where it actually is", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustPrefix(t *testing.T, s string) netip.Prefix {
@@ -582,7 +583,18 @@ func simulate(obs Observed, plan Plan) Observed {
 				obs.ListenPort = op.Device.ListenPort
 			}
 		case SetPeer:
-			peers[op.Peer.PublicKey] = op.Peer
+			// An empty endpoint means "leave the endpoint alone", which is what the kernel
+			// does when a peer is configured without one. A simulation that cleared it here
+			// would never exercise the case this exists for.
+			next := op.Peer
+			if next.Endpoint == "" {
+				if existing, ok := peers[next.PublicKey]; ok {
+					next.Endpoint = existing.Endpoint
+					next.HasHandshake = existing.HasHandshake
+					next.HandshakeAge = existing.HandshakeAge
+				}
+			}
+			peers[next.PublicKey] = next
 		case RemovePeer:
 			delete(peers, op.Peer.PublicKey)
 		case AddAddress:
@@ -625,8 +637,15 @@ func sameAsWanted(want Interface, reached Observed) error {
 		if !ok {
 			return fmt.Errorf("peer %s is missing", peer.PublicKey)
 		}
-		if !samePeer(got, peer) {
+		if !sameApartFromEndpoint(got, peer) {
 			return fmt.Errorf("peer %s was not configured as asked", peer.PublicKey)
+		}
+		// The endpoint is deliberately not required to equal what was asked for: a peer
+		// whose current endpoint is working keeps it, because the device knows where that
+		// peer is and the control plane only knows where it was. What must hold is that a
+		// peer with nowhere to be reached got the candidate we had.
+		if got.Endpoint == "" && peer.Endpoint != "" {
+			return fmt.Errorf("peer %s was left with no endpoint although one was offered", peer.PublicKey)
 		}
 	}
 
@@ -716,11 +735,27 @@ func randomObserved(t *testing.T, rng *rand.Rand, want Interface) Observed {
 		return obs
 
 	case 3:
-		// Right peers, wrong details: the shape that must still produce a rewrite.
+		// Right peers, wrong details: the shape that must still produce a rewrite. The
+		// endpoints and handshake states are varied deliberately, because whether an
+		// endpoint may be replaced depends on whether the current one is working.
 		obs := applied(want)
 		for i := range obs.Peers {
-			if rng.Intn(2) == 0 {
+			switch rng.Intn(4) {
+			case 0:
+				// Somewhere else entirely, and talking: roaming. Must be left alone.
 				obs.Peers[i].Endpoint = "192.0.2.99:1"
+				obs.Peers[i].HasHandshake = true
+				obs.Peers[i].HandshakeAge = time.Duration(rng.Intn(120)) * time.Second
+			case 1:
+				// Somewhere else, and silent: worth replacing.
+				obs.Peers[i].Endpoint = "192.0.2.99:1"
+				obs.Peers[i].HasHandshake = rng.Intn(2) == 0
+				obs.Peers[i].HandshakeAge = time.Duration(200+rng.Intn(600)) * time.Second
+			case 2:
+				// Learned from traffic when we had nothing to offer.
+				obs.Peers[i].Endpoint = "198.51.100.7:41234"
+				obs.Peers[i].HasHandshake = true
+				obs.Peers[i].HandshakeAge = 5 * time.Second
 			}
 			if rng.Intn(3) == 0 {
 				obs.Peers[i].KeepaliveSeconds = 99
@@ -800,5 +835,177 @@ func TestAnInterfaceThatIsDownIsBroughtUp(t *testing.T) {
 		if op.Kind != BringUp {
 			t.Errorf("raising a down interface also did: %s", op)
 		}
+	}
+}
+
+// --- endpoints ---------------------------------------------------------------
+//
+// WireGuard updates a peer's endpoint to the source of the most recent authenticated
+// packet: that is how roaming works. So the device's value is frequently one nobody
+// configured, and it is better information than the control plane has — where the peer
+// actually is, rather than where it was last thought to be. Demonstrated against a real
+// kernel in wglink's TestALearnedEndpointIsNotTreatedAsDrift.
+
+func withPeer(t *testing.T, p Peer) Interface {
+	t.Helper()
+	iface := base(t)
+	p.AllowedIPs = prefixes(t, "100.90.0.2/32")
+	iface.Peers = []Peer{p}
+	return iface
+}
+
+// Knowing nothing is not a reason to overwrite what the device learned.
+func TestAnEndpointLearnedFromTrafficIsLeftAlone(t *testing.T) {
+	want := withPeer(t, Peer{PublicKey: "peer-bob", KeepaliveSeconds: 25})
+
+	obs := applied(want)
+	obs.Peers[0].Endpoint = "198.51.100.7:41234" // learned, never configured
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = 5 * time.Second
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() {
+		t.Errorf("a learned endpoint was treated as drift:\n%s", plan)
+	}
+}
+
+// A peer that has moved and is talking from its new address keeps it. Replacing a working
+// path with a stale guess is a regression, not a repair.
+func TestAWorkingEndpointSurvivesADifferentCandidate(t *testing.T) {
+	want := withPeer(t, Peer{
+		PublicKey:        "peer-bob",
+		Endpoint:         "203.0.113.2:51820", // where the server thinks bob is
+		KeepaliveSeconds: 25,
+	})
+
+	obs := applied(want)
+	obs.Peers[0].Endpoint = "198.51.100.9:33445" // where bob actually is
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = 30 * time.Second
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() {
+		t.Errorf("a working endpoint was replaced by the control plane's guess:\n%s", plan)
+	}
+}
+
+// But an endpoint that is not working is worth replacing: as much failover as exists until
+// the agent consumes candidate lists (ADR-0003).
+func TestASilentEndpointIsReplacedByTheCandidate(t *testing.T) {
+	want := withPeer(t, Peer{
+		PublicKey:        "peer-bob",
+		Endpoint:         "203.0.113.2:51820",
+		KeepaliveSeconds: 25,
+	})
+
+	obs := applied(want)
+	obs.Peers[0].Endpoint = "198.51.100.9:33445"
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = 10 * time.Minute // well past REJECT_AFTER_TIME
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstIndexOf(plan, SetPeer) < 0 {
+		t.Fatalf("a dead endpoint was left in place:\n%s", plan)
+	}
+	for _, op := range plan.Ops {
+		if op.Kind == SetPeer && op.Peer.Endpoint != "203.0.113.2:51820" {
+			t.Errorf("the candidate was not written: endpoint is %q", op.Peer.Endpoint)
+		}
+	}
+}
+
+// A peer that has never handshaked has nothing worth keeping.
+func TestAPeerThatNeverHandshakedTakesTheCandidate(t *testing.T) {
+	want := withPeer(t, Peer{
+		PublicKey:        "peer-bob",
+		Endpoint:         "203.0.113.2:51820",
+		KeepaliveSeconds: 25,
+	})
+
+	obs := applied(want)
+	obs.Peers[0].Endpoint = "198.51.100.9:33445"
+	obs.Peers[0].HasHandshake = false
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstIndexOf(plan, SetPeer) < 0 {
+		t.Errorf("a peer that never handshaked kept an endpoint that has never worked:\n%s", plan)
+	}
+}
+
+// A peer with nowhere to be reached takes whatever is offered.
+func TestAPeerWithNoEndpointTakesTheCandidate(t *testing.T) {
+	want := withPeer(t, Peer{
+		PublicKey:        "peer-bob",
+		Endpoint:         "203.0.113.2:51820",
+		KeepaliveSeconds: 25,
+	})
+
+	obs := applied(want)
+	obs.Peers[0].Endpoint = ""
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, op := range plan.Ops {
+		if op.Kind == SetPeer && op.Peer.Endpoint == "203.0.113.2:51820" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a peer with no endpoint was not given the one on offer:\n%s", plan)
+	}
+}
+
+// The case that makes "leave the endpoint alone" a separate idea from "do nothing": a peer
+// whose allowed IPs are wrong and whose endpoint is working must have one fixed without
+// losing the other.
+func TestAPeersAddressesAreCorrectedWithoutDisturbingAWorkingEndpoint(t *testing.T) {
+	want := withPeer(t, Peer{
+		PublicKey:        "peer-bob",
+		Endpoint:         "203.0.113.2:51820",
+		KeepaliveSeconds: 25,
+	})
+
+	obs := applied(want)
+	obs.Peers[0].AllowedIPs = prefixes(t, "100.90.0.99/32") // wrong
+	obs.Peers[0].Endpoint = "198.51.100.9:33445"            // working
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = time.Second
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wrote bool
+	for _, op := range plan.Ops {
+		if op.Kind != SetPeer {
+			continue
+		}
+		wrote = true
+		if op.Peer.Endpoint != "" {
+			t.Errorf("the working endpoint would be overwritten with %q; an empty endpoint\n"+
+				"is how the plan says to leave it alone", op.Peer.Endpoint)
+		}
+		if len(op.Peer.AllowedIPs) != 1 || op.Peer.AllowedIPs[0].String() != "100.90.0.2/32" {
+			t.Errorf("the allowed IPs were not corrected: %v", op.Peer.AllowedIPs)
+		}
+	}
+	if !wrote {
+		t.Errorf("wrong allowed IPs were left in place:\n%s", plan)
 	}
 }

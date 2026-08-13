@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Key is a WireGuard public or private key in its base64 form.
@@ -53,7 +54,22 @@ type Peer struct {
 
 	// KeepaliveSeconds keeps a NAT mapping open. Zero means none.
 	KeepaliveSeconds int
+
+	// HasHandshake and HandshakeAge describe whether this peer has completed a handshake
+	// and how long ago. Reported by the device; meaningless in a desired peer and never
+	// compared. They exist because whether a peer's current endpoint is working decides
+	// whether replacing it is a repair or a regression.
+	HasHandshake bool
+	HandshakeAge time.Duration
 }
+
+// endpointGrace is how recently a peer must have handshaked for its endpoint to count as
+// working.
+//
+// WireGuard abandons a session after REJECT_AFTER_TIME — 180 seconds — so a peer that has
+// not handshaked within that is not reaching anyone at its current endpoint. Inside it, the
+// endpoint is carrying traffic, and evidence beats the control plane's opinion.
+const endpointGrace = 180 * time.Second
 
 // Interface is the desired state of one membership's interface.
 type Interface struct {
@@ -278,8 +294,12 @@ func For(want Interface, observed Observed) (Plan, error) {
 	for _, key := range sortedKeys(wantPeers) {
 		desired := wantPeers[key]
 		current, exists := havePeers[key]
-		if !exists || !samePeer(current, desired) {
+		if !exists {
 			add(Op{Kind: SetPeer, Peer: desired})
+			continue
+		}
+		if write, peer := resolvePeer(current, desired); write {
+			add(Op{Kind: SetPeer, Peer: peer})
 		}
 	}
 
@@ -480,14 +500,63 @@ func sortedKeys(peers map[Key]Peer) []Key {
 	return out
 }
 
-// samePeer reports whether a peer needs rewriting.
+// resolvePeer decides whether an existing peer needs rewriting, and with what.
+//
+// Everything but the endpoint is a straightforward comparison. The endpoint is not, because
+// it is the one field the device changes on its own: WireGuard updates a peer's endpoint to
+// the source of the most recent authenticated packet, which is how roaming works. So the
+// value the kernel holds is frequently one nobody configured, and it is better information
+// than the control plane has — it is where that peer actually is, as opposed to where it was
+// last thought to be.
+//
+// The returned peer carries an empty endpoint to mean "leave the endpoint alone", which is
+// how a peer can have its allowed IPs corrected without having a working path taken away
+// from it at the same time.
+func resolvePeer(have, want Peer) (bool, Peer) {
+	keep := keepObservedEndpoint(have, want)
+
+	out := want
+	if keep {
+		out.Endpoint = ""
+	}
+
+	if !sameApartFromEndpoint(have, want) {
+		return true, out
+	}
+	if !keep && have.Endpoint != want.Endpoint {
+		return true, out
+	}
+	return false, out
+}
+
+// keepObservedEndpoint reports whether the device's endpoint should be left as it is.
+func keepObservedEndpoint(have, want Peer) bool {
+	switch {
+	case want.Endpoint == "":
+		// Nothing to offer. Whatever the device has — configured earlier, or learned from
+		// traffic — is more than we know, and this is every peer's state until endpoint
+		// discovery exists.
+		return true
+	case have.Endpoint == "":
+		return false // nothing there; ours is the only candidate
+	case have.Endpoint == want.Endpoint:
+		return false // identical, so writing and keeping are the same thing
+	default:
+		// They differ. If the current one is carrying traffic, replacing it with a guess is
+		// a regression rather than a repair — the peer has moved and told us so. If it is
+		// not, the candidate is worth trying, which is as much failover as exists until the
+		// agent consumes candidate lists (ADR-0003).
+		return have.HasHandshake && have.HandshakeAge <= endpointGrace
+	}
+}
+
+// sameApartFromEndpoint compares everything the control plane decides outright.
 //
 // Allowed IPs are compared as sets: the order they arrive in is not something the kernel
 // preserves or cares about, so comparing slices directly would rewrite every peer on
 // every tick and reset its session each time.
-func samePeer(have, want Peer) bool {
-	if have.Endpoint != want.Endpoint ||
-		have.PresharedKey != want.PresharedKey ||
+func sameApartFromEndpoint(have, want Peer) bool {
+	if have.PresharedKey != want.PresharedKey ||
 		have.KeepaliveSeconds != want.KeepaliveSeconds {
 		return false
 	}
