@@ -45,7 +45,7 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 # are held lower rather than pretended into the top tier. Packages needing PostgreSQL
 # are checked separately: without a database their tests skip, and the figure would be
 # meaningless rather than merely low.
-COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan internal/relayproto internal/relay
+COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan internal/relayproto internal/relay internal/relaytoken
 COVER_FLOOR      := 90
 
 COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx internal/tunnel
