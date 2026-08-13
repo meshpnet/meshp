@@ -208,10 +208,16 @@ func (s *Server) hello(via int, from netip.AddrPort, frame relayproto.Frame) []O
 	// The observed address is the whole reason an agent talks to a relay before it needs
 	// one: it is this device's server-reflexive candidate, and nothing else can tell it
 	// (ADR-0016). The control channel's TCP source address is not the same thing.
+	//
+	// Unmapped before it is reported. A relay listening on [::] sees an IPv4 peer as
+	// ::ffff:a.b.c.d, and that string does not equal the plain IPv4 address the agent knows
+	// itself by — so comparing a reflexive candidate against a host candidate would never
+	// match, and every device would be judged to be behind NAT. Found by deploying a relay
+	// and reading what it actually said.
 	return []Out{{Via: via, To: from, Frame: relayproto.Frame{
 		Type:    relayproto.TypeWelcome,
 		Key:     s.selfKey,
-		Payload: []byte(from.String()),
+		Payload: []byte(netip.AddrPortFrom(from.Addr().Unmap(), from.Port()).String()),
 	}}}
 }
 

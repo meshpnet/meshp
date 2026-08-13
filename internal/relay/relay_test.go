@@ -527,3 +527,37 @@ func TestAPeerThatMovesSocketsIsFollowed(t *testing.T) {
 			out[0].To, out[0].Via)
 	}
 }
+
+// A relay listening on [::] sees an IPv4 peer as ::ffff:a.b.c.d. Reported in that form, the
+// reflexive candidate would never equal the plain IPv4 address the agent knows itself by — so
+// every device would look like it was behind NAT, and endpoint discovery would never conclude
+// a direct path was possible. Found by deploying a relay and reading what it said, not by any
+// test written beforehand.
+func TestAnIPv4PeerIsReportedAsIPv4(t *testing.T) {
+	f := newFixture(t)
+
+	out := f.send(addr("[::ffff:103.66.79.194]:49822"), relayproto.Frame{
+		Type: relayproto.TypeHello, Key: key(1), Payload: token("acme", 1),
+	})
+	if len(out) != 1 || out[0].Frame.Type != relayproto.TypeWelcome {
+		t.Fatalf("expected a welcome: %+v", out)
+	}
+	if got := string(out[0].Frame.Payload); got != "103.66.79.194:49822" {
+		t.Errorf("the relay reports %q, want the plain IPv4 form", got)
+	}
+}
+
+// A real IPv6 peer must still be reported as IPv6, brackets and all.
+func TestAnIPv6PeerIsReportedAsIPv6(t *testing.T) {
+	f := newFixture(t)
+
+	out := f.send(addr("[2400:6180:100:d0::5]:41234"), relayproto.Frame{
+		Type: relayproto.TypeHello, Key: key(1), Payload: token("acme", 1),
+	})
+	if len(out) != 1 {
+		t.Fatalf("expected a welcome: %+v", out)
+	}
+	if got := string(out[0].Frame.Payload); got != "[2400:6180:100:d0::5]:41234" {
+		t.Errorf("the relay reports %q, want the IPv6 form", got)
+	}
+}
