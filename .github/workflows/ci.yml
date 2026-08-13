@@ -231,15 +231,35 @@ jobs:
       # The unit tests cover each step against a library. This covers what a person
       # actually runs — flag parsing, file modes, exit codes — which is where the
       # wiring mistakes live.
-      - name: enrol a device end to end
+      - run: sudo apt-get install -y --no-install-recommends wireguard-tools
+
+      # The script is invoked directly below rather than through `make e2e`, which depends
+      # on `build` — so the binaries have to be built here.
+      - run: make build
+
+      # Under sudo, so the tunnel assertions in the script actually execute. They skip
+      # without the privilege to create interfaces, and a skip here is a silent pass: the
+      # assertions would only ever have run on a developer's machine.
+      - name: enrol a device end to end, with a real tunnel
         run: |
+          set -o pipefail
           {
             echo "### Enrolment end to end"
             echo
             echo '```'
-            make e2e
+            sudo -E env "PATH=$PATH" ./scripts/e2e-enrol.sh "$MESHP_TEST_DATABASE_URL" 2>&1 | tee e2e.log
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: the tunnel assertions were not skipped
+        run: |
+          if grep -q "skipped: needs Linux, root" e2e.log; then
+            echo "the end-to-end tunnel assertions skipped, so they gate nothing"
+            exit 1
+          fi
+          grep -q "up, kernel" e2e.log \
+            || { echo "the end-to-end run never reported a kernel tunnel"; exit 1; }
+          echo "the tunnel came up and was asserted"
 
   migrations-immutable:
     name: migrations are append only
