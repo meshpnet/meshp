@@ -37,6 +37,11 @@ jobs:
           cache: true
       - run: make lint
 
+      # go.mod carried a stale "// indirect" on a module imported directly, because
+      # nothing checked. -diff writes nothing, so a failure here leaves no mess behind.
+      - name: go.mod is tidy
+        run: make tidy-check
+
   test:
     name: test and coverage
     runs-on: ubuntu-latest
