@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 go build \
         -X github.com/meshpnet/meshp/internal/version.commit=${COMMIT}" \
       -o /out/meshp-relay ./cmd/meshp-relay
 
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -u 65532 meshp
