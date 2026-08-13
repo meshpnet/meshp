@@ -255,6 +255,9 @@ func cmdStatus(ctx context.Context, args []string) error {
 			}
 		}
 		fmt.Printf("    interface   %s (%s)\n", m.InterfaceName, tunnel)
+		if m.ListenPort != 0 {
+			fmt.Printf("    listening   udp/%d\n", m.ListenPort)
+		}
 		if m.AddressV4 != "" {
 			fmt.Printf("    address     %s\n", m.AddressV4)
 		}

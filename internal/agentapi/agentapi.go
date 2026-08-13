@@ -71,6 +71,12 @@ type MembershipStatus struct {
 	// status must not imply otherwise.
 	TunnelUp bool `json:"tunnel_up"`
 
+	// ListenPort is the UDP port the interface listens on. Zero when there is no tunnel.
+	//
+	// Reported because an operator opening a firewall or a port forward needs it, and
+	// because it is what peers will be told once endpoints are distributed.
+	ListenPort int `json:"listen_port,omitempty"`
+
 	// TunnelKind is which WireGuard implementation is behind the interface: "kernel" or
 	// "userspace". Empty when there is no tunnel.
 	//

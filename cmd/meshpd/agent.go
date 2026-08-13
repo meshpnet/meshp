@@ -85,6 +85,7 @@ func (a *agent) reconcilerFor(m agentstate.Membership, log *slog.Logger) *tunnel
 		PrivateKey:    m.WireGuardPrivateKey,
 		AddressV4:     m.AddressV4,
 		AddressV6:     m.AddressV6,
+		ListenPort:    m.ListenPort,
 	}, log)
 }
 
@@ -246,6 +247,34 @@ func (a *agent) setApplied(membershipID uuid.UUID, appliedVersion int64) error {
 	return fmt.Errorf("meshpd: no local membership %s", membershipID)
 }
 
+// setListenPort records the port an interface settled on.
+//
+// Written only when it changes, which after the first time is almost never: the point of
+// persisting it is that the next start asks for the same port, so peers keep working
+// endpoints and NAT mappings survive a restart.
+func (a *agent) setListenPort(membershipID uuid.UUID, port int) error {
+	if port == 0 {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.state == nil {
+		return fmt.Errorf("meshpd: no local state to record a listen port against")
+	}
+	for i := range a.state.Memberships {
+		if a.state.Memberships[i].MembershipID != membershipID {
+			continue
+		}
+		if a.state.Memberships[i].ListenPort == port {
+			return nil
+		}
+		a.state.Memberships[i].ListenPort = port
+		return agentstate.Save(a.stateDir, a.state)
+	}
+	return fmt.Errorf("meshpd: no local membership %s", membershipID)
+}
+
 // Status implements agentapi.Handler.
 func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 	a.mu.Lock()
@@ -286,6 +315,9 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 			ms.AppliedStateVersion = handle.client.AppliedVersion()
 			ms.LastError = handle.applier.lastError()
 			ms.TunnelUp, ms.TunnelKind = handle.applier.tunnelStatus()
+			if handle.applier.reconciler != nil {
+				ms.ListenPort = handle.applier.reconciler.Status().ListenPort
+			}
 		}
 		status.Memberships = append(status.Memberships, ms)
 	}
@@ -452,6 +484,18 @@ func (a *deviceApplier) Apply(ctx context.Context, state *peerset.Set) ([]string
 	a.mu.Lock()
 	a.lastState = state
 	a.mu.Unlock()
+
+	// Keep whatever port the interface settled on, so the next start asks for the same one.
+	// A failure here costs port stability, not connectivity, so it is logged rather than
+	// reported as an unapplied component.
+	if a.reconciler != nil {
+		if port := a.reconciler.Status().ListenPort; port != 0 {
+			if err := a.agent.setListenPort(a.membershipID, port); err != nil {
+				a.log.Warn("could not record the interface's listen port",
+					"port", port, "error", err)
+			}
+		}
+	}
 
 	if a.reconciler == nil {
 		a.log.Info("recorded desired state",

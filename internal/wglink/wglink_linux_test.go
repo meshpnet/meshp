@@ -414,3 +414,76 @@ func TestEveryPeerFieldSurvivesARoundTripThroughTheKernel(t *testing.T) {
 		})
 	}
 }
+
+// A port asked for by name is the port the interface listens on, and the kernel's own choice
+// is reported when none was asked for. Both matter: the first is what makes a port survive a
+// restart, and the second is what there is to remember in the first place.
+func TestAListenPortIsHonouredAndReported(t *testing.T) {
+	l := requireInterfaces(t)
+
+	t.Run("the kernel chooses when nothing is asked for", func(t *testing.T) {
+		const name = "wgp0"
+		removeInterface(t, l, name)
+		t.Cleanup(func() { removeInterface(t, l, name) })
+
+		want := wanted(t, name)
+		want.ListenPort = 0
+		obs, err := l.Observe(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := wgplan.For(want, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyPlan(l, name, plan); err != nil {
+			t.Fatal(err)
+		}
+		obs, err = l.Observe(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if obs.ListenPort == 0 {
+			t.Error("the kernel reported no port, so there is nothing to remember")
+		}
+	})
+
+	t.Run("a remembered port is honoured", func(t *testing.T) {
+		const name = "wgp1"
+		removeInterface(t, l, name)
+		t.Cleanup(func() { removeInterface(t, l, name) })
+
+		want := wanted(t, name)
+		want.ListenPort = 51987
+
+		obs, err := l.Observe(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := wgplan.For(want, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyPlan(l, name, plan); err != nil {
+			t.Fatal(err)
+		}
+
+		obs, err = l.Observe(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if obs.ListenPort != 51987 {
+			t.Errorf("the interface listens on %d, want the 51987 that was asked for", obs.ListenPort)
+		}
+
+		// And nothing wants to change it, which is what makes the port stable rather than
+		// merely set once.
+		again, err := wgplan.For(want, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !again.Empty() {
+			t.Errorf("a honoured port still produced work:\n%s", again)
+		}
+	})
+}

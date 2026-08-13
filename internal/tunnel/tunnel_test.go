@@ -465,18 +465,6 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 	}
 }
 
-// Any port, because a device in several networks needs an interface for each (ADR-0004) and
-// they cannot all ask for the same one.
-func TestNoParticularPortIsRequested(t *testing.T) {
-	iface, err := Desired(membership(), stateWith(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if iface.ListenPort != 0 {
-		t.Errorf("listen port is %d, want 0 meaning any", iface.ListenPort)
-	}
-}
-
 // The key is carried through untouched. wgplan does not parse keys, so a translation that
 // mangled one would only fail at the kernel, on a real host, with a confusing message.
 func TestKeysArePassedThroughUnchanged(t *testing.T) {
@@ -570,5 +558,46 @@ func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
 	}
 	if got := link.observed.Peers[0].Endpoint; got != "198.51.100.9:33445" {
 		t.Errorf("the peer's endpoint is now %q, want where it actually is", got)
+	}
+}
+
+// The port the device settled on is reported back, so the daemon can keep it. Asking for any
+// port means the kernel chooses, and its choice is the thing worth remembering.
+func TestTheSettledListenPortIsReported(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil) // no port asked for
+
+	if _, err := r.Apply(context.Background(), stateWith(1, peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Status().ListenPort; got != 43521 {
+		t.Errorf("reported listen port %d, want the one the device chose (43521)", got)
+	}
+}
+
+// A membership that already has a port asks for it again. Without this, every restart moves
+// the port, which invalidates the endpoint every peer holds and drops any NAT mapping that
+// was keeping a path open.
+func TestARememberedPortIsAskedForAgain(t *testing.T) {
+	m := membership()
+	m.ListenPort = 51999
+
+	iface, err := Desired(m, stateWith(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iface.ListenPort != 51999 {
+		t.Errorf("asked for port %d, want the remembered 51999", iface.ListenPort)
+	}
+}
+
+// A membership that has never come up asks for any port.
+func TestAMembershipWithNoPortAsksForAny(t *testing.T) {
+	iface, err := Desired(membership(), stateWith(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iface.ListenPort != 0 {
+		t.Errorf("asked for port %d, want 0 meaning any", iface.ListenPort)
 	}
 }
