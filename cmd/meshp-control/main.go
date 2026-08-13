@@ -36,6 +36,7 @@ import (
 	"github.com/meshpnet/meshp/internal/store"
 	"github.com/meshpnet/meshp/internal/version"
 	"github.com/meshpnet/meshp/migrations"
+	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
 func main() {
@@ -57,6 +58,12 @@ func main() {
 			"base64 Ed25519 seed or private key for signing relay tokens; empty disables relaying")
 		generateRelayKey = flag.Bool("generate-relay-key", false,
 			"print a new relay signing keypair and exit")
+
+		// Where this deployment's relays are, as id=host:port[,host:port];id=... Several
+		// addresses per relay because one port is not enough: the agent tries them in order,
+		// so the port most likely to get through belongs first.
+		relays = flag.String("relays", os.Getenv("MESHP_RELAYS"),
+			"relays to offer agents, as id=host:port[,host:port][;id=...]")
 
 		// How far back deltas can be built. An agent offline longer than this is sent a
 		// snapshot when it returns, which is correct but expensive — so this is the
@@ -115,7 +122,14 @@ func main() {
 		os.Exit(2)
 	}
 
+	relayConfig, err := session.ParseRelays(*relays)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meshp-control: %v\n", err)
+		os.Exit(2)
+	}
+
 	cfg := runConfig{
+		relays:          relayConfig,
 		relaySigningKey: signer,
 		addr:            *listenAddr,
 		databaseURL:     *databaseURL,
@@ -132,6 +146,7 @@ func main() {
 }
 
 type runConfig struct {
+	relays          *meshpv1.RelayConfig
 	relaySigningKey ed25519.PrivateKey
 	addr            string
 	databaseURL     string
@@ -194,6 +209,15 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			log.Error("could not prepare the relay issuer", "error", err)
 			return
 		}
+		for _, relay := range cfg.relays.GetRelays() {
+			log.Info("offering a relay to agents",
+				"id", relay.GetId(), "endpoints", strings.Join(relay.GetEndpoints(), ","))
+		}
+		if cfg.relays == nil {
+			log.Warn("no relays configured: peers will know about each other and be unable to reach each other",
+				"hint", "set MESHP_RELAYS to id=host:port")
+		}
+
 		if issuer == nil {
 			log.Warn("relaying is disabled: no signing key configured",
 				"hint", "meshp-control --generate-relay-key prints a pair; give the private half here and the public half to each relay")
@@ -207,6 +231,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		sessionServer, err := session.NewServer(st, session.NewHub(), session.Config{
 			MasterSecret: cfg.secretKey,
 			RelayIssuer:  issuer,
+			Relays:       cfg.relays,
 			Clock:        clock.System{},
 			Log:          log,
 		})

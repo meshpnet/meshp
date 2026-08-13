@@ -179,3 +179,127 @@ func TestTheReportedPublicKeyIsTheOneThatVerifies(t *testing.T) {
 		t.Errorf("the reported public key does not verify this issuer's tokens: %v", err)
 	}
 }
+
+// --- relay assignment --------------------------------------------------------
+
+// Every peer is relayed, because nothing discovers where a peer is yet. That is what
+// relay-first means (ADR-0002) rather than a limitation: connectivity does not wait on NAT
+// traversal succeeding.
+func TestPeersNameTheRelayAndTheStateCarriesIt(t *testing.T) {
+	f := newFixture(t)
+	relays, err := ParseRelays("relay1=relay1.example:3478,relay1.example:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.builder = f.srv.builder.WithRelays(relays)
+
+	alice := f.enrolDevice("alice")
+	f.enrolDevice("bob")
+
+	state, err := f.srv.builder.For(f.ctx, alice.membershipID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(state.GetUpsertPeers()) != 1 {
+		t.Fatalf("%d peers, want 1", len(state.GetUpsertPeers()))
+	}
+	if got := state.GetUpsertPeers()[0].GetRelayId(); got != "relay1" {
+		t.Errorf("the peer names relay %q, want relay1", got)
+	}
+	// The agent needs to be told where that relay is, or it has a name and nothing to do
+	// with it.
+	if len(state.GetRelays().GetRelays()) != 1 {
+		t.Fatalf("the state carries %d relays", len(state.GetRelays().GetRelays()))
+	}
+	if len(state.GetRelays().GetRelays()[0].GetEndpoints()) != 2 {
+		t.Error("the relay's addresses were not passed through")
+	}
+}
+
+// A relayed packet carries the relay's header outside the WireGuard packet, so it needs a
+// smaller tunnel. WireGuard's MTU is per interface, so one relayed peer lowers it for all.
+func TestTheMTUAllowsForTheRelayHeader(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+
+	// With no relay configured, the conventional direct-path figure.
+	direct, err := f.srv.builder.For(f.ctx, alice.membershipID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.GetTunnel().GetMtu() != 1420 {
+		t.Errorf("MTU without a relay is %d, want 1420", direct.GetTunnel().GetMtu())
+	}
+
+	relays, err := ParseRelays("relay1=relay1.example:3478")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.builder = f.srv.builder.WithRelays(relays)
+
+	relayed, err := f.srv.builder.For(f.ctx, alice.membershipID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relayed.GetTunnel().GetMtu(); got != uint32(relayproto.RelayedTunnelMTU) {
+		t.Errorf("MTU with a relay is %d, want %d — a relayed packet would fragment",
+			got, relayproto.RelayedTunnelMTU)
+	}
+	if relayed.GetTunnel().GetMtu() >= direct.GetTunnel().GetMtu() {
+		t.Error("relaying did not lower the MTU")
+	}
+}
+
+// A deployment with no relay says so by omission: peers carry neither an endpoint nor a relay,
+// and an agent knows about them without being able to reach them. Honest, and what the system
+// did before relays existed.
+func TestWithoutRelaysPeersCarryNeitherEndpointNorRelay(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	f.enrolDevice("bob")
+
+	state, err := f.srv.builder.For(f.ctx, alice.membershipID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := state.GetUpsertPeers()[0]
+	if peer.GetRelayId() != "" {
+		t.Errorf("a peer names relay %q in a deployment with none", peer.GetRelayId())
+	}
+	if len(peer.GetEndpoints()) != 0 {
+		t.Error("a peer carries an endpoint, which nothing discovers yet")
+	}
+	if state.GetRelays() != nil {
+		t.Error("relay configuration was sent by a deployment with no relays")
+	}
+}
+
+// Deltas carry the relay configuration too, not only snapshots: an agent that missed the
+// snapshot would have peers naming a relay it knows nothing about.
+func TestADeltaAlsoCarriesTheRelayConfiguration(t *testing.T) {
+	f := newFixture(t)
+	relays, err := ParseRelays("relay1=relay1.example:3478")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.builder = f.srv.builder.WithRelays(relays)
+
+	alice := f.enrolDevice("alice")
+	before := f.headVersion()
+	f.enrolDevice("bob")
+
+	delta, err := f.srv.builder.For(f.ctx, alice.membershipID, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.GetFromVersion() == 0 {
+		t.Fatal("expected a delta, got a snapshot")
+	}
+	if delta.GetRelays() == nil {
+		t.Error("the delta carries no relay configuration")
+	}
+	if delta.GetUpsertPeers()[0].GetRelayId() != "relay1" {
+		t.Error("the peer in the delta does not name the relay")
+	}
+}

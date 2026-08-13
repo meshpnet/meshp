@@ -52,6 +52,9 @@ type Config struct {
 	// MasterSecret derives the session challenge key.
 	MasterSecret []byte
 
+	// Relays is what this deployment offers, sent to agents as part of desired state.
+	Relays *meshpv1.RelayConfig
+
 	// RelayIssuer mints relay credentials when asked. Nil where a deployment has not
 	// configured relaying: enrolment and state still work, and an agent asking for a token
 	// is told relaying is unavailable rather than met with silence (ADR-0017).
@@ -87,7 +90,7 @@ func NewServer(st *store.Store, hub *Hub, cfg Config) (*Server, error) {
 	return &Server{
 		store:      st,
 		hub:        hub,
-		builder:    NewStateBuilder(st),
+		builder:    NewStateBuilder(st).WithRelays(cfg.Relays),
 		challenger: challenger,
 		relay:      cfg.RelayIssuer,
 		clk:        cfg.Clock,
