@@ -1009,3 +1009,175 @@ func TestAPeersAddressesAreCorrectedWithoutDisturbingAWorkingEndpoint(t *testing
 		t.Errorf("wrong allowed IPs were left in place:\n%s", plan)
 	}
 }
+
+// --- relayed peers -----------------------------------------------------------
+//
+// A relayed peer's endpoint is a loopback socket the agent serves, forwarding to and from a
+// relay (ADR-0016). That interacts with the endpoint-is-evidence rule in a way worth being
+// explicit about: a loopback socket always answers, so it always looks alive.
+
+func relayed(t *testing.T, port int) Peer {
+	t.Helper()
+	return Peer{
+		PublicKey:        "peer-bob",
+		AllowedIPs:       prefixes(t, "100.90.0.2/32"),
+		Endpoint:         fmt.Sprintf("127.0.0.1:%d", port),
+		Relayed:          true,
+		KeepaliveSeconds: 25,
+	}
+}
+
+// The rule that makes an upgrade possible at all. A loopback endpoint always looks alive, so
+// treating it as evidence would pin a relayed peer to the relay forever and no direct path
+// could ever replace it — the exact opposite of relay-first with opportunistic upgrade
+// (ADR-0002).
+func TestARelayedPeerIsNotPinnedByItsOwnLoopbackEndpoint(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{relayed(t, 51000)}
+
+	obs := applied(iface)
+	// The kernel reports the loopback endpoint, handshaking happily, because our own socket
+	// answers every time.
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = time.Second
+
+	// The server now offers a direct path.
+	want := base(t)
+	want.Peers = []Peer{{
+		PublicKey:        "peer-bob",
+		AllowedIPs:       prefixes(t, "100.90.0.2/32"),
+		Endpoint:         "203.0.113.2:51820",
+		KeepaliveSeconds: 25,
+	}}
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upgraded bool
+	for _, op := range plan.Ops {
+		if op.Kind == SetPeer && op.Peer.Endpoint == "203.0.113.2:51820" {
+			upgraded = true
+		}
+	}
+	if !upgraded {
+		t.Errorf("a relayed peer was never offered the direct path:\n%s", plan)
+	}
+}
+
+// And the other direction: what we intend beats what the device reports, because we are the
+// ones serving that socket.
+func TestARelayedEndpointIsWrittenOverWhateverTheDeviceHas(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{relayed(t, 51000)}
+
+	obs := applied(iface)
+	// A direct path that was working a moment ago, and has now been judged unusable by
+	// whatever decided to relay this peer.
+	obs.Peers[0].Endpoint = "203.0.113.2:51820"
+	obs.Peers[0].Relayed = false
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = time.Second
+
+	plan, err := For(iface, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrote bool
+	for _, op := range plan.Ops {
+		if op.Kind == SetPeer && op.Peer.Endpoint == "127.0.0.1:51000" {
+			wrote = true
+		}
+	}
+	if !wrote {
+		t.Errorf("the relayed endpoint was not written:\n%s", plan)
+	}
+}
+
+// The case a single operation cannot express. wgctrl treats an absent endpoint as "leave it
+// alone", so a peer that stops being relayed with nothing to replace its endpoint would keep
+// pointing at a socket about to stop existing. Removing and re-adding is the only way to
+// clear one.
+func TestStoppingRelayingWithNoReplacementClearsTheEndpoint(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{relayed(t, 51000)}
+	obs := applied(iface)
+
+	// No relay, and nowhere else to point either.
+	want := base(t)
+	want.Peers = []Peer{{
+		PublicKey:        "peer-bob",
+		AllowedIPs:       prefixes(t, "100.90.0.2/32"),
+		KeepaliveSeconds: 25,
+	}}
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, added := -1, -1
+	for i, op := range plan.Ops {
+		if op.Kind == RemovePeer && op.Peer.PublicKey == "peer-bob" {
+			removed = i
+		}
+		if op.Kind == SetPeer && op.Peer.PublicKey == "peer-bob" {
+			added = i
+		}
+	}
+	if removed < 0 || added < 0 {
+		t.Fatalf("the peer was not removed and re-added, so its endpoint still points at a\n"+
+			"socket nothing will serve:\n%s", plan)
+	}
+	if removed > added {
+		t.Errorf("re-added at %d before being removed at %d, which clears nothing", added, removed)
+	}
+	if plan.Ops[added].Peer.Endpoint != "" {
+		t.Errorf("re-added with endpoint %q, want none", plan.Ops[added].Peer.Endpoint)
+	}
+}
+
+// The states that must not be describable, because each is a peer pointing somewhere nothing
+// serves.
+func TestRelayedPeersMustBeCoherent(t *testing.T) {
+	cases := map[string]Peer{
+		"relayed with no endpoint": {
+			PublicKey: "peer-bob", AllowedIPs: nil, Relayed: true,
+		},
+		"relayed but pointing off-box": {
+			PublicKey: "peer-bob", Endpoint: "203.0.113.2:51820", Relayed: true,
+		},
+		"loopback without being relayed": {
+			PublicKey: "peer-bob", Endpoint: "127.0.0.1:51000", Relayed: false,
+		},
+	}
+	for name, peer := range cases {
+		t.Run(name, func(t *testing.T) {
+			iface := base(t)
+			peer.AllowedIPs = prefixes(t, "100.90.0.2/32")
+			iface.Peers = []Peer{peer}
+			if _, err := For(iface, Observed{}); err == nil {
+				t.Errorf("%s was accepted", name)
+			}
+		})
+	}
+}
+
+// A relayed peer that is still relayed to the same socket is not rewritten, or every reconcile
+// would reset the session of every relayed peer.
+func TestASteadyRelayedPeerIsLeftAlone(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{relayed(t, 51000)}
+
+	obs := applied(iface)
+	obs.Peers[0].HasHandshake = true
+	obs.Peers[0].HandshakeAge = 5 * time.Second
+
+	plan, err := For(iface, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() {
+		t.Errorf("a steady relayed peer produced work:\n%s", plan)
+	}
+}
