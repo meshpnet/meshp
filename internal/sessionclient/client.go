@@ -68,6 +68,25 @@ type Applier interface {
 	Apply(ctx context.Context, state *peerset.Set) (unapplied []string, err error)
 }
 
+// RelayCredentials is whatever needs a relay token, if anything does.
+//
+// The agent asks and the server answers; the server never pushes (ADR-0017). This is the
+// asking half, kept behind an interface so the control channel carries the credential
+// without owning a relay connection — a session dropping must not take relayed paths with
+// it (Invariant 15), which it would if the client held the relay itself.
+type RelayCredentials interface {
+	// NeedsToken reports whether to ask now. Called on every heartbeat, so it is also
+	// where a refusal is throttled: an implementation that kept saying yes after being
+	// declined would turn one misconfigured deployment into a request loop.
+	NeedsToken() bool
+
+	// SetToken hands over an issued credential.
+	SetToken(token []byte, expiresAt time.Time)
+
+	// TokenRefused reports that the server declined, and why.
+	TokenRefused(reason string)
+}
+
 // Options configures a Client.
 type Options struct {
 	ControlURL   string
@@ -78,6 +97,11 @@ type Options struct {
 	OS           string
 	OSVersion    string
 	Hostname     string
+
+	// Relay receives relay credentials as they are issued. Nil on a build or a platform
+	// with no data plane, and the client then never asks for one — a token nothing can use
+	// is a credential minted for no reason.
+	Relay RelayCredentials
 
 	HTTPClient *http.Client
 	Log        *slog.Logger
@@ -135,6 +159,59 @@ func (c *Client) appliedVersion() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state.Version()
+}
+
+// knowsARelay reports whether desired state names one.
+func (c *Client) knowsARelay() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.state.Relays().GetRelays()) > 0
+}
+
+// maybeRequestRelayToken asks for a credential when there is somewhere to use one.
+//
+// Both conditions matter. Asking before desired state names a relay gets a refusal from a
+// deployment that has simply not sent its relays yet, and asking on a build with no data
+// plane mints a credential nothing will ever present.
+//
+// Non-blocking on a full queue: the writer is already behind, and a second request would
+// not reach the server any sooner. The heartbeat asks again in 25 seconds.
+func (c *Client) maybeRequestRelayToken(outbound chan<- *meshpv1.ClientMessage) {
+	if c.opts.Relay == nil || !c.knowsARelay() || !c.opts.Relay.NeedsToken() {
+		return
+	}
+	select {
+	case outbound <- &meshpv1.ClientMessage{
+		Payload: &meshpv1.ClientMessage_RelayTokenRequest{RelayTokenRequest: &meshpv1.RelayTokenRequest{}},
+	}:
+	default:
+	}
+}
+
+// handleRelayToken passes an issued credential on, or records a refusal.
+func (c *Client) handleRelayToken(msg *meshpv1.RelayToken) {
+	if c.opts.Relay == nil {
+		// Nothing asked for this. A server that sent it unprompted is not a reason to end
+		// the session (ADR-0008), but it is worth a line: it means the two ends disagree
+		// about who starts this exchange.
+		c.log.Debug("ignoring a relay token nothing asked for")
+		return
+	}
+	if reason := msg.GetError(); reason != "" {
+		// The text crosses a trust boundary from the control plane, which an agent may be
+		// pointed at rather than own.
+		c.log.Warn("the control plane declined to issue a relay token",
+			"reason", logx.Safe(reason))
+		c.opts.Relay.TokenRefused(reason)
+		return
+	}
+	if len(msg.GetToken()) == 0 {
+		c.opts.Relay.TokenRefused("the control plane sent an empty token")
+		return
+	}
+	expires := time.Unix(msg.GetExpiresAtUnix(), 0)
+	c.opts.Relay.SetToken(msg.GetToken(), expires)
+	c.log.Info("holding a relay token", "expires_at", expires.UTC().Format(time.RFC3339))
 }
 
 // Run keeps a session up until ctx ends, reconnecting when it drops.
@@ -287,6 +364,11 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				default:
 					// The writer is already behind; another heartbeat will not help.
 				}
+
+				// A relay token expires while the session stays up, so something has to
+				// notice on a timer rather than only when state changes. The heartbeat is
+				// already the agent's "still here" tick and needs no goroutine of its own.
+				c.maybeRequestRelayToken(outbound)
 			}
 		}
 	}()
@@ -320,6 +402,13 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 
 		case *meshpv1.ServerMessage_StateDelta:
 			c.handleState(sessionCtx, applier, payload.StateDelta, outbound)
+			// State is what first tells this agent a relay exists, so this is the earliest
+			// moment worth asking — waiting for the next heartbeat would leave every peer
+			// relay-less for up to 25 seconds after a join.
+			c.maybeRequestRelayToken(outbound)
+
+		case *meshpv1.ServerMessage_RelayToken:
+			c.handleRelayToken(payload.RelayToken)
 
 		case *meshpv1.ServerMessage_HeartbeatAck:
 			if payload.HeartbeatAck.GetStateAvailable() {

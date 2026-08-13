@@ -198,9 +198,10 @@ func cmdJoin(ctx context.Context, args []string) error {
 	// What is true here differs by platform and by privilege, so it is not asserted:
 	// the daemon knows, and `meshp status` asks it. What is true everywhere is the
 	// limitation below.
-	fmt.Println("The daemon is bringing up the interface; run 'meshp status' to see whether it did.")
-	fmt.Println("Peers carry no endpoints yet, so devices in this network know about each")
-	fmt.Println("other and cannot reach each other. That arrives with the relay.")
+	fmt.Println("The daemon is bringing up the interface; run 'meshp status' to see whether it did,")
+	fmt.Println("and which relay it is reaching other devices through. Nothing discovers direct")
+	fmt.Println("paths yet, so every peer is relayed — which is how meshp is meant to work, not a")
+	fmt.Println("temporary state. Direct paths are an optimisation on top (ADR-0002).")
 	return nil
 }
 
@@ -265,9 +266,51 @@ func cmdStatus(ctx context.Context, args []string) error {
 			fmt.Printf("                %s\n", m.AddressV6)
 		}
 		fmt.Printf("    wg key      %s\n", truncate(m.WireGuardPublicKey, 20))
+		printRelay(m.Relay)
 		fmt.Printf("    joined      %s\n", m.JoinedAt.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// printRelay reports how this device reaches peers it has no direct path to.
+//
+// Which today is all of them (ADR-0002), so this is the line that explains a mesh where
+// every peer is configured and nothing answers. The failures are separated because they
+// have different fixes: no credential is a control-plane problem, no connection is a
+// network problem, and a connection carrying nothing in one direction is usually a
+// firewall.
+func printRelay(r *agentapi.RelayStatus) {
+	if r == nil {
+		return
+	}
+	switch {
+	case r.Connected:
+		fmt.Printf("    relay       %s via %s\n", r.RelayID, r.Endpoint)
+		if r.Reflexive != "" {
+			// The address the relay sees, which nothing on this host can work out for
+			// itself and which is the first thing to look at when a direct path never forms.
+			fmt.Printf("      seen as   %s\n", r.Reflexive)
+		}
+	case r.RelayID == "":
+		fmt.Printf("    relay       none offered by this network\n")
+	case !r.HasToken && r.Refusal != "":
+		fmt.Printf("    relay       %s, not authorised: %s\n", r.RelayID, r.Refusal)
+	case !r.HasToken:
+		fmt.Printf("    relay       %s, waiting for a credential\n", r.RelayID)
+	default:
+		fmt.Printf("    relay       %s, not connected\n", r.RelayID)
+	}
+	if !r.Connected && r.LastError != "" {
+		fmt.Printf("      error     %s\n", r.LastError)
+	}
+	if r.PeersRelayed > 0 {
+		fmt.Printf("      peers     %d relayed, %d sent, %d received",
+			r.PeersRelayed, r.PacketsRelayed, r.PacketsDelivered)
+		if r.Dropped > 0 {
+			fmt.Printf(", %d dropped", r.Dropped)
+		}
+		fmt.Println()
+	}
 }
 
 // describeDaemonError turns a socket failure into an instruction.

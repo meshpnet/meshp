@@ -17,9 +17,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/wglink"
 	"github.com/meshpnet/meshp/internal/wgplan"
+	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
 // defaultMTU is used when the server has not said what the MTU should be.
@@ -27,6 +29,31 @@ import (
 // 1420 leaves room for WireGuard's overhead inside a 1500-byte path. A starting point
 // rather than a measurement, and the same number the control plane sends today.
 const defaultMTU = 1420
+
+// Relay supplies the local endpoints that make relayed peers reachable.
+//
+// A kernel WireGuard socket cannot be intercepted, so a relayed peer is given an address
+// the kernel is willing to send to: a loopback socket owned by the agent (ADR-0016). This
+// package asks for one and configures it; what happens to a packet after that belongs to
+// relayforward.
+type Relay interface {
+	// Endpoint is the local address to configure for a peer relayed through relayID.
+	//
+	// Creating a socket if there is not one already, which is why Desired has a side
+	// effect and cannot be used to preview a configuration.
+	Endpoint(publicKey, relayID string) (netip.AddrPort, error)
+
+	// Retain stops serving every peer not named. Called only after the kernel has been
+	// pointed elsewhere, because wgctrl cannot clear an endpoint and closing a socket the
+	// kernel still sends to leaves a peer that looks configured and goes nowhere.
+	Retain(publicKeys []string)
+
+	// SetWireGuardPort says where inbound relayed packets should be delivered.
+	//
+	// The reconciler is where this becomes known: a device that has just joined asks the
+	// kernel for any port, so nothing can be told the answer until the interface exists.
+	SetWireGuardPort(port int)
+}
 
 // Membership is what this package needs to know about the device's place in a network.
 type Membership struct {
@@ -55,6 +82,10 @@ type Reconciler struct {
 	membership Membership
 	log        *slog.Logger
 
+	// relay is nil where this build or this deployment has none. Relayed peers then get no
+	// endpoint and are unreachable, which is what they were before there was a relay at all.
+	relay Relay
+
 	mu       sync.Mutex
 	kind     wglink.Kind
 	up       bool
@@ -63,12 +94,12 @@ type Reconciler struct {
 	port     int
 }
 
-// New returns a Reconciler for one membership.
-func New(link wglink.Link, m Membership, log *slog.Logger) *Reconciler {
+// New returns a Reconciler for one membership. relay may be nil.
+func New(link wglink.Link, m Membership, relay Relay, log *slog.Logger) *Reconciler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Reconciler{link: link, membership: m, log: log, kind: wglink.KindUnknown}
+	return &Reconciler{link: link, membership: m, relay: relay, log: log, kind: wglink.KindUnknown}
 }
 
 // Status is what the daemon reports about this tunnel.
@@ -101,7 +132,7 @@ func (r *Reconciler) Status() Status {
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
 func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, error) {
-	want, err := Desired(r.membership, state)
+	want, err := Desired(r.membership, state, r.relay, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
 		// rather than approximated: applying part of a rejected configuration is how an
@@ -148,6 +179,20 @@ func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, err
 	port := want.ListenPort
 	if after, err := r.link.Observe(want.Name); err == nil && after.ListenPort != 0 {
 		port = after.ListenPort
+	}
+
+	// Now, and not before. The kernel has been given whatever endpoints this state calls
+	// for, so a socket serving a peer that is no longer relayed is one nothing points at
+	// and is safe to close (ADR-0016). On the failure paths above this is deliberately
+	// skipped: a plan that did not fully apply may have left the kernel pointing at a
+	// socket this would take away.
+	//
+	// The port is only knowable here too. A device that has just joined asks the kernel for
+	// any port, so until the interface exists there is no answer to give and inbound
+	// relayed packets have nowhere to be delivered.
+	if r.relay != nil {
+		r.relay.Retain(relayedKeys(want))
+		r.relay.SetWireGuardPort(port)
 	}
 
 	r.mu.Lock()
@@ -198,7 +243,19 @@ func (r *Reconciler) fail(err error) {
 // translation that can be wrong in a way no type would catch — an address rendered as a
 // pool prefix instead of a host prefix, a peer's allowed IPs dropped because one entry
 // failed to parse.
-func Desired(m Membership, state *peerset.Set) (wgplan.Interface, error) {
+//
+// Not free of side effects, despite reading like it: a relayed peer's endpoint is a socket,
+// so asking relay for one creates it. That is the only order that works — the endpoint has
+// to exist before the kernel can be told about it — and any socket created for a peer that
+// then fails to convert is reclaimed by the next successful Retain.
+//
+// relay may be nil, and a relayed peer is then left without an endpoint rather than
+// refused. One peer whose relay this device is not attached to must not take down the
+// interface every other peer is reached through.
+func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (wgplan.Interface, error) {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	if m.PrivateKey == "" {
 		return wgplan.Interface{}, errors.New("tunnel: this membership has no WireGuard private key")
 	}
@@ -232,8 +289,7 @@ func Desired(m Membership, state *peerset.Set) (wgplan.Interface, error) {
 	}
 
 	for _, peer := range state.Peers() {
-		converted, err := peerFrom(peer.GetPublicKey(), peer.GetAllowedIps(),
-			peer.GetEndpoints(), int(peer.GetPersistentKeepaliveSeconds()))
+		converted, err := peerFrom(peer, relay, log)
 		if err != nil {
 			// Refused rather than skipped. A peer quietly dropped is a device that cannot be
 			// reached, with everything reporting success.
@@ -245,12 +301,12 @@ func Desired(m Membership, state *peerset.Set) (wgplan.Interface, error) {
 	return iface, nil
 }
 
-func peerFrom(publicKey string, allowedIPs, endpoints []string, keepalive int) (wgplan.Peer, error) {
+func peerFrom(p *meshpv1.Peer, relay Relay, log *slog.Logger) (wgplan.Peer, error) {
 	peer := wgplan.Peer{
-		PublicKey:        wgplan.Key(publicKey),
-		KeepaliveSeconds: keepalive,
+		PublicKey:        wgplan.Key(p.GetPublicKey()),
+		KeepaliveSeconds: int(p.GetPersistentKeepaliveSeconds()),
 	}
-	for _, cidr := range allowedIPs {
+	for _, cidr := range p.GetAllowedIps() {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil {
 			return wgplan.Peer{}, fmt.Errorf("allowed IP %q: %w", cidr, err)
@@ -258,16 +314,39 @@ func peerFrom(publicKey string, allowedIPs, endpoints []string, keepalive int) (
 		peer.AllowedIPs = append(peer.AllowedIPs, prefix)
 	}
 
-	// The first endpoint only. The list is ordered best-first and choosing between them is
-	// the agent's job once there is something to choose with (ADR-0003); WireGuard holds one
+	// A direct path wins. The list is ordered best-first and choosing between several is the
+	// agent's job once there is something to choose with (ADR-0003); WireGuard holds one
 	// endpoint per peer, so until then the server's first preference is the only answer.
-	// Empty is normal and means relay-only, which today means unreachable.
-	if len(endpoints) > 0 {
+	if endpoints := p.GetEndpoints(); len(endpoints) > 0 {
 		if _, err := netip.ParseAddrPort(endpoints[0]); err != nil {
 			return wgplan.Peer{}, fmt.Errorf("endpoint %q: %w", endpoints[0], err)
 		}
 		peer.Endpoint = endpoints[0]
+		return peer, nil
 	}
+
+	// Otherwise a relay, if this device is attached to the one the peer names. meshp is
+	// relay-first: this is the ordinary path, not a fallback (ADR-0002).
+	relayID := p.GetRelayId()
+	if relayID == "" || relay == nil {
+		// No endpoint at all: reachable by nothing, which is what every peer was before
+		// there was a relay. Left in the interface so its allowed IPs still resolve and the
+		// device shows up as a peer without a handshake rather than not at all.
+		return peer, nil
+	}
+
+	endpoint, err := relay.Endpoint(p.GetPublicKey(), relayID)
+	if err != nil {
+		// Not fatal. A peer relayed through somewhere this device is not attached to is
+		// unreachable, and refusing the whole description would make one such peer take
+		// down the interface every working peer is reached through.
+		log.Warn("no relayed path to a peer",
+			"peer", truncate(p.GetPublicKey()), "relay_id", logx.Safe(relayID),
+			"error", logx.SafeError(err))
+		return peer, nil
+	}
+	peer.Endpoint = endpoint.String()
+	peer.Relayed = true
 	return peer, nil
 }
 
@@ -294,6 +373,17 @@ func hostPrefix(addr string) (netip.Prefix, error) {
 	}
 	parsed = parsed.Unmap()
 	return netip.PrefixFrom(parsed, parsed.BitLen()), nil
+}
+
+// relayedKeys is the peers this interface reaches through a relay.
+func relayedKeys(want wgplan.Interface) []string {
+	out := make([]string, 0, len(want.Peers))
+	for _, peer := range want.Peers {
+		if peer.Relayed {
+			out = append(out, string(peer.PublicKey))
+		}
+	}
+	return out
 }
 
 func truncate(key string) string {

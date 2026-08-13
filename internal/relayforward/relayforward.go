@@ -39,11 +39,16 @@ type Sender interface {
 
 // Forwarder owns the loopback sockets serving relayed peers.
 type Forwarder struct {
-	// wgAddr is the local WireGuard listen port, where inbound packets are delivered.
-	wgAddr netip.AddrPort
-	log    *slog.Logger
+	log *slog.Logger
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// wgAddr is the local WireGuard listen port, where inbound packets are delivered.
+	//
+	// Not known when a device has just joined: the interface asks the kernel for any port
+	// and the kernel's answer is what the peers will be told about, so it arrives after the
+	// first convergence rather than before. Guarded because the reconciler sets it from one
+	// goroutine while the relay's receive loop reads it from another.
+	wgAddr  netip.AddrPort
 	peers   map[relayproto.Key]*peerSocket
 	sender  Sender
 	stopped bool
@@ -61,6 +66,7 @@ type Stats struct {
 	Delivered      uint64
 	DroppedNoRelay uint64
 	DroppedNoPeer  uint64
+	DroppedNoPort  uint64
 	SendFailed     uint64
 }
 
@@ -81,21 +87,49 @@ type peerSocket struct {
 }
 
 // New returns a Forwarder delivering inbound packets to a WireGuard listen port.
+//
+// A port of zero means it is not known yet, which is the normal state of a device that has
+// just joined: the interface asks the kernel for any port, and the kernel's choice is only
+// available once the interface exists. Inbound packets are dropped and counted until
+// SetWireGuardPort says where they go — visibly, because a forwarder that silently
+// discarded them would look like a relay problem from every angle.
 func New(wgPort int, sender Sender, log *slog.Logger) (*Forwarder, error) {
-	if wgPort <= 0 {
-		// Without it there is nowhere to deliver, and a forwarder that silently discarded
-		// inbound packets would look like a relay problem from every angle.
-		return nil, errors.New("relayforward: no WireGuard listen port to deliver to")
+	if wgPort < 0 {
+		return nil, fmt.Errorf("relayforward: %d is not a WireGuard listen port", wgPort)
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Forwarder{
-		wgAddr: netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(wgPort)),
+	f := &Forwarder{
 		log:    log,
 		peers:  make(map[relayproto.Key]*peerSocket),
 		sender: sender,
-	}, nil
+	}
+	if wgPort > 0 {
+		f.wgAddr = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(wgPort))
+	}
+	return f, nil
+}
+
+// SetWireGuardPort records where inbound packets go.
+//
+// Called after the interface converges, because until then the port is the kernel's to
+// choose. Changing it is not: the peers have been told about the sockets this owns, and the
+// interface keeps its port across reconciles.
+func (f *Forwarder) SetWireGuardPort(port int) {
+	if port <= 0 {
+		return
+	}
+	addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(port))
+
+	f.mu.Lock()
+	changed := f.wgAddr != addr
+	f.wgAddr = addr
+	f.mu.Unlock()
+
+	if changed {
+		f.log.Debug("delivering relayed packets to the WireGuard port", "port", port)
+	}
 }
 
 // SetSender swaps the relay connection, for when a client reconnects.
@@ -186,8 +220,16 @@ func (f *Forwarder) Peers() []relayproto.Key {
 func (f *Forwarder) Deliver(peer relayproto.Key, payload []byte) error {
 	f.mu.Lock()
 	ps, ok := f.peers[peer]
+	wgAddr := f.wgAddr
 	f.mu.Unlock()
 
+	if !wgAddr.IsValid() {
+		// The interface has not come up yet, so there is nowhere to deliver. Counted rather
+		// than logged per packet: it is normal for the first moments after a join and a
+		// standing problem after that, and the number is what tells those apart.
+		f.count(func(st *Stats) { st.DroppedNoPort++ })
+		return errors.New("relayforward: the WireGuard listen port is not known yet")
+	}
 	if !ok {
 		// A packet for a peer we are not serving. Not alarming on its own — a relay may
 		// still be flushing traffic for a peer that has just moved to a direct path — but
@@ -195,7 +237,7 @@ func (f *Forwarder) Deliver(peer relayproto.Key, payload []byte) error {
 		f.count(func(st *Stats) { st.DroppedNoPeer++ })
 		return fmt.Errorf("relayforward: no socket serving %s", truncate(peer))
 	}
-	if _, err := ps.conn.WriteToUDPAddrPort(payload, f.wgAddr); err != nil {
+	if _, err := ps.conn.WriteToUDPAddrPort(payload, wgAddr); err != nil {
 		return fmt.Errorf("relayforward: delivering to the local WireGuard port: %w", err)
 	}
 	f.count(func(st *Stats) { st.Delivered++ })
