@@ -20,6 +20,10 @@ type Change struct {
 	// a delta is built the row that held this key may not exist — and an agent that is
 	// never told to remove a peer keeps a tunnel configured to a device that does not.
 	PeerPublicKey *string
+
+	// Policy marks a change to the network's ACL policy, which names no peer because it
+	// changes what every device may do.
+	Policy bool
 }
 
 // PeerUpserted records that a membership's peer state changed.
@@ -33,6 +37,13 @@ func PeerRemoved(publicKey string) Change {
 	key := publicKey
 	return Change{PeerPublicKey: &key}
 }
+
+// PolicyChanged records that the network's ACL policy changed.
+//
+// It names nothing, because it is about every device at once. One row rather than one per
+// membership: a policy edit in a 500-device network would otherwise write 500 rows and
+// produce 500-entry deltas describing peers that did not change.
+func PolicyChanged() Change { return Change{Policy: true} }
 
 // BumpVersion advances a network's state version and records what changed, together.
 //
@@ -74,6 +85,10 @@ func BumpVersion(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, cha
 // kind reports which sort of change this is, refusing anything ambiguous.
 func (c Change) kind() (string, error) {
 	switch {
+	case c.Policy && (c.MembershipID != nil || c.PeerPublicKey != nil):
+		return "", errors.New("a policy change also names a peer; it is about all of them")
+	case c.Policy:
+		return "policy", nil
 	case c.MembershipID != nil && c.PeerPublicKey != nil:
 		return "", errors.New("a change names both a membership and a key; it must be one or the other")
 	case c.MembershipID != nil:
