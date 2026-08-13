@@ -64,6 +64,13 @@ an exception to it. See ADR-0003.
 Peers, routes, DNS and route-group candidates persist locally and keep working.
 Losing the control plane costs new configuration, not connectivity.
 
+The control plane is not the agent. On a direct path the kernel carries packets
+whether meshpd is running or not, and this promise is as strong as it sounds. On a
+relayed path the agent is in the data path (ADR-0016), so losing it does stop
+traffic that a direct path would have kept carrying — which is why meshpd must be
+supervised, and why upgrading to a direct path is a resilience measure and not
+only a performance one.
+
 **16. No traffic leaves the device outside the tunnel while a default route is claimed.**
 Across sleep, network change, agent crash and agent kill. See ADR-0011.
 
