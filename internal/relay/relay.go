@@ -51,15 +51,30 @@ type Authenticator interface {
 
 // Out is a datagram to send.
 type Out struct {
+	// Via is which of the relay's sockets to send from, as an index into whatever the
+	// caller is listening on.
+	//
+	// It matters because a relay listens on several ports — one is not enough, since
+	// networks exist that block UDP 443 while permitting 3478 — and a peer's NAT will only
+	// accept a reply whose source is the address it sent to. Forwarding a packet out of the
+	// wrong socket produces a relay that works only when both peers happened to choose the
+	// same port.
+	Via int
+
 	To    netip.AddrPort
 	Frame relayproto.Frame
 }
 
 // Session is a connected agent.
 type Session struct {
-	Key      relayproto.Key
-	Network  string
-	Addr     netip.AddrPort
+	Key     relayproto.Key
+	Network string
+	Addr    netip.AddrPort
+
+	// Via is the socket this agent said hello on, and therefore the only one it will accept
+	// replies from.
+	Via int
+
 	LastSeen time.Time
 }
 
@@ -132,7 +147,7 @@ func New(cfg Config) (*Server, error) {
 // Returning the replies rather than writing them keeps every rule testable without a socket,
 // and makes the anti-amplification property checkable: a caller can assert that nothing
 // leaving is larger than what arrived.
-func (s *Server) Handle(from netip.AddrPort, datagram []byte) []Out {
+func (s *Server) Handle(via int, from netip.AddrPort, datagram []byte) []Out {
 	frame, err := relayproto.Decode(datagram)
 	if err != nil {
 		// Silently. Anything on a public UDP port receives noise, and answering it is both
@@ -144,11 +159,11 @@ func (s *Server) Handle(from netip.AddrPort, datagram []byte) []Out {
 
 	switch frame.Type {
 	case relayproto.TypeHello:
-		return s.hello(from, frame)
+		return s.hello(via, from, frame)
 	case relayproto.TypeSend:
 		return s.forward(from, frame)
 	case relayproto.TypePing:
-		return s.ping(from, frame)
+		return s.ping(via, from, frame)
 	default:
 		// Welcome, refused, recv and pong are what a relay emits, not what it accepts. A
 		// peer sending one is confused or probing; either way there is nothing to say.
@@ -158,7 +173,7 @@ func (s *Server) Handle(from netip.AddrPort, datagram []byte) []Out {
 }
 
 // hello authenticates an agent and records where it can be reached.
-func (s *Server) hello(from netip.AddrPort, frame relayproto.Frame) []Out {
+func (s *Server) hello(via int, from netip.AddrPort, frame relayproto.Frame) []Out {
 	// The size of what arrived, which bounds what may be sent back to a sender that has not
 	// proved anything.
 	arrived := relayproto.HeaderLen + len(frame.Payload)
@@ -167,20 +182,20 @@ func (s *Server) hello(from netip.AddrPort, frame relayproto.Frame) []Out {
 	if err != nil {
 		s.count(func(st *Stats) { st.HelloRefused++ })
 		s.log.Info("refused a hello", "from", from, "error", err)
-		return s.refuse(from, arrived)
+		return s.refuse(via, from, arrived)
 	}
 
 	// The token names the key, so only its holder can move where that key is reachable.
 	if key != frame.Key {
 		s.count(func(st *Stats) { st.HelloRefused++ })
 		s.log.Info("hello key does not match its token", "from", from)
-		return s.refuse(from, arrived)
+		return s.refuse(via, from, arrived)
 	}
 
 	now := s.clk.Now()
 	s.mu.Lock()
 	previous, existed := s.byKey[key]
-	s.byKey[key] = &Session{Key: key, Network: network, Addr: from, LastSeen: now}
+	s.byKey[key] = &Session{Key: key, Network: network, Addr: from, Via: via, LastSeen: now}
 	s.stats.HelloAccepted++
 	s.mu.Unlock()
 
@@ -193,7 +208,7 @@ func (s *Server) hello(from netip.AddrPort, frame relayproto.Frame) []Out {
 	// The observed address is the whole reason an agent talks to a relay before it needs
 	// one: it is this device's server-reflexive candidate, and nothing else can tell it
 	// (ADR-0016). The control channel's TCP source address is not the same thing.
-	return []Out{{To: from, Frame: relayproto.Frame{
+	return []Out{{Via: via, To: from, Frame: relayproto.Frame{
 		Type:    relayproto.TypeWelcome,
 		Key:     s.selfKey,
 		Payload: []byte(from.String()),
@@ -208,7 +223,7 @@ func (s *Server) hello(from netip.AddrPort, frame relayproto.Frame) []Out {
 // earned a reply, and answering it would let an attacker bounce slightly larger packets off
 // this relay at a spoofed victim. A real token is much larger than "refused", so a genuine
 // agent with an expired token still learns what happened.
-func (s *Server) refuse(to netip.AddrPort, arrived int) []Out {
+func (s *Server) refuse(via int, to netip.AddrPort, arrived int) []Out {
 	frame := relayproto.Frame{
 		Type:    relayproto.TypeRefused,
 		Key:     s.selfKey,
@@ -218,7 +233,7 @@ func (s *Server) refuse(to netip.AddrPort, arrived int) []Out {
 		s.log.Debug("dropping a refusal that would be larger than the hello", "to", to)
 		return nil
 	}
-	return []Out{{To: to, Frame: frame}}
+	return []Out{{Via: via, To: to, Frame: frame}}
 }
 
 // forward carries a packet to the peer it names.
@@ -258,7 +273,10 @@ func (s *Server) forward(from netip.AddrPort, frame relayproto.Frame) []Out {
 	// Rewritten to name the sender, because that is what tells the receiving agent which
 	// peer this came from and therefore which of its sockets to deliver it on. Forwarding
 	// without rewriting would send every packet back where it came from.
-	return []Out{{To: dest.Addr, Frame: relayproto.Frame{
+	// Out of the socket the destination is talking to, not the one this arrived on. A peer's
+	// NAT only accepts a datagram whose source is the address it sent to, so sending from
+	// the wrong socket would work only when both peers happened to pick the same port.
+	return []Out{{Via: dest.Via, To: dest.Addr, Frame: relayproto.Frame{
 		Type:    relayproto.TypeRecv,
 		Key:     sender.Key,
 		Payload: frame.Payload,
@@ -266,7 +284,7 @@ func (s *Server) forward(from netip.AddrPort, frame relayproto.Frame) []Out {
 }
 
 // ping answers a keepalive, which is how an agent holds its NAT mapping open.
-func (s *Server) ping(from netip.AddrPort, frame relayproto.Frame) []Out {
+func (s *Server) ping(via int, from netip.AddrPort, frame relayproto.Frame) []Out {
 	now := s.clk.Now()
 
 	s.mu.Lock()
@@ -281,7 +299,7 @@ func (s *Server) ping(from netip.AddrPort, frame relayproto.Frame) []Out {
 
 	// The payload is echoed so the agent can measure a round trip, and echoing exactly what
 	// arrived means the reply can never be larger than the request.
-	return []Out{{To: from, Frame: relayproto.Frame{
+	return []Out{{Via: via, To: from, Frame: relayproto.Frame{
 		Type:    relayproto.TypePong,
 		Key:     s.selfKey,
 		Payload: frame.Payload,
