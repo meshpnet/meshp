@@ -133,6 +133,7 @@ make e2e          # enrol a device against a real database, start to finish
 make image        # build the server-side container image
 make image-smoke  # start that image against a real database and wait for readiness
 make dataplane    # real WireGuard interfaces, and a packet across a tunnel
+make e2e-tunnel   # the whole stack on Linux, with tunnels that really come up
 ```
 
 `make ci` deliberately excludes the container build and the data plane: one needs Docker,

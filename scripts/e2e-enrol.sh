@@ -73,7 +73,7 @@ curl -fsS "${BASE}/readyz" >/dev/null 2>&1 || fail "control plane never became r
 echo "starting meshpd with no state at all"
 # Deliberately before enrolment. An agent that gives up when it has nothing to do cannot
 # be joined without restarting a service, which is a paper cut people script around.
-./bin/meshpd --state-dir "$STATE_DIR" --socket "$SOCKET" --log-level debug >"$AGENT_LOG" 2>&1 &
+./bin/meshpd --reconcile-interval 2s --state-dir "$STATE_DIR" --socket "$SOCKET" --log-level debug >"$AGENT_LOG" 2>&1 &
 AGENT_PID=$!
 
 for _ in $(seq 1 30); do
@@ -169,9 +169,18 @@ done
 [ "$connected" = "1" ] || fail "status never reported a connected session: $(cat "$WORK/status.out")"
 sed 's/^/  /' "$WORK/status.out"
 grep -q "$NETWORK_ID" "$WORK/status.out" || fail "status does not mention the network"
-# A membership with an address is not a working tunnel, and status must not imply it is.
-grep -q 'interface   meshp0 (not up)' "$WORK/status.out" \
-  || fail "status does not say the tunnel is down"
+# Status must say what is actually true, in either direction: a membership with an address
+# is not a working tunnel, and a working tunnel must not be reported as absent. Which one to
+# expect is decided by the platform rather than assumed, because this assertion once said
+# "always down" and outlived the build it was written for.
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe0 type wireguard 2>/dev/null; then
+  ip link del dev wgprobe0
+  grep -qE 'interface   meshp0 \(up' "$WORK/status.out" \
+    || fail "a tunnel is possible here but status says it is not up"
+else
+  grep -q 'interface   meshp0 (not up)' "$WORK/status.out" \
+    || fail "no tunnel is possible here, but status claims one"
+fi
 
 echo "the agent converges"
 lag_zero=0
@@ -201,7 +210,7 @@ TOKEN2="$(curl -fsS -X POST \
 # A second daemon, so the first has a peer to be told about.
 STATE_DIR2="$WORK/state2"
 SOCKET2="$WORK/d2.sock"
-./bin/meshpd --state-dir "$STATE_DIR2" --socket "$SOCKET2" --log-level debug >"$WORK/meshpd2.log" 2>&1 &
+./bin/meshpd --reconcile-interval 2s --state-dir "$STATE_DIR2" --socket "$SOCKET2" --log-level debug >"$WORK/meshpd2.log" 2>&1 &
 AGENT2_PID=$!
 for _ in $(seq 1 30); do
   [ -S "$SOCKET2" ] && ./bin/meshp status --socket "$SOCKET2" >/dev/null 2>&1 && break
@@ -225,6 +234,72 @@ if [ "$got_delta" != "1" ]; then
   fail "the first agent was sent a snapshot rather than a delta when a peer joined"
 fi
 sed -n 's/.*msg="applied desired state" \(.*snapshot=false.*\)/  \1/p' "$AGENT_LOG" | tail -1
+
+# Only where a tunnel is possible: Linux, with the privilege to create interfaces and a
+# kernel that can. Skipped rather than failed elsewhere, because "enrolled with no tunnel"
+# is a real supported state and this script has to pass on a laptop too.
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe type wireguard 2>/dev/null; then
+  ip link del dev wgprobe
+  echo "the interface really comes up"
+
+  up=0
+  for _ in $(seq 1 20); do
+    if ./bin/meshp status --socket "$SOCKET" 2>/dev/null | grep -qE "interface   meshp0 \((up|up, )"; then
+      up=1; break
+    fi
+    sleep 1
+  done
+  if [ "$up" != "1" ]; then
+    echo "--- status ---" >&2; ./bin/meshp status --socket "$SOCKET" >&2 || true
+    echo "--- agent log ---" >&2; tail -30 "$AGENT_LOG" >&2
+    fail "the interface never came up"
+  fi
+  ./bin/meshp status --socket "$SOCKET" | sed -n 's/^\(    interface .*\)/  \1/p'
+
+  # And it is the kernel implementation, not a silent userspace fallback (ADR-0015).
+  ./bin/meshp status --socket "$SOCKET" | grep -q "up, kernel" \
+    || fail "the tunnel is up but not reported as the kernel implementation"
+
+  # The second daemon in this script shares this host, and the control plane gives both
+  # devices the interface name meshp0 — so while it was running the two fought over the same
+  # interface and the last one to reconcile won. That is an artefact of running two devices
+  # on one host, not something a real deployment does, and it is why the assertions below
+  # come after that daemon has been stopped.
+  #
+  # It does make this a stronger test than it was meant to be: the first daemon has to
+  # notice that its interface was taken from it and put it back, with nothing from the
+  # control plane to prompt it. That only works because reconciling happens on a timer as
+  # well as on arrival.
+  echo "  the interface is restored after another process took it over"
+  healed=0
+  for _ in $(seq 1 20); do
+    if ip addr show dev meshp0 2>/dev/null | grep -q "100.90.${OCTET}.1/32"; then healed=1; break; fi
+    sleep 1
+  done
+  if [ "$healed" != "1" ]; then
+    echo "--- interface ---" >&2; ip addr show dev meshp0 >&2 || true
+    echo "--- wg ---" >&2; wg show meshp0 >&2 || true
+    echo "--- agent log ---" >&2; tail -20 "$AGENT_LOG" >&2
+    fail "the interface never got this device's address back"
+  fi
+
+  # The peer that joined second is configured, with a host route only. A wider prefix would
+  # mean one peer absorbing traffic for every other device in the network.
+  if command -v wg >/dev/null 2>&1; then
+    wg show meshp0 allowed-ips | grep -qE "100\.90\.${OCTET}\.2/32" \
+      || { wg show meshp0 >&2; fail "the peer is not configured on the interface"; }
+    if wg show meshp0 allowed-ips | grep -qE "/(2[0-9]|1[0-9]|[0-9])\b"; then
+      wg show meshp0 allowed-ips >&2
+      fail "a peer holds a prefix wider than a single host"
+    fi
+    echo "  peer configured with host routes only"
+  fi
+
+  # And the routes the agent installed are its own, not the kernel's.
+  ip route show dev meshp0 | grep -q "100.90.${OCTET}.2" \
+    || { ip route show dev meshp0 >&2; fail "no route to the peer via the interface"; }
+  echo "  route to the peer installed"
+fi
 
 echo "the same token a second time"
 if ./bin/meshp join "$TOKEN" --control-url "$BASE" --socket "$SOCKET" >"$WORK/replay.out" 2>&1; then

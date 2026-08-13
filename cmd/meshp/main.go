@@ -195,8 +195,12 @@ func cmdJoin(ctx context.Context, args []string) error {
 		fmt.Printf("              %s\n", res.AddressV6)
 	}
 	fmt.Println()
-	fmt.Println("No tunnel yet: meshpd does not bring up WireGuard in this build.")
-	fmt.Println("This device is registered and holds an address; nothing routes to it so far.")
+	// What is true here differs by platform and by privilege, so it is not asserted:
+	// the daemon knows, and `meshp status` asks it. What is true everywhere is the
+	// limitation below.
+	fmt.Println("The daemon is bringing up the interface; run 'meshp status' to see whether it did.")
+	fmt.Println("Peers carry no endpoints yet, so devices in this network know about each")
+	fmt.Println("other and cannot reach each other. That arrives with the relay.")
 	return nil
 }
 
@@ -244,6 +248,11 @@ func cmdStatus(ctx context.Context, args []string) error {
 		tunnel := "not up"
 		if m.TunnelUp {
 			tunnel = "up"
+			if m.TunnelKind != "" {
+				// Which implementation, because the difference in throughput is large and
+				// there is otherwise no way to tell from here (ADR-0015).
+				tunnel = "up, " + m.TunnelKind
+			}
 		}
 		fmt.Printf("    interface   %s (%s)\n", m.InterfaceName, tunnel)
 		if m.AddressV4 != "" {
