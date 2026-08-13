@@ -48,6 +48,7 @@ type fixture struct {
 	t   *testing.T
 	srv *Server
 	clk *clock.Fake
+	via int // which listening socket the next send arrives on
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -68,7 +69,7 @@ func (f *fixture) send(from netip.AddrPort, frame relayproto.Frame) []Out {
 	if err != nil {
 		f.t.Fatalf("encoding %s: %v", frame.Type, err)
 	}
-	out := f.srv.Handle(from, buf[:n])
+	out := f.srv.Handle(f.via, from, buf[:n])
 
 	// The property that matters most for something on a public UDP port: a reply must never
 	// be larger than what prompted it, or the relay can be pointed at a third party and used
@@ -88,8 +89,22 @@ func (f *fixture) send(from netip.AddrPort, frame relayproto.Frame) []Out {
 	return out
 }
 
-// join gets a session established for a key at an address.
+// joinVia gets a session established for a key at an address, on a given socket.
+func (f *fixture) joinVia(via int, network string, k byte, at string) {
+	f.t.Helper()
+	previous := f.via
+	f.via = via
+	defer func() { f.via = previous }()
+	f.joinHere(network, k, at)
+}
+
+// join gets a session established for a key at an address, on socket 0.
 func (f *fixture) join(network string, k byte, at string) {
+	f.t.Helper()
+	f.joinHere(network, k, at)
+}
+
+func (f *fixture) joinHere(network string, k byte, at string) {
 	f.t.Helper()
 	out := f.send(addr(at), relayproto.Frame{
 		Type: relayproto.TypeHello, Key: key(k), Payload: token(network, k),
@@ -308,7 +323,7 @@ func TestGarbageIsDroppedSilently(t *testing.T) {
 		make([]byte, 2000),
 		[]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
 	} {
-		if out := f.srv.Handle(addr("192.0.2.9:9"), datagram); len(out) != 0 {
+		if out := f.srv.Handle(0, addr("192.0.2.9:9"), datagram); len(out) != 0 {
 			t.Errorf("%d bytes of garbage produced a reply: %+v", len(datagram), out)
 		}
 	}
@@ -421,7 +436,7 @@ func TestARelayNeverRepliesWithMoreThanItReceived(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		out := f.srv.Handle(addr("192.0.2.50:5050"), buf[:n])
+		out := f.srv.Handle(0, addr("192.0.2.50:5050"), buf[:n])
 		for _, o := range out {
 			reply := make([]byte, relayproto.HeaderLen+relayproto.MaxPayload)
 			rn, err := o.Frame.Encode(reply)
@@ -440,5 +455,75 @@ func TestARelayNeverRepliesWithMoreThanItReceived(t *testing.T) {
 	// Silent refusals are still counted, so an operator can see them happening.
 	if f.srv.Stats().HelloRefused == 0 {
 		t.Error("refusals are invisible in the counters")
+	}
+}
+
+// A relay listens on several ports, because networks exist that block UDP 443 while
+// permitting 3478 — verified against a real network, not hypothesised. Two peers may
+// therefore be talking to different sockets, and a forwarded packet has to leave by the one
+// its destination is using: a peer's NAT only accepts a datagram whose source is the address
+// it sent to. Getting this wrong yields a relay that works only when both peers happen to
+// choose the same port, which is most of the time in testing and not in the field.
+func TestAForwardedPacketLeavesByTheDestinationsSocket(t *testing.T) {
+	f := newFixture(t)
+	f.joinVia(0, "acme", 1, "203.0.113.1:1111") // peer 1 on socket 0, say udp/3478
+	f.joinVia(1, "acme", 2, "203.0.113.2:2222") // peer 2 on socket 1, say udp/443
+
+	// 1 -> 2 must leave by socket 1.
+	f.via = 0
+	out := f.send(addr("203.0.113.1:1111"), relayproto.Frame{
+		Type: relayproto.TypeSend, Key: key(2), Payload: []byte("packet"),
+	})
+	if len(out) != 1 {
+		t.Fatalf("expected one forward, got %+v", out)
+	}
+	if out[0].Via != 1 {
+		t.Errorf("forwarded via socket %d, want 1 — the socket peer 2 is talking to", out[0].Via)
+	}
+
+	// And 2 -> 1 must leave by socket 0.
+	f.via = 1
+	out = f.send(addr("203.0.113.2:2222"), relayproto.Frame{
+		Type: relayproto.TypeSend, Key: key(1), Payload: []byte("packet"),
+	})
+	if len(out) != 1 || out[0].Via != 0 {
+		t.Errorf("the reverse direction went via %+v, want socket 0", out)
+	}
+}
+
+// Replies to the sender go back out the way they came, for the same reason.
+func TestRepliesLeaveByTheSocketTheyArrivedOn(t *testing.T) {
+	f := newFixture(t)
+	f.joinVia(2, "acme", 1, "203.0.113.1:1111")
+
+	f.via = 2
+	out := f.send(addr("203.0.113.1:1111"), relayproto.Frame{
+		Type: relayproto.TypePing, Key: key(1), Payload: []byte("x"),
+	})
+	if len(out) != 1 || out[0].Via != 2 {
+		t.Errorf("a pong left by %+v, want socket 2", out)
+	}
+}
+
+// A peer that reconnects on a different port moves sockets as well as addresses — a NAT
+// rebinding, or an agent that fell back from 443 to 3478 because the first was blocked.
+func TestAPeerThatMovesSocketsIsFollowed(t *testing.T) {
+	f := newFixture(t)
+	f.joinVia(0, "acme", 1, "203.0.113.1:1111")
+	f.joinVia(0, "acme", 2, "203.0.113.2:2222")
+
+	// Peer 2 comes back on another port.
+	f.joinVia(1, "acme", 2, "203.0.113.2:3333")
+
+	f.via = 0
+	out := f.send(addr("203.0.113.1:1111"), relayproto.Frame{
+		Type: relayproto.TypeSend, Key: key(2), Payload: []byte("packet"),
+	})
+	if len(out) != 1 {
+		t.Fatalf("expected a forward, got %+v", out)
+	}
+	if out[0].Via != 1 || out[0].To != addr("203.0.113.2:3333") {
+		t.Errorf("forwarded to %s via socket %d, want 203.0.113.2:3333 via 1",
+			out[0].To, out[0].Via)
 	}
 }
