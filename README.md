@@ -35,10 +35,12 @@ is enforced by nftables at the destination (ADR-0007). A network with no policy 
 unfiltered, and a host that cannot enforce says so rather than accepting a policy and
 ignoring it.
 
-What does not, and matters: **the control plane speaks plaintext HTTP.** Direct paths,
-DNS and internet egress are all unimplemented, and the data plane is Linux-only —
-elsewhere a device enrols, holds an address, and reports honestly that it has no
-tunnel and cannot filter.
+The control plane serves TLS, from a certificate you supply or one it obtains from
+Let's Encrypt, and agents refuse a plaintext control URL to anything but loopback.
+
+What does not, and matters: direct paths, DNS and internet egress are all
+unimplemented, and the data plane is Linux-only — elsewhere a device enrols, holds an
+address, and reports honestly that it has no tunnel and cannot filter.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

@@ -20,6 +20,7 @@ package controlurl
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -74,9 +75,35 @@ func Validate(raw string) (string, error) {
 		return "", fmt.Errorf("%w: it must be a scheme and host only, with no path (%q)", ErrInvalid, parsed.Path)
 	}
 
+	// Last, after the more specific complaints. Someone who typed credentials or a path is
+	// better served by hearing about that than about the scheme, and every check above
+	// describes something that would still be wrong over https.
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return "", fmt.Errorf(
+			"%w: %q is plaintext to a remote host; use https, or tunnel it to 127.0.0.1",
+			ErrInvalid, trimmed)
+	}
+
 	// Rebuilt from the parsed parts rather than trimmed from the input, so what is
 	// returned is exactly what was validated.
 	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+// isLoopbackHost reports whether a host names this machine.
+//
+// By parsed address rather than by name. "localhost" is accepted because every resolver
+// answers it with a loopback address, but any other name is not: a name that resolves to
+// 127.0.0.1 today can resolve elsewhere tomorrow, and the check would have been made once
+// against an answer that has since changed.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback()
 }
 
 // MustValidate is Validate for constants in tests and defaults.

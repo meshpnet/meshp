@@ -83,6 +83,28 @@ MESHP_RELAY_ADMIN_ADDR="127.0.0.1:9099" \
   ./bin/meshp-relay >"$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
 
+# A certificate for this control plane, so the whole run goes over TLS with the agent
+# verifying it. Plaintext to anything but loopback is refused by the agent now, and a test
+# that ran over http would be exercising the one path a real deployment must never take.
+TLS_DIR="$WORK/tls"
+mkdir -p "$TLS_DIR"
+if command -v openssl >/dev/null 2>&1; then
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
+    || fail "could not generate a test certificate"
+  BASE="https://localhost:${PORT}"
+  # The agent and curl both verify it. Trusting this one certificate rather than disabling
+  # verification, because "does the agent verify" is exactly what is under test.
+  export SSL_CERT_FILE="$TLS_DIR/cert.pem"
+  CURL_CA=(--cacert "$TLS_DIR/cert.pem")
+  echo "serving the control plane over TLS"
+else
+  CURL_CA=()
+  echo "openssl is unavailable; running without TLS"
+fi
+
 echo "starting meshp-control on ${BASE}"
 MESHP_DATABASE_URL="$DB_URL" \
 MESHP_LISTEN_ADDR="127.0.0.1:${PORT}" \
@@ -90,14 +112,16 @@ MESHP_SECRET_KEY="$SECRET_KEY" \
 MESHP_ADMIN_TOKEN="$ADMIN_TOKEN" \
 MESHP_RELAY_SIGNING_KEY="$RELAY_SIGNING_KEY" \
 MESHP_RELAYS="${RELAY_ID}=127.0.0.1:${RELAY_PORT}" \
+MESHP_TLS_CERT="${TLS_DIR}/cert.pem" \
+MESHP_TLS_KEY="${TLS_DIR}/key.pem" \
   ./bin/meshp-control >"$CONTROL_LOG" 2>&1 &
 CONTROL_PID=$!
 
 for _ in $(seq 1 30); do
-  curl -fsS "${BASE}/readyz" >/dev/null 2>&1 && break
+  curl -fsS "${CURL_CA[@]}" "${BASE}/readyz" >/dev/null 2>&1 && break
   sleep 1
 done
-curl -fsS "${BASE}/readyz" >/dev/null 2>&1 || fail "control plane never became ready"
+curl -fsS "${CURL_CA[@]}" "${BASE}/readyz" >/dev/null 2>&1 || fail "control plane never became ready"
 
 echo "starting meshpd with no state at all"
 # Deliberately before enrolment. An agent that gives up when it has nothing to do cannot
@@ -146,7 +170,7 @@ NETWORK_ID="$(psql "$DB_URL" -tAqc "
 echo "  network ${NETWORK_ID}"
 
 echo "minting an enrolment token"
-MINT="$(curl -fsS -X POST \
+MINT="$(curl -fsS "${CURL_CA[@]}" -X POST \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"max_uses":1,"expires_in_seconds":600,"tags":["e2e"]}' \
@@ -160,7 +184,7 @@ esac
 echo "  minted ${TOKEN:0:18}…"
 
 echo "the administrative API refuses an unauthenticated caller"
-status="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' \
+status="$(curl -s "${CURL_CA[@]}" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' \
   "${BASE}/api/v1/networks/${NETWORK_ID}/enrollment-tokens")"
 [ "$status" = "401" ] || fail "minting without a token returned ${status}, want 401"
 
@@ -194,6 +218,17 @@ tunnel_possible=0
 if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe0 type wireguard 2>/dev/null; then
   ip link del dev wgprobe0
   tunnel_possible=1
+fi
+
+# Over TLS, and the control plane says so. A run that quietly fell back to plaintext would
+# pass every assertion below while testing the one path a real deployment must never take.
+if [ -n "${CURL_CA[*]}" ]; then
+  grep -q 'msg=listening.*tls=true' "$CONTROL_LOG" \
+    || { grep -i listening "$CONTROL_LOG" >&2; fail "the control plane is not serving TLS"; }
+  grep -q 'control     https://' "$WORK/status.out" 2>/dev/null \
+    || ./bin/meshp status --socket "$SOCKET" | grep -q 'control     https://' \
+    || fail "the agent is not talking to the control plane over TLS"
+  echo "  the session runs over TLS, with the agent verifying the certificate"
 fi
 
 echo "meshp status reports a live session"
@@ -243,7 +278,7 @@ sed -n 's/.*msg="recorded desired state" \(.*\)/  \1/p' "$AGENT_LOG" | tail -1
 echo "a second device produces a delta, not another snapshot"
 # The point of A4: a device joining must not cause every other agent to be handed the whole
 # network again. The agent logs whether what it applied was a snapshot.
-TOKEN2="$(curl -fsS -X POST \
+TOKEN2="$(curl -fsS "${CURL_CA[@]}" -X POST \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{"max_uses":1,"expires_in_seconds":600}' \
@@ -425,13 +460,13 @@ if [ "$tunnel_possible" = "1" ]; then
   PEER_MEMBERSHIP="$(sed -n 's/.*"membership_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR2/state.json" | head -1)"
   [ -n "$PEER_MEMBERSHIP" ] || fail "could not read the peer's membership id"
 
-  curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  curl -fsS "${CURL_CA[@]}" -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     "${BASE}/api/v1/networks/${NETWORK_ID}/devices" >"$WORK/devices.out" \
     || fail "could not list the network's devices"
   grep -q "$PEER_MEMBERSHIP" "$WORK/devices.out" \
     || { cat "$WORK/devices.out" >&2; fail "the device listing does not contain the peer"; }
 
-  curl -fsS -X DELETE \
+  curl -fsS "${CURL_CA[@]}" -X DELETE \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -H 'Content-Type: application/json' \
     -d '{"reason":"e2e revocation"}' \
@@ -526,7 +561,7 @@ if [ "$tunnel_possible" = "1" ]; then
   fi
   echo "  nothing is filtered before a policy exists"
 
-  curl -fsS -X PUT \
+  curl -fsS "${CURL_CA[@]}" -X PUT \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -H 'Content-Type: application/json' \
     -d '{"version":1,"rules":[{"src":["*"],"dst":["*"],"protocol":"tcp","ports":["22"]}]}' \
@@ -570,7 +605,7 @@ if [ "$tunnel_possible" = "1" ]; then
 
   # Withdrawing it has to leave nothing behind, or a network that removed its policy would
   # go on denying traffic forever with nothing to say why.
-  curl -fsS -X PUT \
+  curl -fsS "${CURL_CA[@]}" -X PUT \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -H 'Content-Type: application/json' \
     -d '{"version":1,"rules":[{"src":["*"],"dst":["*"]}]}' \

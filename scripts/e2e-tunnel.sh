@@ -48,7 +48,7 @@ docker run --rm --privileged \
   "$GO_IMAGE" bash -c '
 set -e
 apt-get update -qq >/dev/null
-apt-get install -y -qq --no-install-recommends iproute2 wireguard-tools nftables postgresql-client >/dev/null
+apt-get install -y -qq --no-install-recommends iproute2 wireguard-tools nftables postgresql-client openssl ca-certificates >/dev/null
 make build
 ./scripts/e2e-enrol.sh "$MESHP_TEST_DATABASE_URL"
 '

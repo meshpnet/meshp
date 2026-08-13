@@ -122,3 +122,52 @@ func FuzzValidate(f *testing.F) {
 		}
 	})
 }
+
+// Everything a control URL carries is worth stealing: an enrolment token grants a device a
+// place in the network, and a session challenge and its signature are how a device proves
+// who it is. Over plaintext to a remote host, all of it is readable in transit.
+func TestPlaintextIsRefusedToRemoteHosts(t *testing.T) {
+	for _, raw := range []string{
+		"http://control.example",
+		"http://control.example:8080",
+		"http://203.0.113.10",
+		"http://[2001:db8::1]:8080",
+		// A name is not evidence, whatever it resolves to today.
+		"http://localhost.evil.test",
+	} {
+		if _, err := Validate(raw); err == nil {
+			t.Errorf("accepted plaintext to a remote host: %q", raw)
+		}
+	}
+}
+
+// Loopback is exempt: it cannot leave the machine, and it is what local development and an
+// SSH tunnel to a control plane both look like. A rule that refused it would push people
+// towards turning verification off entirely.
+func TestPlaintextIsAllowedToThisMachine(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:8080",
+		"http://localhost:8080",
+		"http://LOCALHOST:8080",
+		"http://[::1]:8080",
+		"http://127.5.5.5:8080",
+	} {
+		if _, err := Validate(raw); err != nil {
+			t.Errorf("refused loopback %q: %v", raw, err)
+		}
+	}
+}
+
+// https is accepted everywhere, which is the point of the rule.
+func TestHTTPSIsAcceptedAnywhere(t *testing.T) {
+	for _, raw := range []string{
+		"https://control.example",
+		"https://control.example:8443",
+		"https://203.0.113.10",
+		"https://127.0.0.1:8443",
+	} {
+		if _, err := Validate(raw); err != nil {
+			t.Errorf("refused %q: %v", raw, err)
+		}
+	}
+}

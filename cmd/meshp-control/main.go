@@ -34,6 +34,7 @@ import (
 	"github.com/meshpnet/meshp/internal/relaytoken"
 	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
+	"github.com/meshpnet/meshp/internal/tlsconf"
 	"github.com/meshpnet/meshp/internal/version"
 	"github.com/meshpnet/meshp/migrations"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
@@ -43,6 +44,15 @@ func main() {
 	var (
 		showVersion = flag.Bool("version", false, "print build information and exit")
 		listenAddr  = flag.String("listen", envOr("MESHP_LISTEN_ADDR", ":8080"), "address to listen on")
+
+		tlsCert = flag.String("tls-cert", os.Getenv("MESHP_TLS_CERT"),
+			"path to a TLS certificate; serves HTTPS")
+		tlsKey = flag.String("tls-key", os.Getenv("MESHP_TLS_KEY"),
+			"path to the TLS certificate's private key")
+		tlsDomains = flag.String("tls-domains", os.Getenv("MESHP_TLS_DOMAINS"),
+			"comma-separated names to obtain certificates for automatically (Let's Encrypt)")
+		tlsCacheDir = flag.String("tls-cache-dir", envOr("MESHP_TLS_CACHE_DIR", "/var/lib/meshp/certs"),
+			"where automatically obtained certificates are kept between restarts")
 		databaseURL = flag.String("database-url", os.Getenv("MESHP_DATABASE_URL"), "PostgreSQL connection string")
 		secretKey   = flag.String("secret-key", os.Getenv("MESHP_SECRET_KEY"), "master secret for enrolment challenges and sessions")
 		adminToken  = flag.String("admin-token", os.Getenv("MESHP_ADMIN_TOKEN"), "bootstrap secret for the administrative API")
@@ -128,7 +138,19 @@ func main() {
 		os.Exit(2)
 	}
 
+	tlsOpts := tlsconf.Options{
+		CertFile:     *tlsCert,
+		KeyFile:      *tlsKey,
+		ACMECacheDir: *tlsCacheDir,
+	}
+	for _, domain := range strings.Split(*tlsDomains, ",") {
+		if d := strings.TrimSpace(domain); d != "" {
+			tlsOpts.ACMEDomains = append(tlsOpts.ACMEDomains, d)
+		}
+	}
+
 	cfg := runConfig{
+		tls:             tlsOpts,
 		relays:          relayConfig,
 		relaySigningKey: signer,
 		addr:            *listenAddr,
@@ -148,6 +170,7 @@ func main() {
 type runConfig struct {
 	relays          *meshpv1.RelayConfig
 	relaySigningKey ed25519.PrivateKey
+	tls             tlsconf.Options
 	addr            string
 	databaseURL     string
 	secretKey       []byte
@@ -177,10 +200,53 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	tlsConfig, acmeWrap, err := tlsconf.Config(cfg.tls)
+	switch {
+	case errors.Is(err, tlsconf.ErrNoTLS):
+		// Serving plaintext is a legitimate way to run this — behind a tunnel, or behind
+		// something else terminating TLS — but it is never what someone wants by accident,
+		// and agents refuse a plaintext control URL that is not loopback. So it is said
+		// loudly rather than left to be discovered.
+		log.Warn("serving without TLS",
+			"note", "enrolment tokens and session signatures cross the network in the clear",
+			"hint", "set MESHP_TLS_CERT and MESHP_TLS_KEY, or MESHP_TLS_DOMAINS for automatic certificates")
+	case err != nil:
+		return fmt.Errorf("meshp-control: %w", err)
+	}
+	if tlsConfig != nil {
+		srv.TLSConfig = tlsConfig
+	}
+
+	// The ACME challenge responder, on port 80. Only with automatic certificates, and only
+	// ever serving the challenge: it redirects everything else rather than exposing the API
+	// over plaintext on a second port.
+	var challengeSrv *http.Server
+	if acmeWrap != nil {
+		challengeSrv = &http.Server{
+			Addr:              ":80",
+			Handler:           acmeWrap(http.HandlerFunc(redirectToHTTPS)),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := challengeSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Warn("the certificate challenge listener stopped",
+					"error", err, "hint", "port 80 must be reachable to obtain certificates")
+			}
+		}()
+		defer func() { _ = challengeSrv.Close() }()
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.addr)
-		err := srv.ListenAndServe()
+		log.Info("listening", "addr", cfg.addr, "tls", tlsConfig != nil)
+		var err error
+		if tlsConfig != nil {
+			// The certificate and key are already in the TLS config, loaded and checked
+			// before anything started listening.
+			err = srv.ListenAndServeTLS("", "")
+		} else {
+			err = srv.ListenAndServe()
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
@@ -516,4 +582,14 @@ func envBool(key string) bool {
 		return true
 	}
 	return false
+}
+
+// redirectToHTTPS sends a plaintext caller to the same URL over TLS.
+//
+// The port-80 listener exists to answer certificate challenges, and answering anything
+// else there would put the API on a plaintext port that nobody configured. A redirect is
+// the least surprising thing to do with the rest.
+func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
+	target := "https://" + r.Host + r.URL.RequestURI()
+	http.Redirect(w, r, target, http.StatusPermanentRedirect)
 }
