@@ -105,7 +105,7 @@ func (b *StateBuilder) For(ctx context.Context, membershipID uuid.UUID, fromVers
 	// A delta with more entries than the snapshot it replaces is a worse answer to the
 	// same question.
 	if changes > int64(len(peers)) {
-		return b.snapshotFromPeers(membership, peers), nil
+		return b.snapshotFromPeers(ctx, membership, peers)
 	}
 
 	return b.delta(ctx, membership, fromVersion, head)
@@ -129,19 +129,17 @@ func (b *StateBuilder) snapshot(ctx context.Context, membership dbgen.GetMembers
 		return nil, fmt.Errorf("session: listing peers: %w", err)
 	}
 
-	snapshot := b.snapshotFromPeers(membership, peers)
-	// A snapshot describes the whole world, so it carries the filter unconditionally. An
-	// agent that reconnects and is sent a snapshot with no filter would have nothing to
-	// enforce until the policy next changed.
-	filter, err := b.filterFor(ctx, membership)
-	if err != nil {
-		return nil, err
-	}
-	snapshot.Filter = filter
-	return snapshot, nil
+	return b.snapshotFromPeers(ctx, membership, peers)
 }
 
-func (b *StateBuilder) snapshotFromPeers(membership dbgen.GetMembershipForSessionRow, peers []dbgen.ListPeersForMembershipRow) *meshpv1.StateDelta {
+// snapshotFromPeers builds a complete snapshot.
+//
+// It takes a context and returns an error because a snapshot includes the compiled filter,
+// and there is exactly one place that decides what a snapshot contains. There used to be
+// two paths here — this one, and a wrapper that read the peers first — and attaching the
+// filter to only the wrapper meant a network whose peer count dropped below its change
+// count silently sent a snapshot with no policy in it.
+func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.GetMembershipForSessionRow, peers []dbgen.ListPeersForMembershipRow) (*meshpv1.StateDelta, error) {
 	delta := &meshpv1.StateDelta{
 		// Zero means a snapshot: the whole world rather than a change to it.
 		FromVersion: 0,
@@ -154,7 +152,16 @@ func (b *StateBuilder) snapshotFromPeers(membership dbgen.GetMembershipForSessio
 		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
 			p.WireguardPublicKey, p.DeviceName, p.Tags, p.AddressV4, p.AddressV6))
 	}
-	return delta
+
+	// A snapshot describes the whole world, so it carries the filter unconditionally. An
+	// agent that reconnects and is sent one with no filter would have nothing to enforce
+	// until the policy next changed.
+	filter, err := b.filterFor(ctx, membership)
+	if err != nil {
+		return nil, err
+	}
+	delta.Filter = filter
+	return delta, nil
 }
 
 // delta builds the changes between two versions.

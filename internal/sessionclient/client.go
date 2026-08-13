@@ -122,6 +122,14 @@ type Options struct {
 	// membership is over either way.
 	Revoked Revoker
 
+	// CanFilter is whether this host can enforce a packet filter.
+	//
+	// Reported honestly and never optimistically. The control plane refuses to place a
+	// device that cannot enforce into a network whose policy needs port-level rules rather
+	// than silently degrading (ADR-0007), so a build that claimed more than it can do would
+	// turn a refusal an operator can see into a network that quietly does not enforce.
+	CanFilter bool
+
 	HTTPClient *http.Client
 	Log        *slog.Logger
 }
@@ -371,7 +379,7 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				// the strength of things this agent cannot do.
 				Ipv6:               true,
 				LocalFailover:      false,
-				PacketFilter:       false,
+				PacketFilter:       c.opts.CanFilter,
 				SplitDns:           false,
 				CanEgress:          false,
 				CanAdvertiseRoutes: false,

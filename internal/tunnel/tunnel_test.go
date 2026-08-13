@@ -164,7 +164,7 @@ func peer(key string, ips ...string) *meshpv1.Peer {
 
 func TestApplyBringsUpAnInterfaceAndReportsIt(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 
 	state := stateWith(7, peer(bobKey, "100.90.0.2/32", "fd7c::2/128"))
 	unapplied, err := r.Apply(context.Background(), state)
@@ -206,7 +206,7 @@ func TestApplyBringsUpAnInterfaceAndReportsIt(t *testing.T) {
 // Invariant 18, through the whole stack: the second time round there is nothing to do.
 func TestApplyingTheSameStateTwiceTouchesNothingTheSecondTime(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 	state := stateWith(7, peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
 	if _, err := r.Apply(context.Background(), state); err != nil {
@@ -234,7 +234,7 @@ func TestAFailedApplyIsReportedAndDoesNotClaimTheVersion(t *testing.T) {
 	link.failOn = wgplan.AddRoute
 	link.failErr = errors.New("network is down")
 
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 	unapplied, err := r.Apply(context.Background(), stateWith(9, peer(bobKey, "100.90.0.2/32")))
 	if err == nil {
 		t.Fatal("a failing operation was reported as success")
@@ -265,7 +265,7 @@ func TestAnUnsupportedPlatformIsReportedRatherThanFatal(t *testing.T) {
 	link := newFakeLink()
 	link.observeErr = wglink.ErrUnsupported
 
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 	unapplied, err := r.Apply(context.Background(), stateWith(3, peer(bobKey, "100.90.0.2/32")))
 	if !errors.Is(err, wglink.ErrUnsupported) {
 		t.Fatalf("expected ErrUnsupported, got %v", err)
@@ -295,7 +295,7 @@ func TestAPeerThatCannotBeTranslatedRefusesTheUpdate(t *testing.T) {
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {
 			link := newFakeLink()
-			r := New(link, membership(), nil, nil)
+			r := New(link, membership(), nil, nil, nil)
 			if _, err := r.Apply(context.Background(), stateWith(4, p)); err == nil {
 				t.Fatal("the update was accepted")
 			}
@@ -309,7 +309,7 @@ func TestAPeerThatCannotBeTranslatedRefusesTheUpdate(t *testing.T) {
 // Invariant 20.
 func TestTeardownRemovesTheInterface(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 	if _, err := r.Apply(context.Background(), stateWith(2, peer(bobKey, "100.90.0.2/32"))); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestKeysArePassedThroughUnchanged(t *testing.T) {
 // tunnel e2e, where a second daemon takes the interface over and the first puts it back.
 func TestReapplyingTheSameStateRepairsADamagedInterface(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 	state := stateWith(5, peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
 	if _, err := r.Apply(context.Background(), state); err != nil {
@@ -531,7 +531,7 @@ func TestReapplyingTheSameStateRepairsADamagedInterface(t *testing.T) {
 // TestALearnedEndpointIsNotTreatedAsDrift against a real kernel).
 func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil)
+	r := New(link, membership(), nil, nil, nil)
 
 	p := peer(bobKey, "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820"}
@@ -565,7 +565,7 @@ func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
 // port means the kernel chooses, and its choice is the thing worth remembering.
 func TestTheSettledListenPortIsReported(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil, nil) // no port asked for
+	r := New(link, membership(), nil, nil, nil) // no port asked for
 
 	if _, err := r.Apply(context.Background(), stateWith(1, peer(bobKey, "100.90.0.2/32"))); err != nil {
 		t.Fatal(err)
@@ -746,7 +746,7 @@ func TestNoRelayLeavesRelayedPeersWithoutEndpoints(t *testing.T) {
 func TestRetainNamesTheStillRelayedPeersAfterApplying(t *testing.T) {
 	link := newFakeLink()
 	relay := newFakeRelay("relay1")
-	r := New(link, membership(), relay, nil)
+	r := New(link, membership(), relay, nil, nil)
 
 	if _, err := r.Apply(context.Background(), stateWith(1,
 		relayedPeer(bobKey, "relay1", "100.90.0.2/32"),
@@ -782,7 +782,7 @@ func TestRetainIsSkippedWhenApplyingFails(t *testing.T) {
 	link.failOn = wgplan.SetPeer
 	link.failErr = errors.New("the kernel refused")
 	relay := newFakeRelay("relay1")
-	r := New(link, membership(), relay, nil)
+	r := New(link, membership(), relay, nil, nil)
 
 	if _, err := r.Apply(context.Background(),
 		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32"))); err == nil {
@@ -805,7 +805,7 @@ func TestTheListenPortIsHandedToTheRelayAfterConverging(t *testing.T) {
 	if m.ListenPort != 0 {
 		t.Fatalf("this test is about a membership with no port yet, got %d", m.ListenPort)
 	}
-	r := New(link, m, relay, nil)
+	r := New(link, m, relay, nil, nil)
 
 	if _, err := r.Apply(context.Background(),
 		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32"))); err != nil {
@@ -818,5 +818,202 @@ func TestTheListenPortIsHandedToTheRelayAfterConverging(t *testing.T) {
 	}
 	if relay.port != want {
 		t.Errorf("the relay was told port %d, but the interface listens on %d", relay.port, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Policy enforcement
+
+// fakeFilter records what it was asked to enforce.
+type fakeFilter struct {
+	applied []*meshpv1.PacketFilter
+	iface   string
+	failErr error
+}
+
+func (f *fakeFilter) Apply(_ context.Context, iface string, filter *meshpv1.PacketFilter) error {
+	if f.failErr != nil {
+		return f.failErr
+	}
+	f.iface = iface
+	f.applied = append(f.applied, filter)
+	return nil
+}
+
+func stateWithFilter(version uint64, filter *meshpv1.PacketFilter, peers ...*meshpv1.Peer) *peerset.Set {
+	s := peerset.New()
+	s.Apply(&meshpv1.StateDelta{
+		FromVersion: 0, ToVersion: version, UpsertPeers: peers,
+		Tunnel: &meshpv1.TunnelConfig{Mtu: 1420},
+		Filter: filter,
+	})
+	return s
+}
+
+func allowAll() *meshpv1.PacketFilter {
+	return &meshpv1.PacketFilter{
+		DefaultDeny: true,
+		Inbound: []*meshpv1.PacketFilter_Rule{{
+			SrcPrefixes: []string{"100.90.0.2/32"}, DstPrefixes: []string{"100.90.0.1/32"},
+			Protocol: "any", Allow: true,
+		}},
+	}
+}
+
+func TestThePolicyIsEnforcedAfterTheInterfaceExists(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.applied) != 1 {
+		t.Fatalf("the filter was applied %d times, want 1", len(filter.applied))
+	}
+	if filter.iface != "meshp0" {
+		t.Errorf("enforced on %q, want meshp0", filter.iface)
+	}
+	// A ruleset naming an interface that does not exist loads happily and matches nothing,
+	// so the interface has to be there first.
+	if link.count(wgplan.CreateDevice) == 0 {
+		t.Error("the interface was never created")
+	}
+}
+
+// Loading is atomic and cheap, but it resets the counters on the drop rules — and an
+// operator watching "is this policy denying anything" would see them return to zero on
+// every reconcile tick.
+func TestAnUnchangedPolicyIsNotReloaded(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+	state := stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32"))
+
+	for range 3 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(filter.applied) != 1 {
+		t.Errorf("an unchanged policy was reloaded %d times", len(filter.applied))
+	}
+
+	// A changed policy is loaded.
+	changed := allowAll()
+	changed.Inbound[0].Protocol = "tcp"
+	changed.Inbound[0].Ports = []string{"22"}
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(2, changed, peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.applied) != 2 {
+		t.Errorf("a changed policy was not loaded: %d applies", len(filter.applied))
+	}
+}
+
+// A withdrawn policy must stop being enforced. The nil reaches the filter so it can remove
+// its ruleset; leaving it would go on denying traffic the network no longer denies.
+func TestAWithdrawnPolicyIsRemoved(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(2, nil, peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.applied) != 2 {
+		t.Fatalf("%d applies, want 2", len(filter.applied))
+	}
+	if filter.applied[1] != nil {
+		t.Error("withdrawing a policy did not reach the filter as a removal")
+	}
+}
+
+// A network with no policy on a host that cannot filter is entirely normal and must not be
+// reported as a problem.
+func TestNoPolicyAndNoFilterIsNotAFailure(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil, nil, nil)
+
+	unapplied, err := r.Apply(context.Background(), stateWith(1, peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(unapplied) != 0 {
+		t.Errorf("reported %v as unapplied with no policy to enforce", unapplied)
+	}
+}
+
+// A policy arriving at a host that cannot enforce it must be reported, or the device looks
+// converged while permitting everything its policy denies (ADR-0007).
+func TestAPolicyOnAHostThatCannotFilterIsReported(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil, nil, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32")))
+	if err == nil {
+		t.Fatal("a host that cannot filter accepted a policy silently")
+	}
+	if len(unapplied) != 1 || unapplied[0] != "filter" {
+		t.Errorf("unapplied = %v, want [filter]", unapplied)
+	}
+
+	// The peers still converged, so the honest report is "peers but not policy" rather
+	// than nothing applied at all.
+	if link.count(wgplan.SetPeer) == 0 {
+		t.Error("the peers were abandoned because the policy could not be enforced")
+	}
+}
+
+// The same when the filter exists and refuses.
+func TestAFilterThatFailsIsReportedRatherThanIgnored(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{failErr: errors.New("nft: syntax error")}
+	r := New(link, membership(), nil, filter, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32")))
+	if err == nil {
+		t.Fatal("a filter that would not load was reported as applied")
+	}
+	if len(unapplied) != 1 || unapplied[0] != "filter" {
+		t.Errorf("unapplied = %v, want [filter]", unapplied)
+	}
+
+	// And it is retried rather than remembered as done.
+	filter.failErr = nil
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if len(filter.applied) != 1 {
+		t.Error("a policy that failed to load was never retried")
+	}
+}
+
+// A ruleset outliving the interface it names would match nothing while an operator reads a
+// table meshp installed and no longer maintains (Invariant 20).
+func TestTeardownRemovesThePolicy(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateWithFilter(1, allowAll(), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Teardown(); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.applied) != 2 || filter.applied[1] != nil {
+		t.Errorf("teardown did not remove the policy: %d applies", len(filter.applied))
 	}
 }

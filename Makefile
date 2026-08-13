@@ -48,7 +48,7 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 COVER_FLOOR_PKGS := internal/acl internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan internal/relayproto internal/relay internal/relaytoken
 COVER_FLOOR      := 90
 
-COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx internal/tunnel internal/relayclient internal/relayforward internal/relaylink internal/sessionclient
+COVER_FLOOR_IO_PKGS := internal/nftables internal/agentapi internal/agentstate internal/httpx internal/tunnel internal/relayclient internal/relayforward internal/relaylink internal/sessionclient
 COVER_FLOOR_IO      := 75
 
 COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api internal/session
@@ -267,11 +267,16 @@ dataplane: ## Run the data-plane tests against real interfaces, in a privileged 
 	@# Privileged and Linux, because there is no way to create a WireGuard interface
 	@# without both. On a Linux host with root, `sudo -E go test ./internal/wglink/` does
 	@# the same thing without Docker.
+	@#
+	@# nftables is here for the same reason: rendering a ruleset can be tested anywhere, but
+	@# whether the kernel accepts it cannot, and a ruleset that does not load is a policy
+	@# that silently is not enforced.
 	docker run --rm --privileged \
 	  -v "$(CURDIR)":/src -w /src \
 	  -v "$$(go env GOMODCACHE)":/go/pkg/mod \
 	  golang:$(GO_IMAGE_VERSION)-alpine sh -c \
-	  'apk add --no-cache iproute2 wireguard-tools >/dev/null && go test ./internal/wglink/ -count=1 -v'
+	  'apk add --no-cache iproute2 wireguard-tools nftables >/dev/null && \
+	   go test ./internal/wglink/ ./internal/nftables/ -count=1 -v'
 
 .PHONY: migrate-check
 migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TEST_DATABASE_URL
