@@ -48,7 +48,7 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan internal/relayproto internal/relay internal/relaytoken
 COVER_FLOOR      := 90
 
-COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx internal/tunnel internal/relayclient
+COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx internal/tunnel internal/relayclient internal/relayforward
 COVER_FLOOR_IO      := 75
 
 COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api internal/session
