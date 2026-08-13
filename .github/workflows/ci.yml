@@ -348,12 +348,62 @@ jobs:
 
   # A single check for branch protection to require. Without this, protection has
   # to name every job, and renaming or adding one silently stops being enforced.
+  image:
+    name: container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meshp
+          POSTGRES_PASSWORD: meshp
+          POSTGRES_DB: meshp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meshp -d meshp"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Until this job existed nothing built the Dockerfile at all, so it could have
+      # been broken for weeks without anything saying so — and the dependency bumps
+      # that only touch it had no check to pass.
+      - name: build
+        run: make image VERSION=ci-${{ github.sha }} COMMIT=${{ github.sha }}
+
+      # A binary whose -X paths are wrong still builds, still runs, and reports
+      # "dev" forever. Nothing else notices, and the first person to need the
+      # version of a running container is debugging an incident.
+      - name: the image reports the version it was stamped with
+        run: |
+          out="$(docker run --rm meshp:ci --version)"
+          echo "$out"
+          echo "$out" | grep -q "ci-${{ github.sha }}" \
+            || { echo "the image does not carry the version it was built with"; exit 1; }
+          echo "$out" | grep -q "${{ github.sha }}" \
+            || { echo "the image does not carry its commit"; exit 1; }
+
+      - name: it does not run as root
+        run: |
+          uid="$(docker run --rm --entrypoint id meshp:ci -u)"
+          echo "uid=$uid"
+          [ "$uid" != "0" ] || { echo "the image runs as root"; exit 1; }
+
+      # The real question: does the thing we ship start, migrate and become ready.
+      # Building it only proves the compiler was happy.
+      - name: it starts, migrates and reports ready
+        run: ./scripts/image-smoke.sh
+        env:
+          MESHP_IMAGE: meshp:ci
+          MESHP_DATABASE_URL: postgres://meshp:meshp@127.0.0.1:5432/meshp?sslmode=disable
+
   ci-required:
     name: ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, image, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |
