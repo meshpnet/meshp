@@ -62,6 +62,14 @@ type Client struct {
 	reflexive netip.AddrPort
 	closed    bool
 
+	// lastHeard is when the relay last said anything we understood.
+	//
+	// UDP has no notion of a connection dropping, so without this a relay that has
+	// forgotten our session — a restart, an expired token, a NAT rebinding — leaves the
+	// agent attached to nothing and reporting itself connected. Any decodable frame counts,
+	// including a pong, because the question is whether the relay is still answering.
+	lastHeard time.Time
+
 	// out is the write buffer. Guarded by mu because a datagram must be encoded and sent
 	// without another goroutine interleaving into the same bytes.
 	out []byte
@@ -197,6 +205,9 @@ func (c *Client) hello(ctx context.Context, timeout time.Duration) error {
 			}
 			c.mu.Lock()
 			c.reflexive = seen
+			// So a caller that checks liveness before the first keepalive does not read a
+			// zero time and conclude a freshly welcomed relay is dead.
+			c.lastHeard = time.Now()
 			c.mu.Unlock()
 			return nil
 
@@ -219,6 +230,18 @@ func (c *Client) Reflexive() netip.AddrPort {
 
 // Endpoint is the relay address that answered.
 func (c *Client) Endpoint() string { return c.endpoint }
+
+// LastHeard is when the relay last answered, set by the welcome and refreshed by anything
+// decodable after it.
+//
+// A caller keeping a connection open uses this to decide the relay has stopped listening:
+// pinging is cheap and a relay always pongs, so silence for several keepalives is the
+// difference between a quiet mesh and a dead session.
+func (c *Client) LastHeard() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastHeard
+}
 
 // Send carries a packet to a peer through the relay.
 func (c *Client) Send(peer relayproto.Key, payload []byte) error {
@@ -277,6 +300,13 @@ func (c *Client) Receive(buf []byte) (relayproto.Key, int, error) {
 		if err != nil {
 			continue // noise on a public port
 		}
+
+		// Anything we could decode is the relay answering, which is the only evidence a
+		// UDP session is still alive. Noise is deliberately excluded: it proves a packet
+		// reached this socket, not that the relay still knows us.
+		c.mu.Lock()
+		c.lastHeard = time.Now()
+		c.mu.Unlock()
 
 		switch frame.Type {
 		case relayproto.TypeRecv:

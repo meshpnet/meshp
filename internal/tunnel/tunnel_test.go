@@ -164,7 +164,7 @@ func peer(key string, ips ...string) *meshpv1.Peer {
 
 func TestApplyBringsUpAnInterfaceAndReportsIt(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 
 	state := stateWith(7, peer(bobKey, "100.90.0.2/32", "fd7c::2/128"))
 	unapplied, err := r.Apply(context.Background(), state)
@@ -206,7 +206,7 @@ func TestApplyBringsUpAnInterfaceAndReportsIt(t *testing.T) {
 // Invariant 18, through the whole stack: the second time round there is nothing to do.
 func TestApplyingTheSameStateTwiceTouchesNothingTheSecondTime(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 	state := stateWith(7, peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
 	if _, err := r.Apply(context.Background(), state); err != nil {
@@ -234,7 +234,7 @@ func TestAFailedApplyIsReportedAndDoesNotClaimTheVersion(t *testing.T) {
 	link.failOn = wgplan.AddRoute
 	link.failErr = errors.New("network is down")
 
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 	unapplied, err := r.Apply(context.Background(), stateWith(9, peer(bobKey, "100.90.0.2/32")))
 	if err == nil {
 		t.Fatal("a failing operation was reported as success")
@@ -265,7 +265,7 @@ func TestAnUnsupportedPlatformIsReportedRatherThanFatal(t *testing.T) {
 	link := newFakeLink()
 	link.observeErr = wglink.ErrUnsupported
 
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 	unapplied, err := r.Apply(context.Background(), stateWith(3, peer(bobKey, "100.90.0.2/32")))
 	if !errors.Is(err, wglink.ErrUnsupported) {
 		t.Fatalf("expected ErrUnsupported, got %v", err)
@@ -295,7 +295,7 @@ func TestAPeerThatCannotBeTranslatedRefusesTheUpdate(t *testing.T) {
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {
 			link := newFakeLink()
-			r := New(link, membership(), nil)
+			r := New(link, membership(), nil, nil)
 			if _, err := r.Apply(context.Background(), stateWith(4, p)); err == nil {
 				t.Fatal("the update was accepted")
 			}
@@ -309,7 +309,7 @@ func TestAPeerThatCannotBeTranslatedRefusesTheUpdate(t *testing.T) {
 // Invariant 20.
 func TestTeardownRemovesTheInterface(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 	if _, err := r.Apply(context.Background(), stateWith(2, peer(bobKey, "100.90.0.2/32"))); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestDesiredRendersAddressesAsHostPrefixes(t *testing.T) {
 	m.AddressV4 = "100.90.0.1"
 	m.AddressV6 = "fd7c::1"
 
-	iface, err := Desired(m, stateWith(1))
+	iface, err := Desired(m, stateWith(1), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestDesiredRefusesAnAddressThatIsNotOneHost(t *testing.T) {
 		m := membership()
 		m.AddressV4 = addr
 		m.AddressV6 = ""
-		if _, err := Desired(m, stateWith(1)); err == nil {
+		if _, err := Desired(m, stateWith(1), nil, nil); err == nil {
 			t.Errorf("%s was accepted", addr)
 		}
 	}
@@ -370,7 +370,7 @@ func TestDesiredAcceptsAnAddressThatAlreadyCarriesItsPrefix(t *testing.T) {
 	m.AddressV4 = "100.90.0.1/32"
 	m.AddressV6 = "fd7c::1/128"
 
-	iface, err := Desired(m, stateWith(1))
+	iface, err := Desired(m, stateWith(1), nil, nil)
 	if err != nil {
 		t.Fatalf("Desired: %v", err)
 	}
@@ -383,14 +383,14 @@ func TestDesiredRefusesAMembershipWithNothingToWorkFrom(t *testing.T) {
 	t.Run("no private key", func(t *testing.T) {
 		m := membership()
 		m.PrivateKey = ""
-		if _, err := Desired(m, stateWith(1)); err == nil {
+		if _, err := Desired(m, stateWith(1), nil, nil); err == nil {
 			t.Error("a membership with no private key was accepted")
 		}
 	})
 	t.Run("no addresses", func(t *testing.T) {
 		m := membership()
 		m.AddressV4, m.AddressV6 = "", ""
-		if _, err := Desired(m, stateWith(1)); err == nil {
+		if _, err := Desired(m, stateWith(1), nil, nil); err == nil {
 			t.Error("a membership with no addresses was accepted")
 		}
 	})
@@ -405,7 +405,7 @@ func TestDesiredTakesTheMTUFromTheServer(t *testing.T) {
 		Tunnel: &meshpv1.TunnelConfig{Mtu: 1280},
 	})
 
-	iface, err := Desired(membership(), state)
+	iface, err := Desired(membership(), state, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 	state := peerset.New()
 	state.Apply(&meshpv1.StateDelta{FromVersion: 0, ToVersion: 1})
 
-	iface, err := Desired(membership(), state)
+	iface, err := Desired(membership(), state, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 // A peer with no endpoint is configured and unreachable, which is the honest state of every
 // peer today: nothing discovers endpoints yet.
 func TestAPeerWithNoEndpointIsStillConfigured(t *testing.T) {
-	iface, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")))
+	iface, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 	p := peer(bobKey, "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820", "198.51.100.2:51820"}
 
-	iface, err := Desired(membership(), stateWith(1, p))
+	iface, err := Desired(membership(), stateWith(1, p), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 // The key is carried through untouched. wgplan does not parse keys, so a translation that
 // mangled one would only fail at the kernel, on a real host, with a confusing message.
 func TestKeysArePassedThroughUnchanged(t *testing.T) {
-	iface, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")))
+	iface, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestKeysArePassedThroughUnchanged(t *testing.T) {
 // tunnel e2e, where a second daemon takes the interface over and the first puts it back.
 func TestReapplyingTheSameStateRepairsADamagedInterface(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 	state := stateWith(5, peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
 	if _, err := r.Apply(context.Background(), state); err != nil {
@@ -531,7 +531,7 @@ func TestReapplyingTheSameStateRepairsADamagedInterface(t *testing.T) {
 // TestALearnedEndpointIsNotTreatedAsDrift against a real kernel).
 func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil)
+	r := New(link, membership(), nil, nil)
 
 	p := peer(bobKey, "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820"}
@@ -565,7 +565,7 @@ func TestReconcilingDoesNotUndoRoaming(t *testing.T) {
 // port means the kernel chooses, and its choice is the thing worth remembering.
 func TestTheSettledListenPortIsReported(t *testing.T) {
 	link := newFakeLink()
-	r := New(link, membership(), nil) // no port asked for
+	r := New(link, membership(), nil, nil) // no port asked for
 
 	if _, err := r.Apply(context.Background(), stateWith(1, peer(bobKey, "100.90.0.2/32"))); err != nil {
 		t.Fatal(err)
@@ -582,7 +582,7 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 	m := membership()
 	m.ListenPort = 51999
 
-	iface, err := Desired(m, stateWith(1))
+	iface, err := Desired(m, stateWith(1), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,11 +593,230 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 
 // A membership that has never come up asks for any port.
 func TestAMembershipWithNoPortAsksForAny(t *testing.T) {
-	iface, err := Desired(membership(), stateWith(1))
+	iface, err := Desired(membership(), stateWith(1), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if iface.ListenPort != 0 {
 		t.Errorf("asked for port %d, want 0 meaning any", iface.ListenPort)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Relayed peers
+
+// fakeRelay hands out loopback endpoints and records what it was asked to keep.
+type fakeRelay struct {
+	// serving is the relay id this device is attached to. A peer naming any other gets
+	// nothing, exactly as relaylink behaves.
+	serving string
+
+	next      int
+	endpoints map[string]netip.AddrPort
+	retained  [][]string
+	port      int
+}
+
+func newFakeRelay(serving string) *fakeRelay {
+	return &fakeRelay{serving: serving, next: 40000, endpoints: map[string]netip.AddrPort{}}
+}
+
+func (f *fakeRelay) Endpoint(publicKey, relayID string) (netip.AddrPort, error) {
+	if relayID != f.serving {
+		return netip.AddrPort{}, errors.New("not attached to that relay")
+	}
+	if have, ok := f.endpoints[publicKey]; ok {
+		return have, nil
+	}
+	f.next++
+	addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(f.next))
+	f.endpoints[publicKey] = addr
+	return addr, nil
+}
+
+func (f *fakeRelay) Retain(keys []string) {
+	f.retained = append(f.retained, append([]string(nil), keys...))
+}
+
+func (f *fakeRelay) SetWireGuardPort(port int) { f.port = port }
+
+func relayedPeer(key, relayID string, ips ...string) *meshpv1.Peer {
+	p := peer(key, ips...)
+	p.RelayId = relayID
+	return p
+}
+
+// The ordinary path today: no peer has a discovered endpoint, so every peer is reached
+// through a relay (ADR-0002). The kernel is given a local socket to send to, and the peer
+// is marked relayed so wgplan does not mistake a loopback endpoint for drift.
+func TestARelayedPeerIsGivenItsLoopbackEndpoint(t *testing.T) {
+	relay := newFakeRelay("relay1")
+
+	iface, err := Desired(membership(),
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), relay, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(iface.Peers) != 1 {
+		t.Fatalf("%d peers, want 1", len(iface.Peers))
+	}
+
+	p := iface.Peers[0]
+	if !p.Relayed {
+		t.Error("the peer was not marked relayed; wgplan would refuse a loopback endpoint")
+	}
+	addr, err := netip.ParseAddrPort(p.Endpoint)
+	if err != nil {
+		t.Fatalf("endpoint %q does not parse: %v", p.Endpoint, err)
+	}
+	if !addr.Addr().IsLoopback() {
+		t.Errorf("endpoint %v is not on this host", addr)
+	}
+}
+
+// A discovered endpoint beats a relay. Relay-first is about never depending on hole
+// punching, not about preferring a relay to a path that works.
+func TestADirectEndpointWinsOverARelay(t *testing.T) {
+	relay := newFakeRelay("relay1")
+	p := relayedPeer(bobKey, "relay1", "100.90.0.2/32")
+	p.Endpoints = []string{"203.0.113.2:51820"}
+
+	iface, err := Desired(membership(), stateWith(1, p), relay, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := iface.Peers[0].Endpoint; got != "203.0.113.2:51820" {
+		t.Errorf("endpoint = %q, want the direct one", got)
+	}
+	if iface.Peers[0].Relayed {
+		t.Error("a peer with a direct endpoint was marked relayed")
+	}
+	if len(relay.endpoints) != 0 {
+		t.Error("opened a relay socket for a peer that does not need one")
+	}
+}
+
+// One peer relayed through somewhere this device is not attached to must not take down the
+// interface every other peer is reached through.
+func TestAPeerOnAnUnreachableRelayDoesNotBreakTheOthers(t *testing.T) {
+	relay := newFakeRelay("relay1")
+
+	iface, err := Desired(membership(), stateWith(1,
+		relayedPeer(bobKey, "relay1", "100.90.0.2/32"),
+		relayedPeer(carolKey, "relay2", "100.90.0.3/32"),
+	), relay, nil)
+	if err != nil {
+		t.Fatalf("one unreachable relay refused the whole interface: %v", err)
+	}
+	if len(iface.Peers) != 2 {
+		t.Fatalf("%d peers, want 2", len(iface.Peers))
+	}
+
+	byKey := map[string]wgplan.Peer{}
+	for _, p := range iface.Peers {
+		byKey[string(p.PublicKey)] = p
+	}
+	if p := byKey[bobKey]; !p.Relayed || p.Endpoint == "" {
+		t.Error("the reachable peer lost its relayed path")
+	}
+	if p := byKey[carolKey]; p.Relayed || p.Endpoint != "" {
+		t.Errorf("the peer on the other relay was given an endpoint %q that goes nowhere", p.Endpoint)
+	}
+}
+
+// With no relay at all — no data plane, or a deployment that has not configured one — a
+// relayed peer is unreachable rather than refused.
+func TestNoRelayLeavesRelayedPeersWithoutEndpoints(t *testing.T) {
+	iface, err := Desired(membership(),
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := iface.Peers[0].Endpoint; got != "" {
+		t.Errorf("endpoint = %q, want none", got)
+	}
+	if iface.Peers[0].Relayed {
+		t.Error("marked relayed with nothing relaying it")
+	}
+}
+
+// Retain runs after the kernel has been given the new endpoints, never before: wgctrl
+// cannot clear an endpoint, so closing a socket the kernel still points at leaves a peer
+// that looks configured and goes nowhere (ADR-0016).
+func TestRetainNamesTheStillRelayedPeersAfterApplying(t *testing.T) {
+	link := newFakeLink()
+	relay := newFakeRelay("relay1")
+	r := New(link, membership(), relay, nil)
+
+	if _, err := r.Apply(context.Background(), stateWith(1,
+		relayedPeer(bobKey, "relay1", "100.90.0.2/32"),
+		relayedPeer(carolKey, "relay1", "100.90.0.3/32"),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if len(relay.retained) != 1 {
+		t.Fatalf("Retain called %d times, want 1", len(relay.retained))
+	}
+	if got := len(relay.retained[0]); got != 2 {
+		t.Fatalf("retained %d peers, want 2", got)
+	}
+
+	// Carol goes direct; her socket is no longer needed and must be named out of the set.
+	carol := relayedPeer(carolKey, "relay1", "100.90.0.3/32")
+	carol.Endpoints = []string{"203.0.113.3:51820"}
+	if _, err := r.Apply(context.Background(), stateWith(2,
+		relayedPeer(bobKey, "relay1", "100.90.0.2/32"), carol,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	last := relay.retained[len(relay.retained)-1]
+	if len(last) != 1 || last[0] != bobKey {
+		t.Errorf("retained %v, want only the still-relayed peer", last)
+	}
+}
+
+// A plan that did not fully apply may have left the kernel pointing at a socket Retain
+// would take away, so it is skipped entirely on the failure path.
+func TestRetainIsSkippedWhenApplyingFails(t *testing.T) {
+	link := newFakeLink()
+	link.failOn = wgplan.SetPeer
+	link.failErr = errors.New("the kernel refused")
+	relay := newFakeRelay("relay1")
+	r := New(link, membership(), relay, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32"))); err == nil {
+		t.Fatal("a failing apply reported success")
+	}
+	if len(relay.retained) != 0 {
+		t.Errorf("Retain ran after a failed apply: %v", relay.retained)
+	}
+}
+
+// The port a relayed peer's packets come back to is the kernel's choice, so nothing can be
+// told it until the interface exists. A forwarder left without it drops everything inbound.
+// This membership has never come up, so it asks for any port and the kernel chooses. The
+// relay has to be told that choice and not the zero it asked with, or every packet coming
+// back from a peer is delivered nowhere.
+func TestTheListenPortIsHandedToTheRelayAfterConverging(t *testing.T) {
+	link := newFakeLink()
+	relay := newFakeRelay("relay1")
+	m := membership()
+	if m.ListenPort != 0 {
+		t.Fatalf("this test is about a membership with no port yet, got %d", m.ListenPort)
+	}
+	r := New(link, m, relay, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+
+	want := r.Status().ListenPort
+	if want == 0 {
+		t.Fatal("the interface reported no listen port")
+	}
+	if relay.port != want {
+		t.Errorf("the relay was told port %d, but the interface listens on %d", relay.port, want)
 	}
 }

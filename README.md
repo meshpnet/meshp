@@ -15,19 +15,23 @@
 
 ## Status
 
-**Pre-alpha. No packet has ever crossed a meshp network.** A device can now be
-enrolled — it gets an identity, a WireGuard key and an address, and a replayed token
-is refused — but nothing brings up a tunnel yet.
+**Pre-alpha, and packets now cross.** On Linux, a device enrols, brings up a kernel
+WireGuard interface, attaches to a relay and carries traffic to its peers through it.
+Everything is relayed: nothing discovers direct paths yet, which is the design working
+as intended rather than a gap to apologise for (ADR-0002).
 
-What exists: the schema, the device protocol, the decision records, the logic that
-decides addressing and where traffic goes (IPAM, advertiser health, route-group
-selection), a control plane that applies its own schema and reports honest readiness,
-enrolment end to end, and a control channel — an agent holds a session, receives
-desired state and acknowledges the version it applied.
+What exists: enrolment end to end, a control channel carrying versioned desired state,
+kernel WireGuard interfaces reconciled against what the control plane asked for
+(ADR-0015), a relay that verifies a capability it cannot mint, and the agent side that
+attaches to it (ADR-0016, ADR-0017). Plus the parts nothing calls yet: IPAM, advertiser
+health and route-group selection.
 
-What does not: WireGuard, the relay, policy enforcement, DNS. An agent now knows about
-its peers and has no way to reach them. `meshp status` says `(not up)` because it is
-not.
+What does not, and matters: **there is no policy enforcement** — every device in a
+network can reach every other, because the ACL engine is not wired up. **A device
+cannot be removed from a network**; nothing writes a revocation. **The control plane
+speaks plaintext HTTP.** Direct paths, DNS and internet egress are all unimplemented,
+and the data plane is Linux-only — elsewhere a device enrols, holds an address, and
+reports honestly that it has no tunnel.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
@@ -224,11 +228,18 @@ Related repositories:
 | Repo | What | Status |
 |---|---|---|
 | [`meshp`](https://github.com/meshpnet/meshp) | this one — agent, CLI, control plane, relay | public |
+| `meshp-infra` | deployment: how a control plane and its relays are stood up | private, empty |
+| `meshp-web` | website and documentation | private, empty |
+| `meshp-cloud` | the commercial layer, over this one's public API (ADR-0009) | private, empty |
 | `meshp-ios` | iOS client | not started |
 | `meshp-android` | Android client | not started |
 | `meshp-testlab` | network-namespace conformance suite, including NAT types and failover | not started |
 | `meshp-sdk` | generated API clients | not started |
-| `meshp-web` | website and documentation | private, empty |
+
+They are created when there is something to put in them, not in advance. Almost
+everything still lives here, because almost everything is Go, open source and released
+together; a repository splits off only when it crosses a licence boundary, a toolchain
+or a release cadence.
 
 Issues and discussions for **all** of these live in this repository — the
 satellite repositories have their issue trackers disabled on purpose, so there is

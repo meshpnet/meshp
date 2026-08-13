@@ -435,3 +435,122 @@ func TestCloneSharesNothing(t *testing.T) {
 			cloned.GetDeviceName())
 	}
 }
+
+func relayConfig(ids ...string) *meshpv1.RelayConfig {
+	cfg := &meshpv1.RelayConfig{}
+	for _, id := range ids {
+		cfg.Relays = append(cfg.Relays, &meshpv1.RelayConfig_Relay{
+			Id: id, Region: "test", Endpoints: []string{id + ".example:3478"},
+		})
+	}
+	return cfg
+}
+
+// The agent has to keep the relay configuration, not just read past it. A peer's relay_id
+// names one of these, so a set that dropped them would know a peer is relayed and have no
+// address to dial.
+func TestApplyKeepsRelays(t *testing.T) {
+	s := New()
+	d := snapshot(1, peer("a", "100.90.0.1"))
+	d.Relays = relayConfig("relay1")
+	s.Apply(d)
+
+	if got := len(s.Relays().GetRelays()); got != 1 {
+		t.Fatalf("relays = %d, want 1", got)
+	}
+	relay, ok := s.Relay("relay1")
+	if !ok {
+		t.Fatal("relay1 not found by id")
+	}
+	if got := relay.GetEndpoints(); !slices.Equal(got, []string{"relay1.example:3478"}) {
+		t.Errorf("endpoints = %v", got)
+	}
+	if _, ok := s.Relay("nope"); ok {
+		t.Error("found a relay that was never sent")
+	}
+	if _, ok := s.Relay(""); ok {
+		t.Error("an empty relay id matched a relay; a peer with no relay would find one")
+	}
+}
+
+// Absent in a delta means unchanged. A server that has nothing to say about relays sends
+// no RelayConfig, and forgetting them then would drop every relayed peer's path on the
+// next unrelated peer change.
+func TestDeltaWithoutRelaysLeavesThemAlone(t *testing.T) {
+	s := New()
+	first := snapshot(1, peer("a", "100.90.0.1"))
+	first.Relays = relayConfig("relay1")
+	s.Apply(first)
+
+	s.Apply(delta(1, 2, []*meshpv1.Peer{peer("b", "100.90.0.2")}, nil))
+
+	if _, ok := s.Relay("relay1"); !ok {
+		t.Fatal("a delta that said nothing about relays discarded them")
+	}
+}
+
+// A snapshot describes the whole world, so one carrying no relays means this deployment
+// has none. Keeping the previous ones would leave an agent dialling a decommissioned relay
+// and reporting itself relayed through it.
+func TestSnapshotWithoutRelaysClearsThem(t *testing.T) {
+	s := New()
+	first := snapshot(1, peer("a", "100.90.0.1"))
+	first.Relays = relayConfig("relay1")
+	s.Apply(first)
+
+	s.Apply(snapshot(2, peer("a", "100.90.0.1")))
+
+	if s.Relays() != nil {
+		t.Fatalf("a snapshot with no relays left %v behind", s.Relays())
+	}
+}
+
+// Desired state is more than the peers. Two sets that agree on every peer and disagree
+// about the relay are not the same state, and calling them equal would let Invariant 21
+// hold while an agent folded deltas into the wrong relay.
+func TestEqualComparesConfiguration(t *testing.T) {
+	build := func(relays *meshpv1.RelayConfig, mtu uint32) *Set {
+		s := New()
+		d := snapshot(1, peer("a", "100.90.0.1"))
+		d.Relays = relays
+		d.Tunnel = &meshpv1.TunnelConfig{Mtu: mtu}
+		s.Apply(d)
+		return s
+	}
+
+	if !build(relayConfig("relay1"), 1387).Equal(build(relayConfig("relay1"), 1387)) {
+		t.Error("identical sets compared unequal")
+	}
+	if build(relayConfig("relay1"), 1387).Equal(build(relayConfig("relay2"), 1387)) {
+		t.Error("sets using different relays compared equal")
+	}
+	if build(relayConfig("relay1"), 1387).Equal(build(relayConfig("relay1"), 1420)) {
+		t.Error("sets with different MTUs compared equal")
+	}
+	if build(nil, 1420).Equal(build(relayConfig("relay1"), 1420)) {
+		t.Error("a set with no relays compared equal to one with a relay")
+	}
+	if !build(nil, 1420).Equal(build(nil, 1420)) {
+		t.Error("two sets with no relays compared unequal")
+	}
+}
+
+// Clone exists so the holder of a set is not reading one the session is folding into
+// (Invariant 22). That has to cover the configuration as well as the peers.
+func TestCloneCopiesConfiguration(t *testing.T) {
+	s := New()
+	d := snapshot(1, peer("a", "100.90.0.1"))
+	d.Relays = relayConfig("relay1")
+	s.Apply(d)
+
+	clone := s.Clone()
+	if _, ok := clone.Relay("relay1"); !ok {
+		t.Fatal("the clone lost the relays")
+	}
+
+	// Mutating the clone must not reach back into the original.
+	clone.relays.Relays[0].Id = "tampered"
+	if _, ok := s.Relay("relay1"); !ok {
+		t.Error("editing the clone's relays changed the original's")
+	}
+}

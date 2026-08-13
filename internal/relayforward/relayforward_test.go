@@ -360,9 +360,50 @@ func TestAFullSizedPacketSurvives(t *testing.T) {
 	}
 }
 
-func TestAForwarderNeedsSomewhereToDeliver(t *testing.T) {
-	if _, err := New(0, newRecordingSender(), nil); err == nil {
-		t.Error("a forwarder with no WireGuard port was built; inbound packets would vanish")
+// A device that has just joined does not know its WireGuard port: the interface asks the
+// kernel for any port, so the answer arrives after the first convergence. Refusing to build
+// a forwarder until then would mean no relayed peer could be configured on the very first
+// run after a join, which is exactly when relaying matters most.
+func TestAForwarderCanBeBuiltBeforeThePortIsKnown(t *testing.T) {
+	f, err := New(0, newRecordingSender(), nil)
+	if err != nil {
+		t.Fatalf("New(0): %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	// Outbound works immediately; it does not involve the WireGuard port.
+	if _, err := f.Endpoint(key(1)); err != nil {
+		t.Fatalf("Endpoint: %v", err)
+	}
+
+	// Inbound has nowhere to go, and says so rather than vanishing.
+	if err := f.Deliver(key(1), []byte("too early")); err == nil {
+		t.Error("delivered a packet with no port to deliver it to")
+	}
+	if got := f.Stats().DroppedNoPort; got != 1 {
+		t.Errorf("DroppedNoPort = %d, want 1 — a silent drop looks like a relay fault", got)
+	}
+
+	// And starts working the moment the interface reports its port.
+	kernel := newFakeKernel(t)
+	f.SetWireGuardPort(kernel.port())
+	if err := f.Deliver(key(1), []byte("now")); err != nil {
+		t.Fatalf("Deliver after the port was known: %v", err)
+	}
+	payload, _, ok := kernel.recv(time.Second)
+	if !ok {
+		t.Fatal("the kernel port received nothing after the port was set")
+	}
+	if got := string(payload); got != "now" {
+		t.Errorf("the kernel port got %q", got)
+	}
+}
+
+// A negative port is a caller bug rather than a port that is not known yet, and treating it
+// as "not known" would hide it until packets started disappearing.
+func TestANegativePortIsRefused(t *testing.T) {
+	if _, err := New(-1, newRecordingSender(), nil); err == nil {
+		t.Error("built a forwarder for a negative port")
 	}
 }
 

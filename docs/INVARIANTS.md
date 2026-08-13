@@ -71,6 +71,13 @@ traffic that a direct path would have kept carrying — which is why meshpd must
 supervised, and why upgrading to a direct path is a resilience measure and not
 only a performance one.
 
+The relay attachment is supervised alongside the control channel and not by it. A
+session dropping does not close the relay connection, and the credential in hand
+stays good until it expires, so a control plane restarting is invisible to relayed
+traffic. The agent asks for a replacement token before the one it holds runs out
+(ADR-0017), which is what turns a control-plane outage into a bounded loss of new
+configuration rather than a countdown to losing the data path.
+
 **16. No traffic leaves the device outside the tunnel while a default route is claimed.**
 Across sleep, network change, agent crash and agent kill. See ADR-0011.
 

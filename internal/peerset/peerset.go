@@ -32,6 +32,7 @@ type Set struct {
 	peers   map[string]*meshpv1.Peer
 	version uint64
 	tunnel  *meshpv1.TunnelConfig
+	relays  *meshpv1.RelayConfig
 }
 
 // New returns an empty set at version zero.
@@ -52,6 +53,28 @@ func (s *Set) SetVersion(v uint64) { s.version = v }
 // Tunnel is the tunnel configuration last received, or nil.
 func (s *Set) Tunnel() *meshpv1.TunnelConfig { return s.tunnel }
 
+// Relays is the relay configuration last received, or nil.
+//
+// A peer's relay_id names one of these, so an agent that did not keep them would know a
+// peer is relayed and have no way to find the relay.
+func (s *Set) Relays() *meshpv1.RelayConfig { return s.relays }
+
+// Relay returns the relay with this id.
+//
+// Looked up by id rather than taking the first, because relay_id is the peer's answer to
+// "through which one" and honouring it is the whole point of sending several.
+func (s *Set) Relay(id string) (*meshpv1.RelayConfig_Relay, bool) {
+	if id == "" {
+		return nil, false
+	}
+	for _, relay := range s.relays.GetRelays() {
+		if relay.GetId() == id {
+			return relay, true
+		}
+	}
+	return nil, false
+}
+
 // Len is how many peers are known.
 func (s *Set) Len() int { return len(s.peers) }
 
@@ -66,8 +89,14 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 		return
 	}
 
-	if delta.GetFromVersion() == 0 {
+	snapshot := delta.GetFromVersion() == 0
+	if snapshot {
 		s.peers = make(map[string]*meshpv1.Peer, len(delta.GetUpsertPeers()))
+		// And the configuration that came with them. A snapshot describes the whole world,
+		// so a snapshot carrying no relays means this deployment has none — keeping the
+		// previous ones would leave an agent dialling a relay that has been decommissioned
+		// and reporting itself relayed through it.
+		s.relays = nil
 	}
 
 	// Removals first. Within one delta a key that is both removed and upserted is a
@@ -81,6 +110,11 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 
 	if delta.GetTunnel() != nil {
 		s.tunnel = proto.CloneOf(delta.GetTunnel())
+	}
+	// Absent in a delta means unchanged, which is why the snapshot case cleared it above:
+	// there is otherwise no way for a server to say "no relays any more".
+	if delta.GetRelays() != nil {
+		s.relays = proto.CloneOf(delta.GetRelays())
 	}
 	s.version = delta.GetToVersion()
 }
@@ -98,6 +132,9 @@ func (s *Set) Clone() *Set {
 	}
 	if s.tunnel != nil {
 		out.tunnel = proto.CloneOf(s.tunnel)
+	}
+	if s.relays != nil {
+		out.relays = proto.CloneOf(s.relays)
 	}
 	return out
 }
@@ -138,16 +175,24 @@ func (s *Set) Get(publicKey string) (*meshpv1.Peer, bool) {
 	return p, ok
 }
 
-// Equal reports whether two sets hold the same peers with the same contents.
+// Equal reports whether two sets hold the same peers and the same configuration.
 //
 // Compares contents rather than versions: two sets at the same version that disagree
 // about their peers is precisely the failure worth detecting, and one that only compared
 // versions would call it equality.
+//
+// The tunnel and relay configuration count. They are desired state like the peers are, and
+// leaving them out would mean Invariant 21 — apply(snapshot at F, delta F→H) == snapshot at
+// H — held while an agent folded deltas into the wrong relay, which is a way to be
+// unreachable with every check reporting agreement.
 func (s *Set) Equal(other *Set) bool {
 	if s == nil || other == nil {
 		return s == other
 	}
 	if len(s.peers) != len(other.peers) {
+		return false
+	}
+	if !proto.Equal(s.tunnel, other.tunnel) || !proto.Equal(s.relays, other.relays) {
 		return false
 	}
 	for key, mine := range s.peers {

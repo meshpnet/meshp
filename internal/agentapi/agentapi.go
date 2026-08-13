@@ -84,6 +84,51 @@ type MembershipStatus struct {
 	// operator asking why one host is a fraction of another's throughput should be able
 	// to see the answer instead of inferring it.
 	TunnelKind string `json:"tunnel_kind,omitempty"`
+
+	// Relay is how this device reaches peers it has no direct path to, which today is all
+	// of them (ADR-0002). Nil where there is no data plane to relay into.
+	Relay *RelayStatus `json:"relay,omitempty"`
+}
+
+// RelayStatus is what an operator needs when relaying is not working.
+//
+// Deliberately more than "connected". The ways this fails are different problems with
+// different fixes — the control plane declining to issue a credential, a relay that cannot
+// be reached, a relay reached but delivering nothing — and a single boolean makes them
+// indistinguishable from here.
+type RelayStatus struct {
+	// RelayID and Endpoints are what desired state asked for. Reported even when nothing is
+	// connected: "configured for relay1 and cannot reach it" and "never told about a relay"
+	// are different problems.
+	RelayID   string   `json:"relay_id,omitempty"`
+	Endpoints []string `json:"endpoints,omitempty"`
+
+	Connected      bool      `json:"connected"`
+	ConnectedSince time.Time `json:"connected_since,omitzero"`
+
+	// Endpoint is the relay address that answered, which may not be the first one offered.
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Reflexive is the address the relay sees this device at — the one thing nothing else
+	// can report, and the first evidence of what kind of NAT this device is behind.
+	Reflexive string `json:"reflexive,omitempty"`
+
+	// HasToken and TokenExpiresAt separate "not authorised" from "cannot connect".
+	HasToken       bool      `json:"has_token"`
+	TokenExpiresAt time.Time `json:"token_expires_at,omitzero"`
+
+	// Refusal is why the control plane declined to issue one, if it did.
+	Refusal   string `json:"refusal,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+
+	// PeersRelayed is how many peers are reached this way.
+	PeersRelayed int `json:"peers_relayed"`
+
+	// Counters, because "the tunnel is up and nothing works" needs a direction. Packets
+	// leaving and none arriving is a different fault from neither.
+	PacketsRelayed   uint64 `json:"packets_relayed"`
+	PacketsDelivered uint64 `json:"packets_delivered"`
+	Dropped          uint64 `json:"dropped"`
 }
 
 // JoinRequest asks the daemon to enrol this device.

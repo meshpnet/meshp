@@ -18,6 +18,7 @@ import (
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/peerset"
+	"github.com/meshpnet/meshp/internal/relaylink"
 	"github.com/meshpnet/meshp/internal/sessionclient"
 	"github.com/meshpnet/meshp/internal/tunnel"
 	"github.com/meshpnet/meshp/internal/version"
@@ -56,14 +57,11 @@ type agent struct {
 	ctx context.Context
 }
 
-// reconcilerFor returns something to converge this membership's interface, or nil when this
-// platform or this process cannot manage one.
+// ensureLink opens the host's interface manager, once.
 //
-// Nil rather than an error, because there is nothing to do about it here and it is not a
-// reason to refuse the session: the control channel is still worth having, the device is
-// still enrolled, and `meshp status` still has something true to report. What would be wrong
-// is claiming a tunnel exists.
-func (a *agent) reconcilerFor(m agentstate.Membership, log *slog.Logger) *tunnel.Reconciler {
+// Lazily, because it needs privileges and a daemon that refused to start without them could
+// not report why it has no tunnel.
+func (a *agent) ensureLink() wglink.Link {
 	a.linkOnce.Do(func() {
 		a.link, a.linkErr = wglink.New()
 		switch {
@@ -77,7 +75,18 @@ func (a *agent) reconcilerFor(m agentstate.Membership, log *slog.Logger) *tunnel
 				"hint", "meshpd needs to run with enough privilege to create network interfaces")
 		}
 	})
-	if a.link == nil {
+	return a.link
+}
+
+// reconcilerFor returns something to converge this membership's interface, or nil when this
+// platform or this process cannot manage one.
+//
+// Nil rather than an error, because there is nothing to do about it here and it is not a
+// reason to refuse the session: the control channel is still worth having, the device is
+// still enrolled, and `meshp status` still has something true to report. What would be wrong
+// is claiming a tunnel exists.
+func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, log *slog.Logger) *tunnel.Reconciler {
+	if a.ensureLink() == nil {
 		return nil
 	}
 	return tunnel.New(a.link, tunnel.Membership{
@@ -86,7 +95,35 @@ func (a *agent) reconcilerFor(m agentstate.Membership, log *slog.Logger) *tunnel
 		AddressV4:     m.AddressV4,
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
-	}, log)
+	}, relay, log)
+}
+
+// relayFor returns this membership's relay attachment, or nil when there is no data plane
+// to carry relayed packets into.
+//
+// Nil rather than an error for the same reason the reconciler is: a device with no tunnel is
+// still enrolled and still worth a control channel, and a relay connection with nowhere to
+// deliver would be a connection kept open for nothing.
+func (a *agent) relayFor(m agentstate.Membership, log *slog.Logger) *relaylink.Link {
+	if a.ensureLink() == nil {
+		return nil
+	}
+	link, err := relaylink.New(relaylink.Options{
+		Key: m.WireGuardPublicKey,
+		// Zero on a membership that has never come up. The reconciler supplies the kernel's
+		// choice once the interface exists.
+		WireGuardPort: m.ListenPort,
+		Log:           log,
+	})
+	if err != nil {
+		// Not fatal. Without a relay every peer is unreachable until a direct path exists,
+		// which is where this was before relaying — and saying so is better than refusing
+		// to serve the membership at all.
+		log.Error("cannot relay for this membership",
+			"error", err, "note", "peers will be unreachable until a direct path exists")
+		return nil
+	}
+	return link
 }
 
 // sessionHandle is one supervised session.
@@ -94,7 +131,54 @@ type sessionHandle struct {
 	cancel  context.CancelFunc
 	client  *sessionclient.Client
 	applier *deviceApplier
+	relay   *relaylink.Link
 	started time.Time
+}
+
+// relayOrNil and relayCredentials convert a possibly-absent link into interfaces.
+//
+// Explicitly, because a nil *relaylink.Link assigned straight to an interface produces a
+// non-nil interface holding a nil pointer: every `if relay != nil` downstream would be true
+// and the first call would panic. Platforms with no data plane take exactly that path.
+func relayOrNil(l *relaylink.Link) tunnel.Relay {
+	if l == nil {
+		return nil
+	}
+	return l
+}
+
+func relayCredentials(l *relaylink.Link) sessionclient.RelayCredentials {
+	if l == nil {
+		return nil
+	}
+	return l
+}
+
+// relayStatus renders a link for the status socket, or nothing when there is no link.
+func relayStatus(l *relaylink.Link) *agentapi.RelayStatus {
+	if l == nil {
+		return nil
+	}
+	st := l.Status()
+	return &agentapi.RelayStatus{
+		RelayID:          st.RelayID,
+		Endpoints:        st.Endpoints,
+		Connected:        st.Connected,
+		ConnectedSince:   st.ConnectedSince,
+		Endpoint:         st.Endpoint,
+		Reflexive:        st.Reflexive,
+		HasToken:         st.HasToken,
+		TokenExpiresAt:   st.TokenExpiresAt,
+		Refusal:          st.Refusal,
+		LastError:        st.LastError,
+		PeersRelayed:     st.Forwarder.Peers,
+		PacketsRelayed:   st.Forwarder.Relayed,
+		PacketsDelivered: st.Forwarder.Delivered,
+		// Summed, because from here the interesting fact is that packets are being lost;
+		// which counter caught them is a question for the daemon's log.
+		Dropped: st.Forwarder.DroppedNoRelay + st.Forwarder.DroppedNoPeer +
+			st.Forwarder.DroppedNoPort + st.Forwarder.SendFailed,
+	}
 }
 
 func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileEvery time.Duration) *agent {
@@ -173,11 +257,16 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 
 	sessionCtx, cancel := context.WithCancel(a.ctx)
 	log := a.log.With("network_id", m.NetworkID)
+
+	// Built before the reconciler, which needs it to give relayed peers an endpoint, and
+	// handed to the session, which is how the credential to use it arrives (ADR-0017).
+	relay := a.relayFor(m, log)
 	applier := &deviceApplier{
 		log:          log,
 		membershipID: m.MembershipID,
 		agent:        a,
-		reconciler:   a.reconcilerFor(m, log),
+		relay:        relay,
+		reconciler:   a.reconcilerFor(m, relayOrNil(relay), log),
 	}
 	client := sessionclient.New(sessionclient.Options{
 		ControlURL:   m.ControlURL,
@@ -186,18 +275,36 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 		AgentVersion: version.Version(),
 		OS:           runtime.GOOS,
 		Hostname:     hostname(),
+		Relay:        relayCredentials(relay),
 		Log:          log,
 	})
 	a.running[m.MembershipID] = &sessionHandle{
-		cancel: cancel, client: client, applier: applier, started: time.Now().UTC(),
+		cancel: cancel, client: client, applier: applier, relay: relay, started: time.Now().UTC(),
 	}
 	a.mu.Unlock()
+
+	// The relay connection is supervised alongside the session but not by it. A control
+	// channel dropping must not disturb networking that is already up (Invariant 15), and a
+	// relayed path is networking that is up: the token in hand outlives the connection that
+	// delivered it, and reconnecting to the control plane does not interrupt the relay.
+	if relay != nil {
+		go func() {
+			if err := relay.Run(sessionCtx); err != nil && sessionCtx.Err() == nil {
+				log.Error("relay attachment ended", "error", err)
+			}
+		}()
+	}
 
 	go func() {
 		defer func() {
 			a.mu.Lock()
 			delete(a.running, m.MembershipID)
 			a.mu.Unlock()
+			if relay != nil {
+				// The sockets are this membership's endpoints; a session that has stopped
+				// being supervised must not leave them behind.
+				_ = relay.Close()
+			}
 		}()
 		if err := client.Run(sessionCtx, applier); err != nil && sessionCtx.Err() == nil {
 			log.Error("session ended", "error", err)
@@ -318,6 +425,7 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 			if handle.applier.reconciler != nil {
 				ms.ListenPort = handle.applier.reconciler.Status().ListenPort
 			}
+			ms.Relay = relayStatus(handle.relay)
 		}
 		status.Memberships = append(status.Memberships, ms)
 	}
@@ -447,6 +555,9 @@ type deviceApplier struct {
 	// enrolled, holds an address and has no tunnel — a state it reports rather than hides.
 	reconciler *tunnel.Reconciler
 
+	// relay is nil for the same reasons, and additionally when this deployment offers none.
+	relay *relaylink.Link
+
 	mu   sync.Mutex
 	last string
 
@@ -465,6 +576,13 @@ func (a *deviceApplier) Apply(ctx context.Context, state *peerset.Set) ([]string
 			"device", p.GetDeviceName(),
 			"allowed_ips", p.GetAllowedIps(),
 			"public_key", truncateKey(p.GetPublicKey()))
+	}
+
+	// Before converging, not after. The reconciler is about to ask the link for an endpoint
+	// for every relayed peer in this same state, and a link that had not yet been told which
+	// relay it serves would refuse all of them.
+	if a.relay != nil {
+		a.relay.SetRelays(state.Relays())
 	}
 
 	if a.reconciler != nil {
