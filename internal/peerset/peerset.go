@@ -33,6 +33,7 @@ type Set struct {
 	version uint64
 	tunnel  *meshpv1.TunnelConfig
 	relays  *meshpv1.RelayConfig
+	filter  *meshpv1.PacketFilter
 }
 
 // New returns an empty set at version zero.
@@ -52,6 +53,13 @@ func (s *Set) SetVersion(v uint64) { s.version = v }
 
 // Tunnel is the tunnel configuration last received, or nil.
 func (s *Set) Tunnel() *meshpv1.TunnelConfig { return s.tunnel }
+
+// Filter is the packet filter last received, or nil when this network has no policy.
+//
+// Nil and empty are different answers and must stay that way: nil means nobody has written
+// a policy, so everything is permitted, while an empty filter with default_deny set means
+// a policy exists and permits nothing.
+func (s *Set) Filter() *meshpv1.PacketFilter { return s.filter }
 
 // Relays is the relay configuration last received, or nil.
 //
@@ -97,6 +105,11 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 		// previous ones would leave an agent dialling a relay that has been decommissioned
 		// and reporting itself relayed through it.
 		s.relays = nil
+		// The same for the filter, and here it is a security property rather than a
+		// housekeeping one: a policy that has been withdrawn must stop being enforced, and
+		// an agent that kept the last filter it saw would go on denying traffic its network
+		// no longer denies, with nothing to say why.
+		s.filter = nil
 	}
 
 	// Removals first. Within one delta a key that is both removed and upserted is a
@@ -115,6 +128,9 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 	// there is otherwise no way for a server to say "no relays any more".
 	if delta.GetRelays() != nil {
 		s.relays = proto.CloneOf(delta.GetRelays())
+	}
+	if delta.GetFilter() != nil {
+		s.filter = proto.CloneOf(delta.GetFilter())
 	}
 	s.version = delta.GetToVersion()
 }
@@ -135,6 +151,9 @@ func (s *Set) Clone() *Set {
 	}
 	if s.relays != nil {
 		out.relays = proto.CloneOf(s.relays)
+	}
+	if s.filter != nil {
+		out.filter = proto.CloneOf(s.filter)
 	}
 	return out
 }
@@ -193,6 +212,9 @@ func (s *Set) Equal(other *Set) bool {
 		return false
 	}
 	if !proto.Equal(s.tunnel, other.tunnel) || !proto.Equal(s.relays, other.relays) {
+		return false
+	}
+	if !proto.Equal(s.filter, other.filter) {
 		return false
 	}
 	for key, mine := range s.peers {

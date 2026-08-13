@@ -128,7 +128,17 @@ func (b *StateBuilder) snapshot(ctx context.Context, membership dbgen.GetMembers
 	if err != nil {
 		return nil, fmt.Errorf("session: listing peers: %w", err)
 	}
-	return b.snapshotFromPeers(membership, peers), nil
+
+	snapshot := b.snapshotFromPeers(membership, peers)
+	// A snapshot describes the whole world, so it carries the filter unconditionally. An
+	// agent that reconnects and is sent a snapshot with no filter would have nothing to
+	// enforce until the policy next changed.
+	filter, err := b.filterFor(ctx, membership)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Filter = filter
+	return snapshot, nil
 }
 
 func (b *StateBuilder) snapshotFromPeers(membership dbgen.GetMembershipForSessionRow, peers []dbgen.ListPeersForMembershipRow) *meshpv1.StateDelta {
@@ -163,9 +173,15 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	// version then id, so the last word about anything wins.
 	upserts := make(map[uuid.UUID]struct{})
 	removes := make(map[string]struct{})
+	policyChanged := false
 
 	for _, change := range changes {
 		switch change.Kind {
+		case "policy":
+			// Names no peer: it changes what every device may do, so the answer is to
+			// recompile this one's filter rather than to touch the peer list.
+			policyChanged = true
+
 		case "peer_upsert":
 			if change.MembershipID == nil {
 				continue // the membership was deleted; its removal is logged separately
@@ -209,6 +225,17 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		delete(removes, peer.WireguardPublicKey)
 		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
 			peer.WireguardPublicKey, peer.DeviceName, peer.Tags, peer.AddressV4, peer.AddressV6))
+	}
+
+	if policyChanged {
+		// Only when it changed. StateDelta.filter is documented as present only when it
+		// differs from what the agent holds, and sending it on every delta would make each
+		// unrelated peer change rewrite every device's firewall.
+		filter, err := b.filterFor(ctx, membership)
+		if err != nil {
+			return nil, err
+		}
+		delta.Filter = filter
 	}
 
 	for key := range removes {
