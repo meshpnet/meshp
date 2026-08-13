@@ -367,7 +367,6 @@ func TestEveryPeerFieldSurvivesARoundTripThroughTheKernel(t *testing.T) {
 
 	i := 0
 	for name, tweak := range cases {
-		name, tweak := name, tweak
 		i++
 		iface := fmt.Sprintf("wgrt%d", i)
 		t.Run(name, func(t *testing.T) {

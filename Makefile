@@ -8,6 +8,10 @@
 BUF_VERSION      := v1.47.2
 SQLC_VERSION     := v1.27.0
 GOLANGCI_VERSION := v2.12.2
+
+# The linter as a binary rather than `go run` each time: it has to be invoked once per
+# platform, and re-linking it for every invocation is the slowest part of linting.
+LINT_BIN := $(CURDIR)/bin/golangci-lint
 GOVULN_VERSION   := v1.6.0
 
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -173,9 +177,26 @@ fmt-check: ## Fail if any Go file is not gofmt clean
 	echo "  all files are gofmt clean"
 
 .PHONY: lint
-lint: fmt-check ## Run go vet and golangci-lint
+lint: $(LINT_BIN) fmt-check ## Run go vet and golangci-lint
 	go vet ./...
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run
+	$(LINT_BIN) run
+
+$(LINT_BIN):
+	GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+
+.PHONY: lint-cross
+lint-cross: $(LINT_BIN) ## Lint the code for platforms this host is not
+	@# A //go:build linux file is invisible to a lint run on macOS, and a darwin one is
+	@# invisible in CI. With a data plane per platform coming, "it linted on my machine"
+	@# stops meaning anything unless each platform is asked for by name.
+	@# The linter is built for this host and told which platform to analyse. Building it
+	@# with GOOS set would cross-compile the linter itself, which this host cannot run.
+	@for os in linux darwin windows; do \
+	  if [ "$$os" = "$$(go env GOOS)" ]; then continue; fi; \
+	  echo "  linting for $$os"; \
+	  GOOS=$$os $(LINT_BIN) run || exit 1; \
+	done
+	@echo "  other platforms are clean"
 
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod or go.sum are not what `go mod tidy` would write
@@ -260,7 +281,7 @@ migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TE
 ## --- aggregate ------------------------------------------------------------
 
 .PHONY: ci
-ci: lint tidy-check standalone-check build cross test cover-check cover-check-io fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
+ci: lint lint-cross tidy-check standalone-check build cross test cover-check cover-check-io fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
 	@echo
 	@echo "  all local CI checks passed"
 
