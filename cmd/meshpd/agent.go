@@ -16,9 +16,9 @@ import (
 	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/sessionclient"
 	"github.com/meshpnet/meshp/internal/version"
-	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
 // agent owns this device's state and its control-channel sessions.
@@ -125,14 +125,13 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 	log := a.log.With("network_id", m.NetworkID)
 	applier := &recordingApplier{log: log, membershipID: m.MembershipID, agent: a}
 	client := sessionclient.New(sessionclient.Options{
-		ControlURL:     m.ControlURL,
-		Identity:       identity,
-		MembershipID:   m.MembershipID,
-		AppliedVersion: m.AppliedStateVersion,
-		AgentVersion:   version.Version(),
-		OS:             runtime.GOOS,
-		Hostname:       hostname(),
-		Log:            log,
+		ControlURL:   m.ControlURL,
+		Identity:     identity,
+		MembershipID: m.MembershipID,
+		AgentVersion: version.Version(),
+		OS:           runtime.GOOS,
+		Hostname:     hostname(),
+		Log:          log,
 	})
 	a.running[m.MembershipID] = &sessionHandle{
 		cancel: cancel, client: client, applier: applier, started: time.Now().UTC(),
@@ -336,26 +335,25 @@ type recordingApplier struct {
 	last string
 }
 
-func (a *recordingApplier) Apply(_ context.Context, delta *meshpv1.StateDelta) ([]string, error) {
-	for _, p := range delta.GetUpsertPeers() {
+func (a *recordingApplier) Apply(_ context.Context, state *peerset.Set) ([]string, error) {
+	for _, p := range state.Peers() {
 		a.log.Debug("peer in desired state",
 			"device", p.GetDeviceName(),
 			"allowed_ips", p.GetAllowedIps(),
 			"public_key", truncateKey(p.GetPublicKey()))
 	}
 
-	if err := a.agent.setApplied(a.membershipID, int64(delta.GetToVersion())); err != nil {
+	if err := a.agent.setApplied(a.membershipID, int64(state.Version())); err != nil {
 		a.setLastError(err.Error())
-		// Persisting matters: a version acknowledged but not written would be requested
-		// again on every restart, and a future reconciler would believe the host already
-		// matched a state it had never applied.
+		// Persisting matters for reporting: a version acknowledged but never written leaves
+		// `meshp status` and the audit trail disagreeing about what this device has.
 		return []string{"local-state"}, err
 	}
 	a.setLastError("")
 
 	a.log.Info("recorded desired state",
-		"version", delta.GetToVersion(),
-		"peers", len(delta.GetUpsertPeers()),
+		"version", state.Version(),
+		"peers", state.Len(),
 		"note", "nothing is configured: this build has no WireGuard")
 	return nil, nil
 }

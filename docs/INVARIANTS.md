@@ -80,3 +80,15 @@ One key per membership, so two customer networks cannot correlate a device.
 **20. Everything the agent installs, the agent can remove.**
 Routes, DNS settings, firewall rules and interfaces. No crash, kill, upgrade or
 uninstall may leave a host without working networking.
+
+**21. Applying a delta reaches the same state as applying a snapshot.**
+For any version F and head H, `apply(state at F, delta F→H)` holds exactly what a
+snapshot at H holds. A delta that cannot be applied to what the agent has is refused
+rather than applied to the wrong base: two versions that agree on their number and
+disagree on their contents is drift nothing downstream can detect. See ADR-0008.
+
+**22. Desired state handed to a reconciler belongs to it.**
+What the agent is told to converge on does not change underneath it. A reconciler
+that compares what it applied against what it is now asked to apply must be able to
+keep the former, or the comparison is between something and itself and the work is
+silently skipped.

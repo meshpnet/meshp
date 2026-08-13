@@ -101,7 +101,35 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, r, err)
 		return
 	}
+
+	// Everyone already in the network is now missing a peer. Tell them.
+	s.tellNetwork(res.NetworkID)
+
 	httpx.WriteJSON(w, s.log, http.StatusCreated, res)
+}
+
+// tellNetwork nudges every connected agent in a network to fetch fresh state.
+//
+// Without this the heartbeat is the only path, and the heartbeat is meant to be the
+// safety net rather than the mechanism (ADR-0012): a nudge that never arrives should
+// cost latency, not correctness. Skipping the nudge entirely turns every change into
+// one that takes up to a heartbeat interval to land, which is the difference between a
+// device appearing when it joins and appearing eventually.
+//
+// Called after the enrolling transaction has committed, and it must stay that way. A
+// session nudged before the commit reads the state that preceded it, acknowledges that
+// version as applied, and then has nothing left to tell it to look again — so the push
+// would not merely be early, it would consume the notification.
+//
+// Best effort by construction: an agent that is not connected has nothing to be told,
+// and will see the change in the state it is sent when it next connects.
+func (s *Server) tellNetwork(networkID uuid.UUID) {
+	if s.session == nil {
+		return
+	}
+	if n := s.session.Hub().NotifyNetwork(networkID); n > 0 {
+		s.log.Debug("nudged connected agents", "network_id", networkID, "sessions", n)
+	}
 }
 
 // sourceAddr extracts the caller's address for the audit trail. Nil when it cannot

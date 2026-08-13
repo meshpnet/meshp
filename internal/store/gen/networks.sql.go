@@ -90,7 +90,7 @@ func (q *Queries) GetConvergenceLag(ctx context.Context, networkID uuid.UUID) ([
 
 const getNetwork = `-- name: GetNetwork :one
 
-SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at FROM networks
+SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version FROM networks
 WHERE id = $1 AND deleted_at IS NULL
 `
 
@@ -111,6 +111,7 @@ func (q *Queries) GetNetwork(ctx context.Context, id uuid.UUID) (Network, error)
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.OldestDeltaVersion,
 	)
 	return i, err
 }
@@ -158,7 +159,7 @@ func (q *Queries) ListActiveMemberships(ctx context.Context, networkID uuid.UUID
 }
 
 const listNetworksForOrganization = `-- name: ListNetworksForOrganization :many
-SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at FROM networks
+SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version FROM networks
 WHERE organization_id = $1 AND deleted_at IS NULL
 ORDER BY name
 `
@@ -181,6 +182,7 @@ func (q *Queries) ListNetworksForOrganization(ctx context.Context, organizationI
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DeletedAt,
+			&i.OldestDeltaVersion,
 		); err != nil {
 			return nil, err
 		}

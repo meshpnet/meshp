@@ -21,6 +21,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -30,6 +31,7 @@ import (
 	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/logx"
+	"github.com/meshpnet/meshp/internal/peerset"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
@@ -49,12 +51,21 @@ const (
 
 // Applier converges the device toward a desired state.
 //
-// It returns the components it could not apply rather than only an error, so a
-// partial failure is reported honestly: the control plane can then show "this device
-// has DNS but not routes" instead of deciding the whole thing either worked or did
-// not.
+// It is handed the complete desired state, not the delta that produced it. Folding deltas
+// is this package's job, and the difference matters: an Applier given a target is
+// idempotent by construction and can be run twice with the same result (Invariant 18),
+// while an Applier given an instruction has to remember what it did last time and is
+// wrong in a way nothing detects if it ever forgets.
+//
+// It also means the reconciler compares desired state against what the host actually has,
+// rather than against what it believes it applied — which is the only version of that
+// comparison that survives somebody editing a WireGuard interface by hand.
+//
+// It returns the components it could not apply rather than only an error, so a partial
+// failure is reported honestly: the control plane can show "this device has DNS but not
+// routes" instead of deciding the whole thing either worked or did not.
 type Applier interface {
-	Apply(ctx context.Context, delta *meshpv1.StateDelta) (unapplied []string, err error)
+	Apply(ctx context.Context, state *peerset.Set) (unapplied []string, err error)
 }
 
 // Options configures a Client.
@@ -62,11 +73,6 @@ type Options struct {
 	ControlURL   string
 	Identity     keys.Identity
 	MembershipID uuid.UUID
-
-	// AppliedVersion is what this device already has, from local state. Sending it in
-	// the hello is what lets a reconnecting agent be told it is current rather than
-	// being handed a snapshot it already has.
-	AppliedVersion int64
 
 	AgentVersion string
 	OS           string
@@ -79,11 +85,21 @@ type Options struct {
 
 // Client maintains one control-channel session.
 type Client struct {
-	opts    Options
-	urlErr  error
-	log     *slog.Logger
-	httpc   *http.Client
-	applied int64
+	opts   Options
+	urlErr error
+	log    *slog.Logger
+	httpc  *http.Client
+
+	// mu guards state. Three goroutines reach it: the read loop folds deltas into it, the
+	// heartbeat reports its version, and whatever asks the daemon for status reads both.
+	// Nothing here is contended — the lock is held for a map copy at most — but without it
+	// the daemon's own status command races the session it is reporting on.
+	mu sync.Mutex
+
+	// state is the desired state as folded from everything received so far. It is the
+	// only thing that licenses asking for a delta: a delta can be applied to it, and
+	// there is nothing else to apply one to.
+	state *peerset.Set
 }
 
 // New returns a Client.
@@ -94,7 +110,7 @@ func New(opts Options) *Client {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: dialTimeout}
 	}
-	c := &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, applied: opts.AppliedVersion}
+	c := &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, state: peerset.New()}
 	validated, err := controlurl.Validate(opts.ControlURL)
 	if err != nil {
 		c.urlErr = err
@@ -105,7 +121,21 @@ func New(opts Options) *Client {
 }
 
 // AppliedVersion is the newest version this client has applied.
-func (c *Client) AppliedVersion() int64 { return c.applied }
+func (c *Client) AppliedVersion() int64 { return int64(c.appliedVersion()) }
+
+// PeerCount is how many peers the desired state currently holds.
+func (c *Client) PeerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Len()
+}
+
+// appliedVersion is the version the client currently holds.
+func (c *Client) appliedVersion() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Version()
+}
 
 // Run keeps a session up until ctx ends, reconnecting when it drops.
 func (c *Client) Run(ctx context.Context, applier Applier) error {
@@ -190,15 +220,22 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 
 	hello := &meshpv1.ClientMessage{
 		Payload: &meshpv1.ClientMessage_Hello{Hello: &meshpv1.ClientHello{
-			IdentityPublicKey:   c.opts.Identity.Public,
-			Challenge:           challenge,
-			ChallengeSignature:  c.opts.Identity.Sign(challenge),
-			MembershipId:        c.opts.MembershipID.String(),
-			AgentVersion:        c.opts.AgentVersion,
-			Os:                  c.opts.OS,
-			OsVersion:           c.opts.OSVersion,
-			Hostname:            c.opts.Hostname,
-			AppliedStateVersion: uint64(c.applied),
+			IdentityPublicKey:  c.opts.Identity.Public,
+			Challenge:          challenge,
+			ChallengeSignature: c.opts.Identity.Sign(challenge),
+			MembershipId:       c.opts.MembershipID.String(),
+			AgentVersion:       c.opts.AgentVersion,
+			Os:                 c.opts.OS,
+			OsVersion:          c.opts.OSVersion,
+			Hostname:           c.opts.Hostname,
+			// What this process holds in memory, which after a fresh start is nothing.
+			//
+			// Deliberately not the version persisted on disk. A delta can only be applied to
+			// the state it was computed against, and a restarted agent no longer has that
+			// state — asking for a delta from a remembered number would fold changes into an
+			// empty set and leave the agent quietly missing every peer it knew about, at a
+			// version that says it is current.
+			AppliedStateVersion: c.appliedVersion(),
 			Capabilities: &meshpv1.AgentCapabilities{
 				// Reported honestly: this build has no WireGuard, no filter and no
 				// traversal, and a control plane told otherwise would make decisions on
@@ -243,7 +280,7 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				select {
 				case outbound <- &meshpv1.ClientMessage{
 					Payload: &meshpv1.ClientMessage_Heartbeat{Heartbeat: &meshpv1.Heartbeat{
-						AppliedStateVersion: uint64(c.applied),
+						AppliedStateVersion: c.appliedVersion(),
 						SentAtUnixMs:        time.Now().UnixMilli(),
 					}},
 				}:
@@ -279,7 +316,7 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				"network_id", h.GetNetworkId(),
 				"addresses", h.GetAddresses(),
 				"server_version", h.GetCurrentStateVersion(),
-				"applied_version", c.applied)
+				"applied_version", c.appliedVersion())
 
 		case *meshpv1.ServerMessage_StateDelta:
 			c.handleState(sessionCtx, applier, payload.StateDelta, outbound)
@@ -287,7 +324,8 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		case *meshpv1.ServerMessage_HeartbeatAck:
 			if payload.HeartbeatAck.GetStateAvailable() {
 				c.log.Debug("server has newer state",
-					"server_version", payload.HeartbeatAck.GetCurrentStateVersion(), "applied", c.applied)
+					"server_version", payload.HeartbeatAck.GetCurrentStateVersion(),
+					"applied", c.appliedVersion())
 			}
 
 		case *meshpv1.ServerMessage_Command:
@@ -301,26 +339,60 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 	}
 }
 
-// handleState applies a delta and acknowledges it.
+// handleState folds a delta into the desired state, applies it and acknowledges.
 func (c *Client) handleState(ctx context.Context, applier Applier, delta *meshpv1.StateDelta, outbound chan<- *meshpv1.ClientMessage) {
-	ack := &meshpv1.StateAck{AppliedVersion: delta.GetToVersion()}
+	previous := c.appliedVersion()
 
-	unapplied, err := applier.Apply(ctx, delta)
-	switch {
-	case err != nil:
-		// The version is reported as *not* applied, so the control plane's convergence
-		// lag stays truthful. Claiming a version we failed to reach would make the one
-		// metric that shows a broken agent show a healthy one.
-		ack.AppliedVersion = uint64(c.applied)
+	// Refusing a delta we cannot apply, rather than applying it to the wrong base. A
+	// delta whose from_version is not what this agent holds would produce a peer set that
+	// matches neither version while claiming to be the newer one — drift that nothing
+	// downstream can detect, because the version numbers would agree.
+	if from := delta.GetFromVersion(); from != 0 && from != previous {
+		c.log.Warn("refusing a delta computed against a different version",
+			"delta_from", from, "have", previous, "delta_to", delta.GetToVersion())
+		select {
+		case outbound <- &meshpv1.ClientMessage{Payload: &meshpv1.ClientMessage_StateAck{StateAck: &meshpv1.StateAck{
+			AppliedVersion:      previous,
+			Error:               fmt.Sprintf("delta from version %d cannot be applied to version %d", from, previous),
+			UnappliedComponents: []string{"peers"},
+		}}}:
+		case <-ctx.Done():
+		}
+		return
+	}
+
+	snapshot := delta.GetFromVersion() == 0
+
+	// Folded under the lock; handed over as a copy. The applier may keep what it is given
+	// for as long as it likes — the reconciler will, to diff the next state against it —
+	// and the next delta must not reach back into it.
+	c.mu.Lock()
+	c.state.Apply(delta)
+	target := c.state.Clone()
+	c.mu.Unlock()
+
+	ack := &meshpv1.StateAck{AppliedVersion: target.Version()}
+	unapplied, err := applier.Apply(ctx, target)
+	if err != nil {
+		// Reported as *not* applied, and the folded state is rolled back to the version
+		// that was actually in force. Claiming a version we failed to reach would make the
+		// one metric that shows a broken agent show a healthy one.
+		c.mu.Lock()
+		c.state.SetVersion(previous)
+		c.mu.Unlock()
+		ack.AppliedVersion = previous
 		ack.Error = err.Error()
 		ack.UnappliedComponents = unapplied
 		c.log.Error("could not apply desired state",
 			"version", delta.GetToVersion(), "error", err, "unapplied", unapplied)
-	default:
-		c.applied = int64(delta.GetToVersion())
+	} else {
 		ack.UnappliedComponents = unapplied
 		c.log.Info("applied desired state",
-			"version", delta.GetToVersion(), "peers", len(delta.GetUpsertPeers()))
+			"version", target.Version(),
+			"snapshot", snapshot,
+			"upserted", len(delta.GetUpsertPeers()),
+			"removed", len(delta.GetRemovePeerKeys()),
+			"peers", target.Len())
 	}
 
 	select {

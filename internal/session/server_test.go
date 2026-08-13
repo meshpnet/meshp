@@ -21,6 +21,7 @@ import (
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/sessionclient"
 	"github.com/meshpnet/meshp/internal/store"
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
@@ -227,26 +228,36 @@ func (f *fixture) enrolDevice(name string) device {
 	return d
 }
 
+// appliedState is a copy of what the applier was handed, taken because the client keeps
+// mutating its own set between calls.
+type appliedState struct {
+	version uint64
+	keys    []string
+	peers   []*meshpv1.Peer
+}
+
 // capturingApplier records what it was asked to apply and signals each time.
 type capturingApplier struct {
 	mu       sync.Mutex
-	deltas   []*meshpv1.StateDelta
-	applied  chan *meshpv1.StateDelta
+	seen     []appliedState
+	applied  chan appliedState
 	failWith error
 }
 
 func newCapturingApplier() *capturingApplier {
-	return &capturingApplier{applied: make(chan *meshpv1.StateDelta, 8)}
+	return &capturingApplier{applied: make(chan appliedState, 8)}
 }
 
-func (a *capturingApplier) Apply(_ context.Context, delta *meshpv1.StateDelta) ([]string, error) {
+func (a *capturingApplier) Apply(_ context.Context, state *peerset.Set) ([]string, error) {
+	snapshot := appliedState{version: state.Version(), keys: state.Keys(), peers: state.Peers()}
+
 	a.mu.Lock()
-	a.deltas = append(a.deltas, delta)
+	a.seen = append(a.seen, snapshot)
 	failure := a.failWith
 	a.mu.Unlock()
 
 	select {
-	case a.applied <- delta:
+	case a.applied <- snapshot:
 	default:
 	}
 	if failure != nil {
@@ -258,20 +269,19 @@ func (a *capturingApplier) Apply(_ context.Context, delta *meshpv1.StateDelta) (
 func (a *capturingApplier) count() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return len(a.deltas)
+	return len(a.seen)
 }
 
 // connect runs a client session in the background and returns its applier.
-func (f *fixture) connect(d device, appliedVersion int64) (*capturingApplier, context.CancelFunc) {
+func (f *fixture) connect(d device, _ int64) (*capturingApplier, context.CancelFunc) {
 	f.t.Helper()
 
 	applier := newCapturingApplier()
 	client := sessionclient.New(sessionclient.Options{
-		ControlURL:     f.http.URL,
-		Identity:       d.identity,
-		MembershipID:   d.membershipID,
-		AppliedVersion: appliedVersion,
-		AgentVersion:   "test",
+		ControlURL:   f.http.URL,
+		Identity:     d.identity,
+		MembershipID: d.membershipID,
+		AgentVersion: "test",
 	})
 
 	ctx, cancel := context.WithCancel(f.ctx)
@@ -301,27 +311,23 @@ func TestAgentConnectsReceivesSnapshotAndAcks(t *testing.T) {
 	applier, cancel := f.connect(alice, 0)
 	defer cancel()
 
-	var delta *meshpv1.StateDelta
+	var state appliedState
 	select {
-	case delta = <-applier.applied:
+	case state = <-applier.applied:
 	case <-time.After(15 * time.Second):
 		t.Fatal("no state was delivered")
 	}
 
-	// A snapshot, not a delta from an unknown version.
-	if delta.GetFromVersion() != 0 {
-		t.Errorf("from_version = %d, want 0 for a snapshot", delta.GetFromVersion())
-	}
-	if delta.GetToVersion() == 0 {
-		t.Error("to_version = 0; the agent has nothing to acknowledge")
+	if state.version == 0 {
+		t.Error("version 0; the agent has nothing to acknowledge")
 	}
 
 	// Bob is in the network, so Alice should have been told about him — and not about
 	// herself.
-	if len(delta.GetUpsertPeers()) != 1 {
-		t.Fatalf("%d peers, want 1", len(delta.GetUpsertPeers()))
+	if len(state.peers) != 1 {
+		t.Fatalf("%d peers, want 1", len(state.peers))
 	}
-	peer := delta.GetUpsertPeers()[0]
+	peer := state.peers[0]
 	if peer.GetDeviceName() != "bob" {
 		t.Errorf("peer is %q, want bob", peer.GetDeviceName())
 	}
@@ -527,15 +533,15 @@ func TestNotifyPushesNewState(t *testing.T) {
 	f.hub.NotifyNetwork(f.netID)
 
 	select {
-	case delta := <-applier.applied:
+	case state := <-applier.applied:
 		found := false
-		for _, p := range delta.GetUpsertPeers() {
+		for _, p := range state.peers {
 			if p.GetDeviceName() == "bob" {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("the pushed state does not mention the new device: %d peers", len(delta.GetUpsertPeers()))
+			t.Errorf("the pushed state does not mention the new device: %d peers", len(state.peers))
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("no state was pushed after the network changed")
