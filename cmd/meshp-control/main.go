@@ -42,6 +42,13 @@ func main() {
 		skipMigrate = flag.Bool("skip-migrations", envBool("MESHP_SKIP_MIGRATIONS"),
 			"do not apply migrations at startup; readiness still requires the schema to be current")
 		logLevel = flag.String("log-level", envOr("MESHP_LOG_LEVEL", "info"), "debug, info, warn or error")
+
+		// How far back deltas can be built. An agent offline longer than this is sent a
+		// snapshot when it returns, which is correct but expensive — so this is the
+		// trade-off between the size of the change log and how cheap a reconnection is
+		// after an outage, a weekend, or a closed laptop.
+		deltaRetention = flag.Duration("delta-retention", envDuration("MESHP_DELTA_RETENTION", 72*time.Hour),
+			"how long to keep the state change log; agents behind it are sent a snapshot")
 	)
 	flag.Parse()
 
@@ -78,11 +85,12 @@ func main() {
 	defer stop()
 
 	cfg := runConfig{
-		addr:        *listenAddr,
-		databaseURL: *databaseURL,
-		secretKey:   []byte(*secretKey),
-		adminToken:  *adminToken,
-		skipMigrate: *skipMigrate,
+		addr:           *listenAddr,
+		databaseURL:    *databaseURL,
+		secretKey:      []byte(*secretKey),
+		adminToken:     *adminToken,
+		skipMigrate:    *skipMigrate,
+		deltaRetention: *deltaRetention,
 	}
 	if err := run(ctx, log, cfg); err != nil {
 		log.Error("meshp-control exited with error", "error", err)
@@ -92,11 +100,12 @@ func main() {
 }
 
 type runConfig struct {
-	addr        string
-	databaseURL string
-	secretKey   []byte
-	adminToken  string
-	skipMigrate bool
+	addr           string
+	databaseURL    string
+	secretKey      []byte
+	adminToken     string
+	skipMigrate    bool
+	deltaRetention time.Duration
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -168,6 +177,8 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		var full http.Handler = mux
 		handler.Store(&full)
 		log.Info("api serving", "admin_enabled", cfg.adminToken != "")
+
+		go pruneDeltaLog(ctx, log, st, cfg.deltaRetention)
 	}()
 
 	defer func() {
@@ -313,11 +324,72 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
 }
 
+// pruneDeltaLog keeps the state change log bounded.
+//
+// Hourly rather than on every change: the log only has to be smaller than unbounded, and
+// a sweep that ran on each mutation would spend more time deleting than the deletions save.
+//
+// Retention of zero switches this off, which is a deliberate choice an operator can make
+// while debugging — the log is then the record of what happened. It is not the default,
+// because a table nobody prunes is one nobody notices until it is too big to prune.
+func pruneDeltaLog(ctx context.Context, log *slog.Logger, st *store.Store, retention time.Duration) {
+	if retention <= 0 {
+		log.Warn("the state change log will not be pruned", "delta_retention", retention)
+		return
+	}
+
+	const sweepInterval = time.Hour
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		// Bounded on its own, so a sweep cannot outlive the interval and overlap the next
+		// one.
+		sweepCtx, cancel := context.WithTimeout(ctx, sweepInterval/2)
+		res, err := st.PruneDeltaLog(sweepCtx, time.Now().Add(-retention))
+		cancel()
+		if err != nil {
+			// A failed sweep is not fatal: the log grows until the next one succeeds.
+			log.Error("could not prune the state change log",
+				"error", err, "networks_pruned", res.Networks, "rows_pruned", res.Rows)
+			continue
+		}
+		if res.Rows > 0 {
+			log.Info("pruned the state change log",
+				"networks", res.Networks, "rows", res.Rows, "retention", retention)
+		}
+	}
+}
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
+}
+
+// envDuration reads a Go duration from the environment.
+//
+// An unparseable value falls back rather than failing to start, and says so: a control
+// plane that refuses to boot over a malformed retention setting has turned a cosmetic
+// mistake into an outage.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meshp-control: %s=%q is not a duration; using %s\n", key, v, fallback)
+		return fallback
+	}
+	return d
 }
 
 func envBool(key string) bool {

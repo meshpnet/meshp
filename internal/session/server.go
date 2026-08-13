@@ -299,9 +299,13 @@ func (s *Server) run(ctx context.Context, conn *websocket.Conn, sess *Session) {
 	}
 }
 
-// pushState sends the current desired state.
+// pushState sends whatever the agent needs to reach the current version.
+//
+// Relative to what the agent last acknowledged, so a device that is current gets an empty
+// delta and a device that is behind gets only the difference. The builder decides between
+// a delta and a snapshot; this only has to ask from the right place.
 func (s *Server) pushState(ctx context.Context, conn *websocket.Conn, sess *Session) error {
-	delta, err := s.builder.Snapshot(ctx, sess.MembershipID)
+	delta, err := s.builder.For(ctx, sess.MembershipID, uint64(sess.AppliedVersion()))
 	if err != nil {
 		return err
 	}

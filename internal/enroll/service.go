@@ -249,11 +249,12 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (RedeemResult, 
 			return fmt.Errorf("enroll: creating membership state: %w", err)
 		}
 
-		// A new device changes what every other agent in the network should know, so
-		// the version bump belongs in this transaction rather than after it.
-		version, err := q.BumpNetworkStateVersion(ctx, tok.NetworkID)
+		// A new device changes what every other agent in the network should know, so the
+		// bump belongs in this transaction rather than after it — and it carries the change
+		// that explains it, so a delta from before this version can be built.
+		version, err := store.BumpVersion(ctx, q, tok.NetworkID, store.PeerUpserted(membership.ID))
 		if err != nil {
-			return fmt.Errorf("enroll: bumping state version: %w", err)
+			return err
 		}
 
 		metadata, _ := json.Marshal(map[string]any{

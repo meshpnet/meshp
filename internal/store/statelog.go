@@ -1,0 +1,86 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+
+	dbgen "github.com/meshpnet/meshp/internal/store/gen"
+)
+
+// Change describes one thing that changed about a network's desired state.
+type Change struct {
+	// MembershipID names a peer whose state changed. Its current row is read when a delta
+	// is computed, so this is a pointer to the fact rather than a copy of it.
+	MembershipID *uuid.UUID
+
+	// PeerPublicKey names a peer that is gone. Required for removals, because by the time
+	// a delta is built the row that held this key may not exist — and an agent that is
+	// never told to remove a peer keeps a tunnel configured to a device that does not.
+	PeerPublicKey *string
+}
+
+// PeerUpserted records that a membership's peer state changed.
+func PeerUpserted(membershipID uuid.UUID) Change {
+	id := membershipID
+	return Change{MembershipID: &id}
+}
+
+// PeerRemoved records that a WireGuard key is no longer a peer.
+func PeerRemoved(publicKey string) Change {
+	key := publicKey
+	return Change{PeerPublicKey: &key}
+}
+
+// BumpVersion advances a network's state version and records what changed, together.
+//
+// One function because the two must not come apart. A version bumped without its changes
+// logged produces a delta that reports a new version and no contents, so every agent
+// acknowledges state it never received and the convergence metric says they are current.
+// Changes logged without a bump are never sent at all. Both failures are silent, which is
+// why this is not left to callers to remember.
+//
+// Must be called inside the same transaction as the mutation it describes.
+func BumpVersion(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, changes ...Change) (int64, error) {
+	if len(changes) == 0 {
+		return 0, errors.New("store: a version bump needs at least one change to describe")
+	}
+
+	version, err := q.BumpNetworkStateVersion(ctx, networkID)
+	if err != nil {
+		return 0, fmt.Errorf("store: bumping state version: %w", err)
+	}
+
+	for i, change := range changes {
+		kind, err := change.kind()
+		if err != nil {
+			return 0, fmt.Errorf("store: change %d: %w", i, err)
+		}
+		if _, err := q.RecordStateChange(ctx, dbgen.RecordStateChangeParams{
+			NetworkID:     networkID,
+			Version:       version,
+			Kind:          kind,
+			MembershipID:  change.MembershipID,
+			PeerPublicKey: change.PeerPublicKey,
+		}); err != nil {
+			return 0, fmt.Errorf("store: recording change %d: %w", i, err)
+		}
+	}
+	return version, nil
+}
+
+// kind reports which sort of change this is, refusing anything ambiguous.
+func (c Change) kind() (string, error) {
+	switch {
+	case c.MembershipID != nil && c.PeerPublicKey != nil:
+		return "", errors.New("a change names both a membership and a key; it must be one or the other")
+	case c.MembershipID != nil:
+		return "peer_upsert", nil
+	case c.PeerPublicKey != nil:
+		return "peer_remove", nil
+	default:
+		return "", errors.New("a change names neither a membership nor a key")
+	}
+}

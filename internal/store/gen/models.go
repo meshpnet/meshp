@@ -176,6 +176,8 @@ type Network struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	DeletedAt      *time.Time
+	// Deltas can be computed from this version onward; below it, agents are sent a snapshot.
+	OldestDeltaVersion int64
 }
 
 type Organization struct {
@@ -266,6 +268,16 @@ type RouteGroup struct {
 type RouteGroupPrefix struct {
 	RouteGroupID uuid.UUID
 	Prefix       netip.Prefix
+}
+
+type StateChange struct {
+	ID            int64
+	NetworkID     uuid.UUID
+	Version       int64
+	Kind          string
+	MembershipID  *uuid.UUID
+	PeerPublicKey *string
+	CreatedAt     time.Time
 }
 
 type User struct {

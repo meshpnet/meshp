@@ -94,15 +94,23 @@ socket_mode="$(mode_of "$SOCKET")"
 echo "  0${socket_mode}"
 
 echo "seeding a network with address pools"
+# A distinct slug and address pool per run. Seeding fixed names made this script pass exactly
+# once against any given database and fail on every rerun, which CI never noticed because it
+# gets a fresh Postgres each time. A test that only works on a virgin database is one nobody
+# can reproduce locally.
+RUN_ID="$$"
+SLUG="e2e-${RUN_ID}"
+# The third octet keeps concurrent and repeated runs out of each other's pools.
+OCTET="$(( RUN_ID % 250 + 1 ))"
 # Explicit casts: inside a UNION the literals have no inferable type, and cidr will not
 # accept text.
 NETWORK_ID="$(psql "$DB_URL" -tAqc "
-  WITH o AS (INSERT INTO organizations (slug, name) VALUES ('e2e', 'End To End') RETURNING id),
-       n AS (INSERT INTO networks (organization_id, slug, name) SELECT id, 'e2e', 'End To End' FROM o RETURNING id),
+  WITH o AS (INSERT INTO organizations (slug, name) VALUES ('${SLUG}', 'End To End ${RUN_ID}') RETURNING id),
+       n AS (INSERT INTO networks (organization_id, slug, name) SELECT id, '${SLUG}', 'End To End ${RUN_ID}' FROM o RETURNING id),
        p AS (INSERT INTO address_pools (network_id, prefix, family, purpose)
-             SELECT id, '100.90.0.0/24'::cidr, 4, 'device' FROM n
+             SELECT id, '100.90.${OCTET}.0/24'::cidr, 4, 'device' FROM n
              UNION ALL
-             SELECT id, 'fd7c:6d65:7368::/120'::cidr, 6, 'device' FROM n
+             SELECT id, ('fd7c:6d65:7368:' || to_hex(${OCTET}) || '::/120')::cidr, 6, 'device' FROM n
              RETURNING network_id)
   SELECT DISTINCT network_id FROM p")"
 [ -n "$NETWORK_ID" ] || fail "could not seed a network"
@@ -132,7 +140,7 @@ echo "meshp join"
   >"$WORK/join.out" 2>&1 || fail "join failed: $(cat "$WORK/join.out")"
 sed 's/^/  /' "$WORK/join.out"
 grep -q 'enrolled in network' "$WORK/join.out" || fail "join did not report success"
-grep -qE 'address     100\.90\.0\.' "$WORK/join.out" || fail "join reported no IPv4 address"
+grep -qE "address     100\.90\.${OCTET}\." "$WORK/join.out" || fail "join reported no IPv4 address"
 
 echo "the keys were written by the daemon, and only it can read them"
 [ -f "$STATE_DIR/state.json" ] || fail "no state file was written"
@@ -170,13 +178,53 @@ lag_zero=0
 for _ in $(seq 1 30); do
   lag="$(psql "$DB_URL" -tAqc "
     SELECT coalesce(max(n.state_version - ms.applied_version), -1)
-    FROM membership_state ms JOIN networks n ON n.id = ms.network_id")"
+    FROM membership_state ms JOIN networks n ON n.id = ms.network_id
+    WHERE ms.network_id = '${NETWORK_ID}'")"
   if [ "$lag" = "0" ]; then lag_zero=1; break; fi
   sleep 1
 done
 [ "$lag_zero" = "1" ] || fail "applied version never caught up with the network's"
 grep -q 'control channel established' "$AGENT_LOG" || fail "the agent never established a session"
 sed -n 's/.*msg="recorded desired state" \(.*\)/  \1/p' "$AGENT_LOG" | tail -1
+
+echo "a second device produces a delta, not another snapshot"
+# The point of A4: a device joining must not cause every other agent to be handed the whole
+# network again. The agent logs whether what it applied was a snapshot.
+TOKEN2="$(curl -fsS -X POST \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_uses":1,"expires_in_seconds":600}' \
+  "${BASE}/api/v1/networks/${NETWORK_ID}/enrollment-tokens" \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+[ -n "$TOKEN2" ] || fail "could not mint a second token"
+
+# A second daemon, so the first has a peer to be told about.
+STATE_DIR2="$WORK/state2"
+SOCKET2="$WORK/d2.sock"
+./bin/meshpd --state-dir "$STATE_DIR2" --socket "$SOCKET2" --log-level debug >"$WORK/meshpd2.log" 2>&1 &
+AGENT2_PID=$!
+for _ in $(seq 1 30); do
+  [ -S "$SOCKET2" ] && ./bin/meshp status --socket "$SOCKET2" >/dev/null 2>&1 && break
+  sleep 1
+done
+./bin/meshp join "$TOKEN2" --control-url "$BASE" --socket "$SOCKET2" --name e2e-second \
+  >"$WORK/join2.out" 2>&1 || fail "the second join failed: $(cat "$WORK/join2.out")"
+
+# Eight seconds, not thirty: the heartbeat interval is 25s and would deliver this on its
+# own, so a generous window here cannot tell a working push from a missing one.
+got_delta=0
+for _ in $(seq 1 8); do
+  if grep -q 'msg="applied desired state".*snapshot=false' "$AGENT_LOG"; then got_delta=1; break; fi
+  sleep 1
+done
+kill "$AGENT2_PID" 2>/dev/null || true
+wait "$AGENT2_PID" 2>/dev/null || true
+
+if [ "$got_delta" != "1" ]; then
+  echo "--- first agent log ---" >&2; cat "$AGENT_LOG" >&2
+  fail "the first agent was sent a snapshot rather than a delta when a peer joined"
+fi
+sed -n 's/.*msg="applied desired state" \(.*snapshot=false.*\)/  \1/p' "$AGENT_LOG" | tail -1
 
 echo "the same token a second time"
 if ./bin/meshp join "$TOKEN" --control-url "$BASE" --socket "$SOCKET" >"$WORK/replay.out" 2>&1; then
@@ -186,8 +234,10 @@ sed 's/^/  /' "$WORK/replay.out"
 grep -q 'already been used' "$WORK/replay.out" || fail "the replay was refused for the wrong reason"
 
 echo "the enrolment is in the audit trail"
-events="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM audit_events WHERE action = 'device.enrolled'")"
-[ "$events" = "1" ] || fail "${events} device.enrolled events, want 1"
+events="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM audit_events
+  WHERE action = 'device.enrolled' AND network_id = '${NETWORK_ID}'")"
+# Two: the device under test and the second one that produced the delta.
+[ "$events" = "2" ] || fail "${events} device.enrolled events, want 2"
 
 echo "the session is cleared when the agent goes away"
 kill "$AGENT_PID" 2>/dev/null || true
@@ -195,7 +245,8 @@ wait "$AGENT_PID" 2>/dev/null || true
 AGENT_PID=""
 cleared=0
 for _ in $(seq 1 20); do
-  rows="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM membership_state WHERE control_session_id IS NOT NULL")"
+  rows="$(psql "$DB_URL" -tAqc "SELECT count(*) FROM membership_state
+    WHERE control_session_id IS NOT NULL AND network_id = '${NETWORK_ID}'")"
   if [ "$rows" = "0" ]; then cleared=1; break; fi
   sleep 1
 done

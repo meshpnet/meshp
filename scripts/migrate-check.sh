@@ -8,8 +8,33 @@
 # work, and the moment it is needed is the worst moment to find out.
 set -euo pipefail
 
-DB_URL="${1:?usage: migrate-check.sh <postgres-url>}"
+ADMIN_URL="${1:?usage: migrate-check.sh <postgres-url>}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-migrations}"
+
+# A database of its own, created here and dropped on the way out.
+#
+# The check needs an empty schema, and the URL it is given usually points at a database the
+# tests and the end-to-end script have already put things in — so borrowing it made this
+# pass exactly once and fail on every rerun. Creating a database rather than emptying the
+# one it was handed keeps that from being resolved by destroying whatever is there: nothing
+# outside this database is touched, whatever URL someone points at it.
+TMPDB="meshp_migrate_check_$$"
+psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE \"${TMPDB}\""
+DB_URL="$(printf '%s' "$ADMIN_URL" | sed -E "s#(postgres(ql)?://[^/]*)/[^/?]+#\1/${TMPDB}#")"
+if [ "$DB_URL" = "$ADMIN_URL" ]; then
+  echo "FAIL: could not point the URL at ${TMPDB}; refusing to run against ${ADMIN_URL}" >&2
+  psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE IF EXISTS \"${TMPDB}\"" || true
+  exit 2
+fi
+
+cleanup() {
+  # Terminate our own connections first: a database with a session still attached refuses
+  # to drop, which would leave one of these behind on every run.
+  psql "$ADMIN_URL" -qtAc \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${TMPDB}'" >/dev/null 2>&1 || true
+  psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS \"${TMPDB}\"" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 psql_q() { psql "$DB_URL" -v ON_ERROR_STOP=1 -q "$@"; }
 
