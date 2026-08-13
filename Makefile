@@ -16,6 +16,10 @@ COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # The container image tag. Overridable so CI can build a throwaway tag without
 # clobbering whatever a developer has locally.
 IMAGE    ?= meshp:ci
+
+# The Go image used for the data-plane tests. Matches the toolchain CI uses; kept here
+# rather than inline so there is one place to change when the toolchain moves.
+GO_IMAGE_VERSION ?= 1.25
 LDFLAGS  := -X github.com/meshpnet/meshp/internal/version.version=$(VERSION) \
             -X github.com/meshpnet/meshp/internal/version.commit=$(COMMIT)
 
@@ -229,6 +233,17 @@ image: ## Build the container image (VERSION and COMMIT are stamped in)
 image-smoke: image ## Start the image against MESHP_TEST_DATABASE_URL and wait for readiness
 	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
 	@MESHP_IMAGE=$(IMAGE) MESHP_DATABASE_URL="$(MESHP_TEST_DATABASE_URL)" ./scripts/image-smoke.sh
+
+.PHONY: dataplane
+dataplane: ## Run the data-plane tests against real interfaces, in a privileged Linux container
+	@# Privileged and Linux, because there is no way to create a WireGuard interface
+	@# without both. On a Linux host with root, `sudo -E go test ./internal/wglink/` does
+	@# the same thing without Docker.
+	docker run --rm --privileged \
+	  -v "$(CURDIR)":/src -w /src \
+	  -v "$$(go env GOMODCACHE)":/go/pkg/mod \
+	  golang:$(GO_IMAGE_VERSION)-alpine sh -c \
+	  'apk add --no-cache iproute2 wireguard-tools >/dev/null && go test ./internal/wglink/ -count=1 -v'
 
 .PHONY: migrate-check
 migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TEST_DATABASE_URL

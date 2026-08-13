@@ -403,12 +403,60 @@ jobs:
           MESHP_IMAGE: meshp:ci
           MESHP_DATABASE_URL: postgres://meshp:meshp@127.0.0.1:5432/meshp?sslmode=disable
 
+  dataplane:
+    name: data plane (real interfaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: the kernel here can do WireGuard
+        run: |
+          sudo modprobe wireguard || true
+          sudo ip link add dev wgprobe type wireguard
+          sudo ip link del dev wgprobe
+          echo "this runner can create WireGuard interfaces"
+
+      - run: sudo apt-get install -y --no-install-recommends wireguard-tools
+
+      # Creating interfaces and entering namespaces both need root, so these tests skip
+      # rather than fail without it — which means an unprivileged run would report success
+      # while testing nothing. A skip is therefore treated as a failure here. -E keeps the
+      # Go environment across sudo, and -run is not narrowed: the point is that all of them
+      # run somewhere.
+      - name: interfaces, routes, teardown and a packet across the tunnel
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ -count=1 -v 2>&1 | tee dataplane.log
+        continue-on-error: false
+
+      - name: report, and refuse a silent skip
+        if: always()
+        run: |
+          {
+            echo "### Data plane"
+            echo
+            echo '```'
+            grep -E '^(--- |ok|FAIL)|a packet crossed' dataplane.log || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if grep -q -- "--- SKIP" dataplane.log; then
+            grep -- "--- SKIP" dataplane.log
+            echo "data-plane tests were skipped, which reports success without testing anything"
+            exit 1
+          fi
+          echo "no data-plane test was skipped"
+
   ci-required:
     name: ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, image, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, image, dataplane, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |

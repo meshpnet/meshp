@@ -132,10 +132,14 @@ make ci           # everything CI runs, except the jobs that need Postgres or Do
 make e2e          # enrol a device against a real database, start to finish
 make image        # build the server-side container image
 make image-smoke  # start that image against a real database and wait for readiness
+make dataplane    # real WireGuard interfaces, and a packet across a tunnel
 ```
 
-`make ci` deliberately excludes the container build: it needs Docker and adds a minute
-to a target meant to be run constantly. CI gates it instead.
+`make ci` deliberately excludes the container build and the data plane: one needs Docker,
+the other needs Linux and root, and both add a minute to a target meant to be run
+constantly. CI gates them instead. `make dataplane` runs the WireGuard tests in a
+privileged Linux container, so it works from macOS; on a Linux host,
+`sudo -E go test ./internal/wglink/` is the same thing without Docker.
 
 ## How this is tested
 

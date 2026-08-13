@@ -56,6 +56,7 @@ func base(t *testing.T) Interface {
 func applied(want Interface) Observed {
 	obs := Observed{
 		Exists:     true,
+		Up:         true,
 		PrivateKey: want.PrivateKey,
 		ListenPort: want.ListenPort,
 		MTU:        want.MTU,
@@ -87,10 +88,30 @@ func TestAFreshHostGetsTheWholeInterface(t *testing.T) {
 	if got := firstIndexOf(plan, CreateDevice); got != 0 {
 		t.Errorf("create-device is at %d, want first:\n%s", got, plan)
 	}
-	if got := firstIndexOf(plan, BringUp); got != len(plan.Ops)-1 {
-		// Half-configured and up means traffic can be sent to an interface that does not
-		// yet know its peers, which fails as a black hole rather than as an error.
-		t.Errorf("bring-up is at %d of %d, want last:\n%s", got, len(plan.Ops), plan)
+	// Up after the addresses and before the routes. Not a preference: the kernel refuses
+	// to attach a route to a link that is down, and says "network is down" from the route
+	// call rather than from anywhere near the cause. Discovered against a real interface,
+	// which is why this assertion is written the way round it is.
+	up := firstIndexOf(plan, BringUp)
+	lastAddress := -1
+	firstRoute := -1
+	for i, op := range plan.Ops {
+		if op.Kind == AddAddress {
+			lastAddress = i
+		}
+		if op.Kind == AddRoute && firstRoute < 0 {
+			firstRoute = i
+		}
+	}
+	if up < 0 || lastAddress < 0 || firstRoute < 0 {
+		t.Fatalf("expected addresses, a bring-up and routes:\n%s", plan)
+	}
+	if up < lastAddress {
+		t.Errorf("bring-up is at %d, before the last address at %d:\n%s", up, lastAddress, plan)
+	}
+	if up > firstRoute {
+		t.Errorf("bring-up is at %d, after the first route at %d — the kernel will refuse\n"+
+			"a route on a link that is down:\n%s", up, firstRoute, plan)
 	}
 
 	var setPeers, addAddrs, addRoutes int
@@ -546,12 +567,20 @@ func simulate(obs Observed, plan Plan) Observed {
 		switch op.Kind {
 		case CreateDevice:
 			obs.Exists = true
+		case BringUp:
+			obs.Up = true
 		case DestroyDevice:
 			return Observed{}
 		case SetDevice:
 			obs.PrivateKey = op.Device.PrivateKey
-			obs.ListenPort = op.Device.ListenPort
 			obs.MTU = op.Device.MTU
+			// As the kernel does: asked for any port, it picks one and reports that. A
+			// simulation that echoed the zero back would never exercise the comparison.
+			if op.Device.ListenPort == 0 {
+				obs.ListenPort = 43521
+			} else {
+				obs.ListenPort = op.Device.ListenPort
+			}
 		case SetPeer:
 			peers[op.Peer.PublicKey] = op.Peer
 		case RemovePeer:
@@ -564,11 +593,11 @@ func simulate(obs Observed, plan Plan) Observed {
 			routes[op.Prefix] = struct{}{}
 		case RemoveRoute:
 			delete(routes, op.Prefix)
-		case BringUp:
 		}
 	}
 
-	out := Observed{Exists: obs.Exists, PrivateKey: obs.PrivateKey, ListenPort: obs.ListenPort, MTU: obs.MTU}
+	out := Observed{Exists: obs.Exists, Up: obs.Up, PrivateKey: obs.PrivateKey,
+		ListenPort: obs.ListenPort, MTU: obs.MTU}
 	for _, key := range sortedKeys(peers) {
 		out.Peers = append(out.Peers, peers[key])
 	}
@@ -633,7 +662,7 @@ func randomInterface(t *testing.T, rng *rand.Rand) Interface {
 	iface := Interface{
 		Name:       "meshp0",
 		PrivateKey: Key(fmt.Sprintf("priv-%d", rng.Intn(3))),
-		ListenPort: 51820 + rng.Intn(2),
+		ListenPort: []int{0, 51820, 51821}[rng.Intn(3)],
 		MTU:        []int{1280, 1420}[rng.Intn(2)],
 		Addresses:  prefixes(t, "100.90.0.1/32", "fd7c::1/128"),
 	}
@@ -703,7 +732,7 @@ func randomObserved(t *testing.T, rng *rand.Rand, want Interface) Observed {
 	default:
 		// An interface belonging to an older configuration: peers and routes for devices
 		// that are no longer in this network at all.
-		obs := Observed{Exists: true, PrivateKey: "an-old-private-key", ListenPort: 41820, MTU: 1400}
+		obs := Observed{Exists: true, Up: true, PrivateKey: "an-old-private-key", ListenPort: 41820, MTU: 1400}
 		for i := range 1 + rng.Intn(3) {
 			key := Key(fmt.Sprintf("stale-peer-%d", i))
 			ips := prefixes(t, fmt.Sprintf("100.90.8.%d/32", 1+i))
@@ -712,5 +741,64 @@ func randomObserved(t *testing.T, rng *rand.Rand, want Interface) Observed {
 		}
 		obs.Addresses = prefixes(t, "100.90.7.1/32")
 		return obs
+	}
+}
+
+// A port of zero means any, so whatever the kernel chose is already right. Comparing it
+// for equality would rewrite the device on every reconcile, and rewriting a device resets
+// every session on it: the interface would drop traffic once a tick, forever.
+func TestAnUnspecifiedPortIsSatisfiedByWhateverTheKernelChose(t *testing.T) {
+	want := base(t)
+	want.ListenPort = 0
+
+	obs := applied(want)
+	obs.ListenPort = 43521 // what the kernel answers with
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() {
+		t.Errorf("an unspecified port produced work:\n%s", plan)
+	}
+}
+
+// But a port that was asked for specifically must be honoured.
+func TestASpecifiedPortIsEnforced(t *testing.T) {
+	want := base(t)
+	want.ListenPort = 51820
+
+	obs := applied(want)
+	obs.ListenPort = 43521
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstIndexOf(plan, SetDevice) < 0 {
+		t.Errorf("a wrong listen port was left alone:\n%s", plan)
+	}
+}
+
+// An interface that exists but is down must be raised. A plan that only brought up
+// interfaces it created itself would leave one down forever — after a restart, or after
+// anything else on the host took it down — and every route would then fail to attach.
+func TestAnInterfaceThatIsDownIsBroughtUp(t *testing.T) {
+	want := base(t)
+	obs := applied(want)
+	obs.Up = false
+
+	plan, err := For(want, obs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstIndexOf(plan, BringUp) < 0 {
+		t.Errorf("an interface that was down was left down:\n%s", plan)
+	}
+	// And nothing else was disturbed to do it.
+	for _, op := range plan.Ops {
+		if op.Kind != BringUp {
+			t.Errorf("raising a down interface also did: %s", op)
+		}
 	}
 }
