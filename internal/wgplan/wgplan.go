@@ -59,8 +59,20 @@ type Peer struct {
 type Interface struct {
 	Name       string
 	PrivateKey Key
+
+	// ListenPort is the UDP port to listen on. Zero means any, and is not the same as
+	// "some particular port that happens to be zero": a device holding memberships in
+	// several networks needs one interface per membership (ADR-0004), so they cannot all
+	// ask for the same port, and until the port is distributed to peers there is nothing
+	// to be gained by pinning it.
+	//
+	// Treated as "leave whatever is there" when comparing, because the kernel answers
+	// with the port it chose. Requiring a match would rewrite the device on every
+	// reconcile, and rewriting a device resets every session on it — the interface would
+	// drop traffic once a tick, forever, for no reason.
 	ListenPort int
-	MTU        int
+
+	MTU int
 
 	// Addresses are this device's own addresses, as host prefixes. See ADR-0015 for why
 	// they are not the pool prefix.
@@ -74,7 +86,14 @@ type Interface struct {
 // Exists is false when there is no interface at all, which is different from an
 // interface that exists and is empty: the first needs creating, the second does not.
 type Observed struct {
-	Exists     bool
+	Exists bool
+
+	// Up is whether the interface is administratively up. Tracked because an interface
+	// that exists but is down needs bringing up, and a plan that only ever raised
+	// interfaces it created itself would leave one down forever — after a restart, or
+	// after anything else on the host took it down.
+	Up bool
+
 	PrivateKey Key
 	ListenPort int
 	MTU        int
@@ -107,8 +126,14 @@ const (
 	RemoveRoute
 	// AddRoute points a prefix at the interface.
 	AddRoute
-	// BringUp marks the interface up. Last, so nothing is briefly reachable while
-	// half-configured.
+	// BringUp marks the interface up.
+	//
+	// Before the routes and after everything else, which is not a preference: the kernel
+	// refuses to attach a route to a link that is down, and reports it as "network is
+	// down" from the route call rather than from anywhere near the cause. By this point
+	// the key, the peers and the addresses are set, so everything governing what may
+	// enter or leave the interface is already in force — what is still missing are the
+	// routes that let this host send, which is the safe thing to be missing.
 	BringUp
 	// DestroyDevice removes the interface entirely.
 	DestroyDevice
@@ -228,9 +253,10 @@ func For(want Interface, observed Observed) (Plan, error) {
 	// The device's own settings. Compared rather than always written, so a steady state
 	// produces no operations: setting a private key again resets every session on the
 	// interface, which would drop traffic on a tick that had nothing to change.
+	portWrong := want.ListenPort != 0 && observed.ListenPort != want.ListenPort
 	if !observed.Exists ||
 		observed.PrivateKey != want.PrivateKey ||
-		observed.ListenPort != want.ListenPort ||
+		portWrong ||
 		observed.MTU != want.MTU {
 		add(Op{Kind: SetDevice, Device: Device{
 			PrivateKey: want.PrivateKey,
@@ -257,19 +283,20 @@ func For(want Interface, observed Observed) (Plan, error) {
 		}
 	}
 
-	// Addresses, then routes: a route needs the interface to hold an address in the
-	// family it is for, and on some platforms it needs the address present before the
-	// route will attach at all.
+	// Addresses before routes: a route needs the interface to hold an address in the
+	// family it is for.
 	addPrefixOps(&plan, observed.Addresses, want.Addresses, RemoveAddress, AddAddress)
+
+	// Then up, because the kernel will not attach a route to a link that is down.
+	if !observed.Exists || !observed.Up {
+		add(Op{Kind: BringUp})
+	}
 
 	// Every peer's own addresses are routed at the interface. Derived rather than
 	// supplied, because a route to a peer that is not configured would be a black hole,
 	// and the two lists would then have to be kept in step by whoever calls this.
 	addPrefixOps(&plan, observed.Routes, wantRoutes(want), RemoveRoute, AddRoute)
 
-	if !observed.Exists {
-		add(Op{Kind: BringUp})
-	}
 	return plan, nil
 }
 
