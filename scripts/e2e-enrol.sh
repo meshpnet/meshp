@@ -159,22 +159,37 @@ priv="$(sed -n 's/.*"wireguard_private_key": *"\([^"]*\)".*/\1/p' "$STATE_DIR/st
 if grep -qF "$priv" "$WORK/join.out"; then fail "the CLI printed the WireGuard private key"; fi
 if grep -qF "$priv" "$CONTROL_LOG"; then fail "the control plane logged the WireGuard private key"; fi
 
-echo "meshp status reports a live session"
-connected=0
-for _ in $(seq 1 30); do
-  ./bin/meshp status --socket "$SOCKET" >"$WORK/status.out" 2>&1 || true
-  if grep -q 'session     connected' "$WORK/status.out"; then connected=1; break; fi
-  sleep 1
-done
-[ "$connected" = "1" ] || fail "status never reported a connected session: $(cat "$WORK/status.out")"
-sed 's/^/  /' "$WORK/status.out"
-grep -q "$NETWORK_ID" "$WORK/status.out" || fail "status does not mention the network"
-# Status must say what is actually true, in either direction: a membership with an address
-# is not a working tunnel, and a working tunnel must not be reported as absent. Which one to
-# expect is decided by the platform rather than assumed, because this assertion once said
-# "always down" and outlived the build it was written for.
+# Whether a tunnel is possible here at all, decided once and reused. Deciding it rather than
+# assuming it is why this section survives both a laptop and a privileged Linux runner.
+tunnel_possible=0
 if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe0 type wireguard 2>/dev/null; then
   ip link del dev wgprobe0
+  tunnel_possible=1
+fi
+
+echo "meshp status reports a live session"
+# Waits for the session *and*, where one is possible, for the tunnel. Waiting only for the
+# session made this race: the interface comes up a moment after the first state arrives, so
+# an assertion on the same snapshot passed or failed depending on timing. A flaky gate is
+# worse than no gate — it teaches people to run it again.
+ready=0
+for _ in $(seq 1 30); do
+  ./bin/meshp status --socket "$SOCKET" >"$WORK/status.out" 2>&1 || true
+  if grep -q 'session     connected' "$WORK/status.out"; then
+    if [ "$tunnel_possible" = "0" ] || grep -qE 'interface   meshp0 \(up' "$WORK/status.out"; then
+      ready=1; break
+    fi
+  fi
+  sleep 1
+done
+[ "$ready" = "1" ] || fail "status never reported a live session and tunnel: $(cat "$WORK/status.out")"
+sed 's/^/  /' "$WORK/status.out"
+grep -q "$NETWORK_ID" "$WORK/status.out" || fail "status does not mention the network"
+
+# Status must say what is actually true, in either direction: a membership with an address is
+# not a working tunnel, and a working tunnel must not be reported as absent. This assertion
+# once said "always down" and outlived the build it was written for.
+if [ "$tunnel_possible" = "1" ]; then
   grep -qE 'interface   meshp0 \(up' "$WORK/status.out" \
     || fail "a tunnel is possible here but status says it is not up"
 else
@@ -238,8 +253,7 @@ sed -n 's/.*msg="applied desired state" \(.*snapshot=false.*\)/  \1/p' "$AGENT_L
 # Only where a tunnel is possible: Linux, with the privilege to create interfaces and a
 # kernel that can. Skipped rather than failed elsewhere, because "enrolled with no tunnel"
 # is a real supported state and this script has to pass on a laptop too.
-if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe type wireguard 2>/dev/null; then
-  ip link del dev wgprobe
+if [ "$tunnel_possible" = "1" ]; then
   echo "the interface really comes up"
 
   up=0
@@ -299,6 +313,41 @@ if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprob
   ip route show dev meshp0 | grep -q "100.90.${OCTET}.2" \
     || { ip route show dev meshp0 >&2; fail "no route to the peer via the interface"; }
   echo "  route to the peer installed"
+
+  # The listen port survives a restart, which is what keeps the endpoints peers hold valid
+  # and any NAT mapping alive.
+  #
+  # The interface is deleted before restarting on purpose. It outlives the daemon by design
+  # (Invariant 15: a control-plane outage does not interrupt established networking), so a
+  # restart on its own would find the port already correct and prove nothing about whether
+  # anything was remembered.
+  port_before="$(./bin/meshp status --socket "$SOCKET" | sed -n 's|.*listening   udp/\([0-9]*\).*|\1|p')"
+  [ -n "$port_before" ] || { ./bin/meshp status --socket "$SOCKET" >&2; fail "status does not report a listen port"; }
+  echo "  listening on udp/${port_before}"
+
+  grep -q "\"listen_port\": *${port_before}" "$STATE_DIR/state.json" \
+    || { fail "the listen port was not written to local state"; }
+
+  kill "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  ip link del meshp0
+  ./bin/meshpd --reconcile-interval 2s --state-dir "$STATE_DIR" --socket "$SOCKET" \
+    --log-level debug >>"$AGENT_LOG" 2>&1 &
+  AGENT_PID=$!
+
+  back=0
+  for _ in $(seq 1 25); do
+    if [ -S "$SOCKET" ] && ./bin/meshp status --socket "$SOCKET" 2>/dev/null | grep -qE 'interface   meshp0 \(up'; then
+      back=1; break
+    fi
+    sleep 1
+  done
+  [ "$back" = "1" ] || { tail -20 "$AGENT_LOG" >&2; fail "the interface did not come back after a restart"; }
+
+  port_after="$(./bin/meshp status --socket "$SOCKET" | sed -n 's|.*listening   udp/\([0-9]*\).*|\1|p')"
+  [ "$port_after" = "$port_before" ] \
+    || fail "the listen port changed across a restart: ${port_before} then ${port_after}"
+  echo "  the same port after a restart and a deleted interface"
 fi
 
 echo "the same token a second time"

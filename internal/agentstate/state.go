@@ -73,6 +73,15 @@ type Membership struct {
 	WireGuardPrivateKey string `json:"wireguard_private_key"` // base64
 	WireGuardPublicKey  string `json:"wireguard_public_key"`  // base64
 
+	// ListenPort is the UDP port this membership's interface listens on, kept so it
+	// survives a restart.
+	//
+	// Stability matters once peers are told where to send packets: a port that changes on
+	// every start invalidates the endpoint every other device holds, and drops any NAT
+	// mapping that was keeping a path open. Zero means one has not been chosen yet, which
+	// is what an older state file reads as — so there is nothing to migrate.
+	ListenPort int `json:"listen_port,omitempty"`
+
 	AppliedStateVersion int64     `json:"applied_state_version"`
 	JoinedAt            time.Time `json:"joined_at"`
 }

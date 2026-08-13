@@ -39,6 +39,11 @@ type Membership struct {
 	// AddressV4 and AddressV6 are this device's own addresses. Either may be empty.
 	AddressV4 string
 	AddressV6 string
+
+	// ListenPort is the UDP port to ask for. Zero asks for any, which is what a membership
+	// that has never come up says; the port the device settles on is reported back so it
+	// can be kept for next time.
+	ListenPort int
 }
 
 // Reconciler applies desired state to a real interface.
@@ -55,6 +60,7 @@ type Reconciler struct {
 	up       bool
 	lastErr  string
 	appliedV uint64
+	port     int
 }
 
 // New returns a Reconciler for one membership.
@@ -71,13 +77,19 @@ type Status struct {
 	Kind           wglink.Kind
 	LastError      string
 	AppliedVersion uint64
+
+	// ListenPort is the port the interface is actually listening on, which is the kernel's
+	// choice when none was asked for. Worth reporting: it is what an operator opening a
+	// firewall needs, and what peers will eventually be told.
+	ListenPort int
 }
 
 // Status reports the tunnel's current state.
 func (r *Reconciler) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return Status{Up: r.up, Kind: r.kind, LastError: r.lastErr, AppliedVersion: r.appliedV}
+	return Status{Up: r.up, Kind: r.kind, LastError: r.lastErr,
+		AppliedVersion: r.appliedV, ListenPort: r.port}
 }
 
 // Apply makes the interface match state.
@@ -131,11 +143,19 @@ func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, err
 		kind = wglink.KindUnknown
 	}
 
+	// The port the device settled on, read rather than assumed: asking for any means the
+	// kernel chose, and its choice is the thing worth keeping.
+	port := want.ListenPort
+	if after, err := r.link.Observe(want.Name); err == nil && after.ListenPort != 0 {
+		port = after.ListenPort
+	}
+
 	r.mu.Lock()
 	r.kind = kind
 	r.up = true
 	r.lastErr = ""
 	r.appliedV = state.Version()
+	r.port = port
 	r.mu.Unlock()
 	return nil, nil
 }
@@ -187,9 +207,10 @@ func Desired(m Membership, state *peerset.Set) (wgplan.Interface, error) {
 		Name:       m.InterfaceName,
 		PrivateKey: wgplan.Key(m.PrivateKey),
 		MTU:        defaultMTU,
-		// Any port. A device in several networks needs an interface for each (ADR-0004), so
-		// they cannot all ask for one port, and nothing distributes ports yet.
-		ListenPort: 0,
+		// The port this membership settled on before, or any if it has never come up. A
+		// device in several networks needs an interface for each (ADR-0004), so they cannot
+		// share one fixed port.
+		ListenPort: m.ListenPort,
 	}
 
 	if mtu := int(state.Tunnel().GetMtu()); mtu > 0 {
