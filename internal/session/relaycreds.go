@@ -93,6 +93,19 @@ func (s *Server) relayTokenFor(ctx context.Context, sess *Session) ([]byte, time
 		return nil, time.Time{}, fmt.Errorf("loading membership: %w", err)
 	}
 
+	// Re-checked here rather than trusted from the handshake. A session outlives the
+	// request that opened it, so a device revoked mid-session would otherwise be handed a
+	// fresh half-hour capability on its way out — and the relay cannot know better,
+	// because a token it can verify is a token it must honour.
+	//
+	// It does not make an outstanding token expire. That is the reason revocation is
+	// enforced by the peers dropping the key rather than by cutting off the relay: the
+	// revoked device may still reach the relay until its token runs out, and there is
+	// no longer anybody on the far side willing to decrypt what it sends.
+	if membership.DeviceRevokedAt != nil || membership.MembershipState != "active" {
+		return nil, time.Time{}, errors.New("this membership is no longer active")
+	}
+
 	encoded, err := s.store.Queries().GetWireGuardKeyForMembership(ctx, sess.MembershipID)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("loading this membership's WireGuard key: %w", err)

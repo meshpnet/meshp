@@ -87,7 +87,15 @@ type Membership struct {
 }
 
 // Identity decodes the device identity.
+//
+// Absent is refused rather than decoded. Empty base64 decodes happily to an empty key, and
+// an empty key signs: the daemon would open sessions with a signature nothing can verify
+// and report the failure as an authentication problem at the control plane rather than as
+// the missing identity it is.
 func (s *State) Identity() (keys.Identity, error) {
+	if s.IdentityPrivateKey == "" || s.IdentityPublicKey == "" {
+		return keys.Identity{}, errors.New("agentstate: this device has no identity")
+	}
 	priv, err := base64.StdEncoding.DecodeString(s.IdentityPrivateKey)
 	if err != nil {
 		return keys.Identity{}, fmt.Errorf("agentstate: identity private key: %w", err)
@@ -124,6 +132,34 @@ func (s *State) AddMembership(m Membership) {
 		}
 	}
 	s.Memberships = append(s.Memberships, m)
+}
+
+// RemoveMembership forgets a membership, and reports whether there was one.
+//
+// The WireGuard key goes with it, which is right: keys are per membership and never shared
+// between them (Invariant 19), so discarding one network's key tells another network
+// nothing. The device identity is deliberately left alone — it is shared across every
+// membership (ADR-0006), and dropping it because one network revoked this device would
+// silently lock the device out of the others.
+func (s *State) RemoveMembership(membershipID uuid.UUID) bool {
+	for i := range s.Memberships {
+		if s.Memberships[i].MembershipID != membershipID {
+			continue
+		}
+		s.Memberships = append(s.Memberships[:i], s.Memberships[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// ForgetIdentity discards the device's identity.
+//
+// Only meaningful once no memberships remain, which is the only time it is safe: the
+// identity names this device to every network it has joined (ADR-0006). Callers honouring
+// a wipe request must check that themselves — this does as it is told.
+func (s *State) ForgetIdentity() {
+	s.IdentityPublicKey = ""
+	s.IdentityPrivateKey = ""
 }
 
 // Path returns the state file's location inside dir.

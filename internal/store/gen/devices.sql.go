@@ -392,3 +392,107 @@ func (q *Queries) ListDeviceAddressPools(ctx context.Context, networkID uuid.UUI
 	}
 	return items, nil
 }
+
+const listMembershipsForNetwork = `-- name: ListMembershipsForNetwork :many
+SELECT
+    m.id            AS membership_id,
+    m.device_id,
+    d.name          AS device_name,
+    m.address_v4,
+    m.address_v6,
+    m.state,
+    m.joined_at,
+    m.revoked_at,
+    k.public_key    AS wireguard_public_key
+FROM device_network_memberships m
+JOIN devices d ON d.id = m.device_id
+LEFT JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
+WHERE m.network_id = $1
+ORDER BY m.joined_at
+`
+
+type ListMembershipsForNetworkRow struct {
+	MembershipID       uuid.UUID
+	DeviceID           uuid.UUID
+	DeviceName         string
+	AddressV4          *netip.Addr
+	AddressV6          *netip.Addr
+	State              string
+	JoinedAt           time.Time
+	RevokedAt          *time.Time
+	WireguardPublicKey *string
+}
+
+// Who is in a network, for an administrator deciding what to revoke.
+//
+// Revoked memberships are included rather than filtered out: an administrator checking
+// that a device really is out needs to see that it is out, and one that had silently
+// vanished would be indistinguishable from one that was never there.
+func (q *Queries) ListMembershipsForNetwork(ctx context.Context, networkID uuid.UUID) ([]ListMembershipsForNetworkRow, error) {
+	rows, err := q.db.Query(ctx, listMembershipsForNetwork, networkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMembershipsForNetworkRow
+	for rows.Next() {
+		var i ListMembershipsForNetworkRow
+		if err := rows.Scan(
+			&i.MembershipID,
+			&i.DeviceID,
+			&i.DeviceName,
+			&i.AddressV4,
+			&i.AddressV6,
+			&i.State,
+			&i.JoinedAt,
+			&i.RevokedAt,
+			&i.WireguardPublicKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeMembership = `-- name: RevokeMembership :one
+UPDATE device_network_memberships m
+SET state = 'revoked', revoked_at = now()
+FROM wireguard_keys k
+WHERE m.id = $1
+  AND m.network_id = $2
+  AND m.state <> 'revoked'
+  AND k.membership_id = m.id
+  AND k.state = 'current'
+RETURNING m.id AS membership_id, m.device_id, k.public_key AS wireguard_public_key
+`
+
+type RevokeMembershipParams struct {
+	ID        uuid.UUID
+	NetworkID uuid.UUID
+}
+
+type RevokeMembershipRow struct {
+	MembershipID       uuid.UUID
+	DeviceID           uuid.UUID
+	WireguardPublicKey string
+}
+
+// Take a device out of a network, and say which key stopped being a peer.
+//
+// The key comes back because a removal is recorded by key rather than by membership: by
+// the time a delta is built this row may be long gone, and an agent that is never told to
+// drop a peer keeps a tunnel configured to a device that is no longer entitled to one.
+//
+// Scoped by network as well as by id so an administrator holding one network cannot revoke
+// a membership in another, and matched on state so revoking twice affects nothing — the
+// second call returns no row, which the caller reports rather than treating as success.
+func (q *Queries) RevokeMembership(ctx context.Context, arg RevokeMembershipParams) (RevokeMembershipRow, error) {
+	row := q.db.QueryRow(ctx, revokeMembership, arg.ID, arg.NetworkID)
+	var i RevokeMembershipRow
+	err := row.Scan(&i.MembershipID, &i.DeviceID, &i.WireguardPublicKey)
+	return i, err
+}

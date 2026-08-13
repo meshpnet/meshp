@@ -103,6 +103,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleCreateToken))
 	mux.Handle("GET /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleListTokens))
 	mux.Handle("DELETE /api/v1/networks/{networkID}/enrollment-tokens/{tokenID}", s.adminOnly(s.handleRevokeToken))
+
+	mux.Handle("GET /api/v1/networks/{networkID}/devices", s.adminOnly(s.handleListMemberships))
+	mux.Handle("DELETE /api/v1/networks/{networkID}/devices/{membershipID}", s.adminOnly(s.handleRevokeMembership))
 }
 
 // rateLimited wraps an unauthenticated handler.

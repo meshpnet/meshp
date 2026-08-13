@@ -276,6 +276,7 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 		OS:           runtime.GOOS,
 		Hostname:     hostname(),
 		Relay:        relayCredentials(relay),
+		Revoked:      &membershipRevoker{agent: a, membershipID: m.MembershipID},
 		Log:          log,
 	})
 	a.running[m.MembershipID] = &sessionHandle{
@@ -417,8 +418,13 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 			// Live, from the session rather than from disk. This is the reason to ask the
 			// daemon instead of reading the state file: the file cannot say whether the
 			// control plane is reachable right now.
-			ms.Connected = true
-			ms.ConnectedSince = handle.started
+			//
+			// From the client rather than from the handle. A handle exists for as long as
+			// the membership is supervised, which includes the whole time a revoked or
+			// misconfigured device is having every connection refused — reporting that as
+			// connected would make status agree with the device's own hopes rather than
+			// with the control plane.
+			ms.Connected, ms.ConnectedSince = handle.client.Connected()
 			ms.AppliedStateVersion = handle.client.AppliedVersion()
 			ms.LastError = handle.applier.lastError()
 			ms.TunnelUp, ms.TunnelKind = handle.applier.tunnelStatus()

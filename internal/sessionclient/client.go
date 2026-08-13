@@ -49,6 +49,10 @@ const (
 	maxBackoff = 30 * time.Second
 )
 
+// ErrRevoked means the control plane ended this membership. Terminal: reconnecting would
+// be refused, and retrying forever would hide the reason behind a backoff loop.
+var ErrRevoked = errors.New("sessionclient: this device has been revoked from the network")
+
 // Applier converges the device toward a desired state.
 //
 // It is handed the complete desired state, not the delta that produced it. Folding deltas
@@ -87,6 +91,17 @@ type RelayCredentials interface {
 	TokenRefused(reason string)
 }
 
+// Revoker is told that this membership is over.
+//
+// The control plane says so as a courtesy, not as the mechanism: by the time this arrives
+// the other devices have already been told to drop this one's key, so the membership is
+// finished whether or not the message is received or acted on. What acting on it buys is
+// tidiness — an interface torn down rather than left up and carrying nothing — and a
+// person at the keyboard being told why.
+type Revoker interface {
+	Revoked(reason string, wipeLocalState bool)
+}
+
 // Options configures a Client.
 type Options struct {
 	ControlURL   string
@@ -102,6 +117,10 @@ type Options struct {
 	// with no data plane, and the client then never asks for one — a token nothing can use
 	// is a credential minted for no reason.
 	Relay RelayCredentials
+
+	// Revoked is told when the control plane ends this membership. Nil is fine: the
+	// membership is over either way.
+	Revoked Revoker
 
 	HTTPClient *http.Client
 	Log        *slog.Logger
@@ -124,6 +143,16 @@ type Client struct {
 	// only thing that licenses asking for a delta: a delta can be applied to it, and
 	// there is nothing else to apply one to.
 	state *peerset.Set
+
+	// establishedAt is when the control plane last welcomed this client, zero when there
+	// is no session right now.
+	//
+	// Tracked here because it is the only place that knows. The daemon supervises a
+	// session for as long as a membership exists, so "the supervisor is running" is true
+	// while every connection attempt is being refused — and status reporting that as
+	// connected is the exact failure this project keeps guarding against: a device that
+	// looks healthy and is not.
+	establishedAt time.Time
 }
 
 // New returns a Client.
@@ -142,6 +171,19 @@ func New(opts Options) *Client {
 	}
 	c.opts.ControlURL = validated
 	return c
+}
+
+// Connected reports whether a session is established right now, and since when.
+func (c *Client) Connected() (bool, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.establishedAt.IsZero(), c.establishedAt
+}
+
+func (c *Client) setEstablished(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.establishedAt = at
 }
 
 // AppliedVersion is the newest version this client has applied.
@@ -224,6 +266,13 @@ func (c *Client) Run(ctx context.Context, applier Applier) error {
 			return ctx.Err()
 		}
 
+		// Terminal. The membership is gone at the control plane, so every reconnection
+		// would be refused at the handshake — retrying would turn a clear answer into an
+		// endless backoff loop with the reason buried in the first line of it.
+		if errors.Is(err, ErrRevoked) {
+			return err
+		}
+
 		// A session that lasted a while was healthy, so the next failure should retry
 		// promptly rather than inheriting the backoff from an outage that is over.
 		if time.Since(start) > time.Minute {
@@ -286,7 +335,10 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		return fmt.Errorf("sessionclient: dialling %s: %w", wsURL, err)
 	}
 	conn.SetReadLimit(maxMessageBytes)
-	defer func() { _ = conn.CloseNow() }()
+	defer func() {
+		_ = conn.CloseNow()
+		c.setEstablished(time.Time{})
+	}()
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -392,6 +444,10 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 
 		switch payload := msg.Payload.(type) {
 		case *meshpv1.ServerMessage_Hello:
+			// The server's hello is the first moment a session is genuinely established:
+			// the dial succeeded and the signature was accepted. A refused connection gets
+			// closed before this.
+			c.setEstablished(time.Now().UTC())
 			h := payload.Hello
 			c.log.Info("control channel established",
 				"session", h.GetSessionId(),
@@ -418,6 +474,19 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 			}
 
 		case *meshpv1.ServerMessage_Command:
+			if revoke := payload.Command.GetRevoke(); revoke != nil {
+				// The reason is written by an administrator and read by whoever finds the
+				// machine, so it crosses a trust boundary in both directions.
+				c.log.Warn("this device has been revoked from the network",
+					"reason", logx.Safe(revoke.GetReason()),
+					"wipe_local_state", revoke.GetWipeLocalState())
+				if c.opts.Revoked != nil {
+					c.opts.Revoked.Revoked(revoke.GetReason(), revoke.GetWipeLocalState())
+				}
+				// The server closes the connection after this. Returning rather than
+				// waiting for the read to fail keeps the reason as the reported cause.
+				return ErrRevoked
+			}
 			c.log.Info("received a command", "command", fmt.Sprintf("%T", payload.Command.Payload))
 
 		default:

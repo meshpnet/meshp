@@ -411,6 +411,108 @@ if [ "$tunnel_possible" = "1" ]; then
   fi
   echo "  the kernel's traffic is leaving through the relay (${sent} packet(s))"
 
+  # ---------------------------------------------------------------------------
+  # Revocation
+  #
+  # Everything above describes a device that is in the network. This is the other half:
+  # taking one out has to actually remove it, and the removal is enforced here — on the
+  # peer — rather than on the device being revoked. That is why this is asserted against
+  # the first daemon while the second one is not even running.
+  echo "revoking the second device"
+
+  # Which membership is the peer? The second daemon's own state file says, which is also a
+  # check that the listing endpoint agrees with it.
+  PEER_MEMBERSHIP="$(sed -n 's/.*"membership_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR2/state.json" | head -1)"
+  [ -n "$PEER_MEMBERSHIP" ] || fail "could not read the peer's membership id"
+
+  curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/devices" >"$WORK/devices.out" \
+    || fail "could not list the network's devices"
+  grep -q "$PEER_MEMBERSHIP" "$WORK/devices.out" \
+    || { cat "$WORK/devices.out" >&2; fail "the device listing does not contain the peer"; }
+
+  curl -fsS -X DELETE \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"reason":"e2e revocation"}' \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/devices/${PEER_MEMBERSHIP}" >"$WORK/revoke.out" \
+    || { cat "$WORK/revoke.out" >&2; fail "the revoke request failed"; }
+  grep -q '"status":"revoked"' "$WORK/revoke.out" \
+    || { cat "$WORK/revoke.out" >&2; fail "revoke did not report success"; }
+
+  # The peer disappears from the interface. This is the whole enforcement mechanism: the
+  # revoked device keeps its key and its address, and what changes is that nobody will
+  # accept it any more.
+  gone=0
+  for _ in $(seq 1 25); do
+    if ! wg show meshp0 allowed-ips 2>/dev/null | grep -qE "100\.90\.${OCTET}\.2/32"; then
+      gone=1; break
+    fi
+    sleep 1
+  done
+  if [ "$gone" != "1" ]; then
+    echo "--- wg ---" >&2; wg show meshp0 >&2
+    echo "--- agent log ---" >&2; tail -20 "$AGENT_LOG" >&2
+    fail "a revoked device is still configured as a peer"
+  fi
+  echo "  the peer was dropped from the interface"
+
+  # And its route with it, or traffic for that address would still be handed to a tunnel
+  # that has nowhere to send it.
+  ip route show dev meshp0 | grep -q "100.90.${OCTET}.2" \
+    && { ip route show dev meshp0 >&2; fail "the route to the revoked device survived"; }
+  echo "  and its route withdrawn"
+
+  # The relayed socket that served it is released. Nothing had ever exercised this before
+  # revocation existed: a peer had no way to stop being relayed, so the retirement path in
+  # relaylink ran only in its own tests.
+  relayed_now="$(./bin/meshp status --socket "$SOCKET" \
+    | sed -n 's|.*peers     \([0-9]*\) relayed.*|\1|p')"
+  if [ -n "$relayed_now" ] && [ "$relayed_now" != "0" ]; then
+    ./bin/meshp status --socket "$SOCKET" >&2
+    fail "the revoked peer's relay socket was not released (${relayed_now} still served)"
+  fi
+  echo "  its relay socket was released"
+
+  # The revoked device cannot come back.
+  #
+  # Asserted by restarting its daemon rather than by poking the challenge endpoint. That
+  # endpoint deliberately does not check whether a membership exists — doing so would make
+  # it an enumeration oracle for membership ids — so it answers a revoked device just as it
+  # answers a made-up one. The signature check at connect time is what decides, and this is
+  # the only place to observe it.
+  ./bin/meshpd --reconcile-interval 2s --state-dir "$STATE_DIR2" --socket "$SOCKET2" \
+    --log-level debug >>"$WORK/meshpd2.log" 2>&1 &
+  AGENT2_PID=$!
+  for _ in $(seq 1 20); do
+    [ -S "$SOCKET2" ] && ./bin/meshp status --socket "$SOCKET2" >/dev/null 2>&1 && break
+    sleep 1
+  done
+
+  # The agent is told only that authentication failed. That is deliberate — the reason a
+  # membership is refused crosses a trust boundary towards a device that may no longer be
+  # trusted — so this matches the refusal rather than the cause. The cause is in the
+  # control plane's own log, asserted below, where an operator can see it.
+  refused=0
+  for _ in $(seq 1 20); do
+    if grep -q "authentication failed" "$WORK/meshpd2.log"; then refused=1; break; fi
+    sleep 1
+  done
+  if [ "$refused" != "1" ]; then
+    echo "--- revoked agent log ---" >&2; tail -20 "$WORK/meshpd2.log" >&2
+    fail "the revoked device was not refused a session"
+  fi
+
+  grep -qiE "revoked|membership is" "$CONTROL_LOG" \
+    || { tail -20 "$CONTROL_LOG" >&2; fail "the control plane did not record why it refused"; }
+  ./bin/meshp status --socket "$SOCKET2" | grep -qE 'session     connected' \
+    && { ./bin/meshp status --socket "$SOCKET2" >&2; fail "a revoked device holds a session"; }
+  echo "  and cannot open a new session"
+
+  kill "$AGENT2_PID" 2>/dev/null || true
+  wait "$AGENT2_PID" 2>/dev/null || true
+  AGENT2_PID=""
+
   # The listen port survives a restart, which is what keeps the endpoints peers hold valid
   # and any NAT mapping alive.
   #

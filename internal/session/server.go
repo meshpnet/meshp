@@ -300,6 +300,18 @@ func (s *Server) run(ctx context.Context, conn *websocket.Conn, sess *Session) {
 				return
 			}
 
+		case msg := <-sess.farewell:
+			// Written and then closed, in that order, which is the reason this is its own
+			// case rather than an enqueue followed by a Close: those are two ready cases in
+			// one select, and the agent would be cut off before hearing why about half the
+			// time.
+			if err := writeServerMessage(ctx, conn, msg); err != nil {
+				s.log.Debug("could not deliver a farewell", "session", sess.ID, "error", err)
+			}
+			_ = conn.Close(websocket.StatusNormalClosure, "revoked")
+			sess.Close()
+			return
+
 		case <-sess.notify:
 			if err := s.pushState(ctx, conn, sess); err != nil {
 				s.log.Info("could not push state", "session", sess.ID, "error", err)

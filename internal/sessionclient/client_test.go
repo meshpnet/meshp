@@ -618,3 +618,241 @@ func TestJitterStaysWithinItsInterval(t *testing.T) {
 			len(spread))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Revocation
+
+type recordingRevoker struct {
+	mu     sync.Mutex
+	calls  int
+	reason string
+	wipe   bool
+}
+
+func (r *recordingRevoker) Revoked(reason string, wipe bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.reason, r.wipe = reason, wipe
+}
+
+func (r *recordingRevoker) seen() (int, string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, r.reason, r.wipe
+}
+
+func revokeMessage(reason string, wipe bool) *meshpv1.ServerMessage {
+	return &meshpv1.ServerMessage{Payload: &meshpv1.ServerMessage_Command{
+		Command: &meshpv1.Command{Payload: &meshpv1.Command_Revoke{
+			Revoke: &meshpv1.Revoke{Reason: reason, WipeLocalState: wipe},
+		}},
+	}}
+}
+
+// startRevocable runs one session and returns the error RunOnce ended with.
+func startRevocable(t *testing.T, fc *fakeControl, rev Revoker) (*websocket.Conn, <-chan error) {
+	t.Helper()
+
+	identity, err := keys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := New(Options{
+		ControlURL:   fc.srv.URL,
+		Identity:     identity,
+		MembershipID: uuid.New(),
+		Revoked:      rev,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- client.RunOnce(ctx, &recordingApplier{}) }()
+
+	select {
+	case conn := <-fc.conn:
+		t.Cleanup(func() { _ = conn.CloseNow() })
+		return conn, done
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent never opened a session")
+		return nil, nil
+	}
+}
+
+// A revocation has to reach whatever tears the membership down, with the reason intact —
+// it is written by an administrator and read by whoever finds the machine.
+func TestARevocationReachesTheAgent(t *testing.T) {
+	fc := newFakeControl(t)
+	rev := &recordingRevoker{}
+	conn, done := startRevocable(t, fc, rev)
+
+	fc.send(conn, revokeMessage("laptop reported stolen", true))
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRevoked) {
+			t.Fatalf("RunOnce returned %v, want ErrRevoked", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session did not end on revocation")
+	}
+
+	calls, reason, wipe := rev.seen()
+	if calls != 1 {
+		t.Fatalf("the revoker was called %d times, want 1", calls)
+	}
+	if reason != "laptop reported stolen" {
+		t.Errorf("reason = %q", reason)
+	}
+	if !wipe {
+		t.Error("the wipe request was dropped")
+	}
+}
+
+// Terminal, not retryable. Every reconnection would be refused at the handshake, so a Run
+// that backed off and tried again would bury the reason under an endless loop.
+func TestRunStopsOnRevocationRatherThanReconnecting(t *testing.T) {
+	fc := newFakeControl(t)
+
+	attempts := make(chan struct{}, 8)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/session/challenge", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"challenge": base64.StdEncoding.EncodeToString([]byte("challenge")),
+		})
+	})
+	mux.HandleFunc("/api/v1/session", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		attempts <- struct{}{}
+		data, _ := proto.Marshal(revokeMessage("no longer employed", false))
+		_ = conn.Write(context.Background(), websocket.MessageBinary, data)
+		time.Sleep(200 * time.Millisecond)
+		_ = conn.CloseNow()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	_ = fc
+
+	identity, err := keys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev := &recordingRevoker{}
+	client := New(Options{
+		ControlURL: srv.URL, Identity: identity, MembershipID: uuid.New(), Revoked: rev,
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- client.Run(context.Background(), &recordingApplier{}) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRevoked) {
+			t.Fatalf("Run returned %v, want ErrRevoked", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run kept reconnecting after a revocation")
+	}
+
+	if len(attempts) != 1 {
+		t.Errorf("opened %d sessions, want 1 — it reconnected after being revoked", len(attempts))
+	}
+}
+
+// An agent with nothing to tear down still has to stop. Nil is a normal configuration.
+func TestRevocationWithNoRevokerStillEndsTheSession(t *testing.T) {
+	fc := newFakeControl(t)
+	conn, done := startRevocable(t, fc, nil)
+
+	fc.send(conn, revokeMessage("", false))
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRevoked) {
+			t.Fatalf("RunOnce returned %v, want ErrRevoked", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session did not end")
+	}
+}
+
+// Other commands are not revocations and must not end anything. A newer control plane may
+// send commands this agent has never heard of (ADR-0008).
+func TestAnotherCommandDoesNotEndTheSession(t *testing.T) {
+	fc := newFakeControl(t)
+	rev := &recordingRevoker{}
+	conn, done := startRevocable(t, fc, rev)
+
+	fc.send(conn, &meshpv1.ServerMessage{Payload: &meshpv1.ServerMessage_Command{
+		Command: &meshpv1.Command{Payload: &meshpv1.Command_CollectDiagnostics{
+			CollectDiagnostics: &meshpv1.CollectDiagnostics{},
+		}},
+	}})
+
+	select {
+	case err := <-done:
+		t.Fatalf("an unrelated command ended the session: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if calls, _, _ := rev.seen(); calls != 0 {
+		t.Errorf("the revoker fired on a command that was not a revocation")
+	}
+}
+
+// Status must report whether a session exists, not whether something is trying to make
+// one. A daemon supervises a membership for as long as it has one, so a device being
+// refused every connection would otherwise be reported as connected indefinitely.
+func TestConnectedReflectsAnEstablishedSessionOnly(t *testing.T) {
+	fc := newFakeControl(t)
+
+	identity, err := keys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := New(Options{
+		ControlURL: fc.srv.URL, Identity: identity, MembershipID: uuid.New(),
+	})
+
+	if up, _ := client.Connected(); up {
+		t.Fatal("reported connected before anything was dialled")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- client.RunOnce(ctx, &recordingApplier{}) }()
+
+	conn := <-fc.conn
+	t.Cleanup(func() { _ = conn.CloseNow() })
+
+	// Dialled, but not yet welcomed: the signature has not been accepted, so there is no
+	// session. This is the state a revoked device sits in.
+	if up, _ := client.Connected(); up {
+		t.Fatal("reported connected on a dial the server had not accepted")
+	}
+
+	fc.send(conn, &meshpv1.ServerMessage{Payload: &meshpv1.ServerMessage_Hello{
+		Hello: &meshpv1.ServerHello{SessionId: "s1", CurrentStateVersion: 1},
+	}})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if up, since := client.Connected(); up {
+			if since.IsZero() {
+				t.Error("connected with no time to say since when")
+			}
+			cancel()
+			<-done
+			if up, _ := client.Connected(); up {
+				t.Error("still reported connected after the session ended")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	t.Fatal("never reported connected after being welcomed")
+}
