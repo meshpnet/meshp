@@ -33,6 +33,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/agentstate"
@@ -47,6 +48,14 @@ func main() {
 		socketGroup = flag.String("socket-group", os.Getenv("MESHP_SOCKET_GROUP"),
 			"system group allowed to use the socket; empty means owner only")
 		logLevel = flag.String("log-level", envOr("MESHP_LOG_LEVEL", "info"), "debug, info, warn or error")
+
+		// How often the interface is checked against desired state even when nothing has
+		// changed. A minute is a compromise: drift is corrected without waiting for the
+		// next state update, and a converged interface costs two netlink reads to confirm
+		// (Invariant 18 is what makes that true). Zero switches it off.
+		reconcileEvery = flag.Duration("reconcile-interval",
+			envDuration("MESHP_RECONCILE_INTERVAL", time.Minute),
+			"how often to re-apply desired state to the interface; 0 disables")
 	)
 	flag.Parse()
 
@@ -59,20 +68,21 @@ func main() {
 	log.Info("meshpd starting",
 		"version", version.Version(),
 		"state_dir", *stateDir,
-		"socket", *socketPath)
+		"socket", *socketPath,
+		"reconcile_interval", *reconcileEvery)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, *stateDir, *socketPath, *socketGroup); err != nil {
+	if err := run(ctx, log, *stateDir, *socketPath, *socketGroup, *reconcileEvery); err != nil {
 		log.Error("meshpd exited with error", "error", err)
 		os.Exit(1)
 	}
 	log.Info("meshpd stopped cleanly")
 }
 
-func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string) error {
-	agent := newAgent(ctx, log, stateDir)
+func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string, reconcileEvery time.Duration) error {
+	agent := newAgent(ctx, log, stateDir, reconcileEvery)
 	if err := agent.load(); err != nil {
 		return err
 	}
@@ -106,6 +116,21 @@ func newLogger(level string) *slog.Logger {
 		l = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+}
+
+// envDuration reads a Go duration from the environment, falling back rather than refusing
+// to start: a malformed interval is a cosmetic mistake and should not keep a device offline.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meshpd: %s=%q is not a duration; using %s\n", key, v, fallback)
+		return fallback
+	}
+	return d
 }
 
 func envOr(key, fallback string) string {

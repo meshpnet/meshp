@@ -44,7 +44,7 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan
 COVER_FLOOR      := 90
 
-COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx
+COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx internal/tunnel
 COVER_FLOOR_IO      := 75
 
 COVER_FLOOR_DB_PKGS := internal/store internal/enroll internal/api internal/session
@@ -233,6 +233,13 @@ image: ## Build the container image (VERSION and COMMIT are stamped in)
 image-smoke: image ## Start the image against MESHP_TEST_DATABASE_URL and wait for readiness
 	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
 	@MESHP_IMAGE=$(IMAGE) MESHP_DATABASE_URL="$(MESHP_TEST_DATABASE_URL)" ./scripts/image-smoke.sh
+
+.PHONY: e2e-tunnel
+e2e-tunnel: ## Run the end-to-end enrolment with real tunnels, in a privileged Linux container
+	@# The whole stack where a tunnel is actually possible: control plane, two daemons,
+	@# real interfaces. On macOS the plain `make e2e` skips the tunnel assertions, so this
+	@# is the only way to exercise them from here.
+	@./scripts/e2e-tunnel.sh
 
 .PHONY: dataplane
 dataplane: ## Run the data-plane tests against real interfaces, in a privileged Linux container

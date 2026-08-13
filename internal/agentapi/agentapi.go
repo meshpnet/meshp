@@ -66,10 +66,18 @@ type MembershipStatus struct {
 
 	JoinedAt time.Time `json:"joined_at"`
 
-	// TunnelUp is false in every build so far, and saying so is the point: a
-	// membership with an address is not a working tunnel, and status should not imply
-	// otherwise.
+	// TunnelUp is whether a WireGuard interface is configured and up for this
+	// membership. A membership with an address and no tunnel is a normal state, and
+	// status must not imply otherwise.
 	TunnelUp bool `json:"tunnel_up"`
+
+	// TunnelKind is which WireGuard implementation is behind the interface: "kernel" or
+	// "userspace". Empty when there is no tunnel.
+	//
+	// Reported because the difference is large and otherwise invisible (ADR-0015). An
+	// operator asking why one host is a fraction of another's throughput should be able
+	// to see the answer instead of inferring it.
+	TunnelKind string `json:"tunnel_kind,omitempty"`
 }
 
 // JoinRequest asks the daemon to enrol this device.

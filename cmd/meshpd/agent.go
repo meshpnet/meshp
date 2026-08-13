@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,7 +19,9 @@ import (
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/sessionclient"
+	"github.com/meshpnet/meshp/internal/tunnel"
 	"github.com/meshpnet/meshp/internal/version"
+	"github.com/meshpnet/meshp/internal/wglink"
 )
 
 // agent owns this device's state and its control-channel sessions.
@@ -30,6 +33,11 @@ type agent struct {
 	stateDir  string
 	startedAt time.Time
 
+	// reconcileEvery is how often the interface is checked against desired state even
+	// when nothing has changed. Zero switches it off, which is only useful in tests that
+	// want to observe drift rather than have it corrected.
+	reconcileEvery time.Duration
+
 	// mu guards state and running together. Both change when a device joins, and a
 	// status read that saw one without the other would report a membership with no
 	// session or a session with no membership.
@@ -37,24 +45,65 @@ type agent struct {
 	state   *agentstate.State
 	running map[uuid.UUID]*sessionHandle
 
+	// link is the host's interface manager, opened once and shared: it holds netlink
+	// sockets, and a device in several networks would otherwise open a pair for each.
+	// Opened lazily on the first session, because it needs privileges and a daemon that
+	// refused to start without them could not report why it has no tunnel.
+	linkOnce sync.Once
+	link     wglink.Link
+	linkErr  error
+
 	ctx context.Context
+}
+
+// reconcilerFor returns something to converge this membership's interface, or nil when this
+// platform or this process cannot manage one.
+//
+// Nil rather than an error, because there is nothing to do about it here and it is not a
+// reason to refuse the session: the control channel is still worth having, the device is
+// still enrolled, and `meshp status` still has something true to report. What would be wrong
+// is claiming a tunnel exists.
+func (a *agent) reconcilerFor(m agentstate.Membership, log *slog.Logger) *tunnel.Reconciler {
+	a.linkOnce.Do(func() {
+		a.link, a.linkErr = wglink.New()
+		switch {
+		case errors.Is(a.linkErr, wglink.ErrUnsupported):
+			a.log.Warn("no tunnel on this platform",
+				"os", runtime.GOOS,
+				"note", "devices enrol and hold addresses; nothing routes to them")
+		case a.linkErr != nil:
+			a.log.Error("cannot manage WireGuard interfaces",
+				"error", a.linkErr,
+				"hint", "meshpd needs to run with enough privilege to create network interfaces")
+		}
+	})
+	if a.link == nil {
+		return nil
+	}
+	return tunnel.New(a.link, tunnel.Membership{
+		InterfaceName: m.InterfaceName,
+		PrivateKey:    m.WireGuardPrivateKey,
+		AddressV4:     m.AddressV4,
+		AddressV6:     m.AddressV6,
+	}, log)
 }
 
 // sessionHandle is one supervised session.
 type sessionHandle struct {
 	cancel  context.CancelFunc
 	client  *sessionclient.Client
-	applier *recordingApplier
+	applier *deviceApplier
 	started time.Time
 }
 
-func newAgent(ctx context.Context, log *slog.Logger, stateDir string) *agent {
+func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileEvery time.Duration) *agent {
 	return &agent{
-		log:       log,
-		stateDir:  stateDir,
-		startedAt: time.Now().UTC(),
-		running:   make(map[uuid.UUID]*sessionHandle),
-		ctx:       ctx,
+		log:            log,
+		stateDir:       stateDir,
+		startedAt:      time.Now().UTC(),
+		reconcileEvery: reconcileEvery,
+		running:        make(map[uuid.UUID]*sessionHandle),
+		ctx:            ctx,
 	}
 }
 
@@ -123,7 +172,12 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 
 	sessionCtx, cancel := context.WithCancel(a.ctx)
 	log := a.log.With("network_id", m.NetworkID)
-	applier := &recordingApplier{log: log, membershipID: m.MembershipID, agent: a}
+	applier := &deviceApplier{
+		log:          log,
+		membershipID: m.MembershipID,
+		agent:        a,
+		reconciler:   a.reconcilerFor(m, log),
+	}
 	client := sessionclient.New(sessionclient.Options{
 		ControlURL:   m.ControlURL,
 		Identity:     identity,
@@ -148,6 +202,27 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 			log.Error("session ended", "error", err)
 		}
 	}()
+
+	// Converge on a timer as well as on arrival. Desired state changing is not the only
+	// thing that can make an interface wrong, and nothing else would notice.
+	go a.reconcileLoop(sessionCtx, applier)
+}
+
+// reconcileLoop re-applies desired state periodically for as long as the session lives.
+func (a *agent) reconcileLoop(ctx context.Context, applier *deviceApplier) {
+	if a.reconcileEvery <= 0 {
+		return
+	}
+	ticker := time.NewTicker(a.reconcileEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			applier.reconcile(ctx)
+		}
+	}
 }
 
 // setApplied records that a version was applied, and persists it.
@@ -198,8 +273,8 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 			WireGuardPublicKey:  m.WireGuardPublicKey,
 			AppliedStateVersion: m.AppliedStateVersion,
 			JoinedAt:            m.JoinedAt,
-			// Never true in this build, and saying so is the point: a membership with an
-			// address is not a working tunnel.
+			// Only ever true from a live reconciler below. A membership read from disk says
+			// nothing about whether an interface is up right now.
 			TunnelUp: false,
 		}
 		if handle, ok := a.running[m.MembershipID]; ok {
@@ -210,6 +285,7 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 			ms.ConnectedSince = handle.started
 			ms.AppliedStateVersion = handle.client.AppliedVersion()
 			ms.LastError = handle.applier.lastError()
+			ms.TunnelUp, ms.TunnelKind = handle.applier.tunnelStatus()
 		}
 		status.Memberships = append(status.Memberships, ms)
 	}
@@ -319,23 +395,39 @@ func (a *agent) Join(ctx context.Context, req agentapi.JoinRequest) (agentapi.Jo
 	}, nil
 }
 
-// recordingApplier is the Applier this build ships: it writes down what it was told and
-// reports success.
+// deviceApplier converges the interface and records how far this device has got.
 //
-// Deliberately not pretending to configure anything. When WireGuard arrives this becomes
-// the reconciler and its acknowledgement will mean the system reached that state. Until
-// then the log says so, so nobody mistakes a converged control plane for a working
-// network.
-type recordingApplier struct {
+// Two jobs rather than one because they fail independently and both matter. Converging is
+// what makes the network work; persisting the version is what makes `meshp status` and the
+// control plane agree about what this device has — a version acknowledged but never written
+// is requested again on every restart, and reported as applied while the state file says
+// otherwise.
+//
+// The interface comes first. Recording a version this host has not reached would tell the
+// control plane the device is converged when it is not, and the convergence metric is the
+// one thing that would otherwise show a broken agent.
+type deviceApplier struct {
 	log          *slog.Logger
 	membershipID uuid.UUID
 	agent        *agent
 
+	// reconciler is nil where there is no data-plane implementation. The device is then
+	// enrolled, holds an address and has no tunnel — a state it reports rather than hides.
+	reconciler *tunnel.Reconciler
+
 	mu   sync.Mutex
 	last string
+
+	// lastState is the desired state most recently applied, kept so it can be applied
+	// again without the control plane sending it again.
+	//
+	// Keeping it is only safe because the set handed to an Applier belongs to it
+	// (Invariant 22). If it were the session's live set, this would be re-applying
+	// whatever the session had folded in by then rather than what was last converged on.
+	lastState *peerset.Set
 }
 
-func (a *recordingApplier) Apply(_ context.Context, state *peerset.Set) ([]string, error) {
+func (a *deviceApplier) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
 	for _, p := range state.Peers() {
 		a.log.Debug("peer in desired state",
 			"device", p.GetDeviceName(),
@@ -343,31 +435,88 @@ func (a *recordingApplier) Apply(_ context.Context, state *peerset.Set) ([]strin
 			"public_key", truncateKey(p.GetPublicKey()))
 	}
 
+	if a.reconciler != nil {
+		unapplied, err := a.reconciler.Apply(ctx, state)
+		if err != nil {
+			a.setLastError(err.Error())
+			return unapplied, err
+		}
+	}
+
 	if err := a.agent.setApplied(a.membershipID, int64(state.Version())); err != nil {
 		a.setLastError(err.Error())
-		// Persisting matters for reporting: a version acknowledged but never written leaves
-		// `meshp status` and the audit trail disagreeing about what this device has.
 		return []string{"local-state"}, err
 	}
 	a.setLastError("")
 
-	a.log.Info("recorded desired state",
-		"version", state.Version(),
-		"peers", state.Len(),
-		"note", "nothing is configured: this build has no WireGuard")
+	a.mu.Lock()
+	a.lastState = state
+	a.mu.Unlock()
+
+	if a.reconciler == nil {
+		a.log.Info("recorded desired state",
+			"version", state.Version(),
+			"peers", state.Len(),
+			"note", "no tunnel: this platform has no data-plane implementation in this build")
+	}
 	return nil, nil
 }
 
-func (a *recordingApplier) setLastError(msg string) {
+func (a *deviceApplier) setLastError(msg string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.last = msg
 }
 
-func (a *recordingApplier) lastError() string {
+func (a *deviceApplier) lastError() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.last
+	if a.last != "" {
+		return a.last
+	}
+	if a.reconciler != nil {
+		return a.reconciler.Status().LastError
+	}
+	return ""
+}
+
+// reconcile applies the last known desired state again.
+//
+// Called on a timer, because desired state arriving is not the only thing that can make an
+// interface wrong. An operator can take it down, another process can remove an address, a
+// crash can leave it half configured — and none of those cause the control plane to send
+// anything, so without this the agent would sit next to a broken interface indefinitely
+// believing itself converged.
+//
+// Safe to run as often as one likes because planning against a correct interface produces no
+// operations at all (Invariant 18). A reconcile that finds nothing wrong costs two netlink
+// reads and touches nothing, which is what makes a periodic tick affordable rather than a
+// source of churn.
+func (a *deviceApplier) reconcile(ctx context.Context) {
+	if a.reconciler == nil {
+		return
+	}
+	a.mu.Lock()
+	state := a.lastState
+	a.mu.Unlock()
+	if state == nil {
+		return // nothing has been applied yet; there is nothing to restore it to
+	}
+
+	if _, err := a.reconciler.Apply(ctx, state); err != nil {
+		a.setLastError(err.Error())
+		return
+	}
+	a.setLastError("")
+}
+
+// tunnelStatus reports what the data plane is doing, or nothing when there is none.
+func (a *deviceApplier) tunnelStatus() (up bool, kind string) {
+	if a.reconciler == nil {
+		return false, ""
+	}
+	st := a.reconciler.Status()
+	return st.Up, string(st.Kind)
 }
 
 func truncateKey(k string) string {
