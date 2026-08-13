@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/wglink"
@@ -86,6 +88,16 @@ type Reconciler struct {
 	// endpoint and are unreachable, which is what they were before there was a relay at all.
 	relay Relay
 
+	// filter enforces the network's policy, or is nil where this host cannot. A host that
+	// cannot filter says so in its capabilities and the control plane decides what to do
+	// about it (ADR-0007); what it must not do is accept a policy and ignore it.
+	filter Filter
+
+	// lastFilter is what was last successfully loaded, kept so an unchanged policy is not
+	// reloaded on every reconcile. Reloading is atomic and cheap, but it resets the drop
+	// counters an operator is reading.
+	lastFilter *meshpv1.PacketFilter
+
 	mu       sync.Mutex
 	kind     wglink.Kind
 	up       bool
@@ -94,12 +106,25 @@ type Reconciler struct {
 	port     int
 }
 
-// New returns a Reconciler for one membership. relay may be nil.
-func New(link wglink.Link, m Membership, relay Relay, log *slog.Logger) *Reconciler {
+// Filter enforces a packet filter on this host.
+//
+// An interface so the reconciler can be tested without root, and so a platform with no
+// implementation is a nil rather than a stub that pretends to enforce.
+type Filter interface {
+	// Apply makes the host enforce this filter. A nil filter means no policy, and must
+	// remove whatever was enforced before rather than leaving it in place.
+	Apply(ctx context.Context, iface string, filter *meshpv1.PacketFilter) error
+}
+
+// New returns a Reconciler for one membership. relay and filter may be nil.
+func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.Logger) *Reconciler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Reconciler{link: link, membership: m, relay: relay, log: log, kind: wglink.KindUnknown}
+	return &Reconciler{
+		link: link, membership: m, relay: relay, filter: filter,
+		log: log, kind: wglink.KindUnknown,
+	}
 }
 
 // Status is what the daemon reports about this tunnel.
@@ -131,7 +156,7 @@ func (r *Reconciler) Status() Status {
 //
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
-func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, error) {
+func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
 	want, err := Desired(r.membership, state, r.relay, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
@@ -195,6 +220,21 @@ func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, err
 		r.relay.SetWireGuardPort(port)
 	}
 
+	// The policy last, once the interface it names exists. A ruleset referring to an
+	// interface that is not there loads happily and matches nothing, so applying it first
+	// would produce a host that reports a policy in force and enforces none of it.
+	//
+	// Reported as an unapplied component rather than as a failure of the whole apply: the
+	// peers converged, and saying "this device has peers but not policy" is the honest
+	// answer. The control plane can then see that this device is not where it should be
+	// (ADR-0007) instead of being told the state applied cleanly.
+	if unapplied := r.applyFilter(ctx, want.Name, state.Filter()); unapplied != nil {
+		r.mu.Lock()
+		r.kind, r.up, r.port = kind, true, port
+		r.mu.Unlock()
+		return unapplied, fmt.Errorf("tunnel: could not enforce this network's policy")
+	}
+
 	r.mu.Lock()
 	r.kind = kind
 	r.up = true
@@ -205,9 +245,58 @@ func (r *Reconciler) Apply(_ context.Context, state *peerset.Set) ([]string, err
 	return nil, nil
 }
 
+// applyFilter enforces the policy, returning the components that did not apply.
+//
+// Skipped entirely when nothing changed. Loading is atomic and cheap, but it resets the
+// counters on the drop rules, and an operator watching "is this policy denying anything"
+// would see them return to zero on every reconcile tick.
+func (r *Reconciler) applyFilter(ctx context.Context, iface string, want *meshpv1.PacketFilter) []string {
+	if r.filter == nil {
+		if want == nil {
+			return nil
+		}
+		// A policy arrived for a host that cannot enforce one. Not an error to retry — no
+		// amount of reapplying will make nftables appear — but it must be reported, or the
+		// device would look converged while permitting everything its policy denies.
+		r.log.Error("this network has a policy and this host cannot enforce it",
+			"hint", "the control plane should not place a device with packet_filter: false in this network")
+		return []string{"filter"}
+	}
+
+	if proto.Equal(r.lastFilter, want) {
+		return nil
+	}
+	if err := r.filter.Apply(ctx, iface, want); err != nil {
+		r.log.Error("could not apply this network's policy", "interface", iface, "error", err)
+		return []string{"filter"}
+	}
+
+	r.lastFilter = proto.CloneOf(want)
+	if want == nil {
+		r.log.Info("policy withdrawn; nothing is filtered", "interface", iface)
+		return nil
+	}
+	r.log.Info("policy applied",
+		"interface", iface,
+		"inbound_rules", len(want.GetInbound()),
+		"outbound_rules", len(want.GetOutbound()),
+		"default_deny", want.GetDefaultDeny())
+	return nil
+}
+
 // Teardown removes everything this membership installed (Invariant 20).
 func (r *Reconciler) Teardown() error {
 	name := r.membership.InterfaceName
+
+	// The policy first. A ruleset outliving the interface it names would go on matching
+	// nothing while an operator reads a table meshp installed and no longer maintains.
+	if r.filter != nil {
+		if err := r.filter.Apply(context.Background(), name, nil); err != nil {
+			r.log.Warn("could not remove this network's policy", "interface", name, "error", err)
+		}
+		r.lastFilter = nil
+	}
+
 	observed, err := r.link.Observe(name)
 	if err != nil {
 		return err

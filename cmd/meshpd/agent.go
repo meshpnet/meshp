@@ -17,6 +17,7 @@ import (
 	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/nftables"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/relaylink"
 	"github.com/meshpnet/meshp/internal/sessionclient"
@@ -53,6 +54,12 @@ type agent struct {
 	linkOnce sync.Once
 	link     wglink.Link
 	linkErr  error
+
+	// filter enforces network policy, opened once and shared. Nil where this host cannot
+	// filter, which the agent reports honestly rather than accepting a policy it will not
+	// apply (ADR-0007).
+	filterOnce sync.Once
+	filter     *nftables.Filter
 
 	ctx context.Context
 }
@@ -95,7 +102,36 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, log *
 		AddressV4:     m.AddressV4,
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
-	}, relay, log)
+	}, relay, a.filterOrNil(), log)
+}
+
+// ensureFilter opens the host's packet filter, once.
+//
+// Probed rather than assumed: a container can have nft installed and no permission to use
+// it, and finding that out at apply time would look like a policy fault rather than a
+// missing capability.
+func (a *agent) ensureFilter() *nftables.Filter {
+	a.filterOnce.Do(func() {
+		a.filter = nftables.New(a.ctx)
+		if a.filter == nil {
+			a.log.Warn("this host cannot enforce a packet filter",
+				"os", runtime.GOOS,
+				"note", "networks with a policy will report this device as unconverged")
+		}
+	})
+	return a.filter
+}
+
+// filterOrNil converts a possibly-absent filter into the interface.
+//
+// Explicit for the same reason relayOrNil is: a nil *nftables.Filter assigned straight to
+// an interface is a non-nil interface holding a nil pointer, so every downstream nil check
+// would pass and the reconciler would believe it can enforce.
+func (a *agent) filterOrNil() tunnel.Filter {
+	if f := a.ensureFilter(); f != nil {
+		return f
+	}
+	return nil
 }
 
 // relayFor returns this membership's relay attachment, or nil when there is no data plane
@@ -276,6 +312,7 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 		OS:           runtime.GOOS,
 		Hostname:     hostname(),
 		Relay:        relayCredentials(relay),
+		CanFilter:    a.ensureFilter() != nil,
 		Revoked:      &membershipRevoker{agent: a, membershipID: m.MembershipID},
 		Log:          log,
 	})

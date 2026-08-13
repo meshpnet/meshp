@@ -30,11 +30,15 @@ Devices can also be revoked: an administrator removes one and every other agent 
 its key, which is what actually cuts it off — enforcement is at the peers, not at the
 device being removed, so a machine that is switched off or hostile is out just the same.
 
-What does not, and matters: **there is no policy enforcement** — every device in a
-network can reach every other, because the ACL engine is not wired up. **The control
-plane speaks plaintext HTTP.** Direct paths, DNS and internet egress are all
-unimplemented, and the data plane is Linux-only — elsewhere a device enrols, holds an
-address, and reports honestly that it has no tunnel.
+Policy works on Linux: an ACL document published to a network compiles per device and
+is enforced by nftables at the destination (ADR-0007). A network with no policy is
+unfiltered, and a host that cannot enforce says so rather than accepting a policy and
+ignoring it.
+
+What does not, and matters: **the control plane speaks plaintext HTTP.** Direct paths,
+DNS and internet egress are all unimplemented, and the data plane is Linux-only —
+elsewhere a device enrols, holds an address, and reports honestly that it has no
+tunnel and cannot filter.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

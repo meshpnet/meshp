@@ -204,3 +204,39 @@ func TestARevokedDeviceLeavesEveryFilter(t *testing.T) {
 		}
 	}
 }
+
+// The builder has two ways to produce a snapshot — the explicit one, and the shortcut For
+// takes when a delta would be larger than the snapshot it replaces. Both must carry the
+// filter. Attaching it to only one meant a network whose peer count dropped below its
+// change count silently sent a policy-free snapshot, and nothing else noticed.
+func TestBothSnapshotPathsCarryTheFilter(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	f.tagMembership(alice, "server")
+	f.publish(acl.Rule{Src: []acl.Selector{"*"}, Dst: []acl.Selector{"tag:server"}})
+
+	builder := NewStateBuilder(f.store)
+
+	explicit, err := builder.Snapshot(f.ctx, alice.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.GetFilter() == nil {
+		t.Error("Snapshot carried no filter")
+	}
+
+	// Now make For take its shortcut: more changes than peers. Alice is the only member,
+	// so she has no peers at all, and any change at all outnumbers them.
+	f.publish(acl.Rule{Src: []acl.Selector{"*"}, Dst: []acl.Selector{"*"}})
+
+	shortcut, err := builder.For(f.ctx, alice.membershipID, explicit.GetToVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shortcut.GetFromVersion() != 0 {
+		t.Skip("For chose a delta; this test is about the snapshot shortcut")
+	}
+	if shortcut.GetFilter() == nil {
+		t.Fatal("the snapshot For produced as a shortcut carried no filter")
+	}
+}

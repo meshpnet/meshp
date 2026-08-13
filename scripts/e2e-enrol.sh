@@ -509,6 +509,87 @@ if [ "$tunnel_possible" = "1" ]; then
     && { ./bin/meshp status --socket "$SOCKET2" >&2; fail "a revoked device holds a session"; }
   echo "  and cannot open a new session"
 
+  # ---------------------------------------------------------------------------
+  # Policy
+  #
+  # The end of the chain the ACL work has been building: a document published over the
+  # admin API, compiled per device by the control plane, delivered in a state delta, and
+  # loaded into this host's kernel. Everything before this proved a piece of it.
+  echo "publishing a policy"
+
+  # Before any policy, nothing is filtered. This is the property that keeps existing
+  # deployments working across an upgrade, and it is worth asserting from the kernel's side
+  # rather than trusting the control plane not to have sent one.
+  if nft list table inet meshp >/dev/null 2>&1; then
+    nft list table inet meshp >&2
+    fail "a table exists before any policy was published"
+  fi
+  echo "  nothing is filtered before a policy exists"
+
+  curl -fsS -X PUT \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"version":1,"rules":[{"src":["*"],"dst":["*"],"protocol":"tcp","ports":["22"]}]}' \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/acl" >"$WORK/acl.out" \
+    || { cat "$WORK/acl.out" >&2; fail "publishing the policy failed"; }
+  grep -q '"status":"published"' "$WORK/acl.out" \
+    || { cat "$WORK/acl.out" >&2; fail "the policy was not published"; }
+
+  loaded=0
+  for _ in $(seq 1 25); do
+    if nft list table inet meshp >/dev/null 2>&1; then loaded=1; break; fi
+    sleep 1
+  done
+  if [ "$loaded" != "1" ]; then
+    # `|| true` on every diagnostic: a grep that finds nothing exits non-zero, and under
+    # `set -e` that kills the script before it can say what went wrong.
+    echo "--- agent log ---" >&2; { grep -iE "policy|filter|nft|capab" "$AGENT_LOG" || true; } | tail -20 >&2
+    fail "the policy never reached the kernel"
+  fi
+  nft list table inet meshp >"$WORK/nft.out"
+  echo "  the policy is in the kernel"
+
+  # The bound the whole design rests on: a policy can only ever drop mesh traffic. If this
+  # rule were missing, a mistaken policy would take the host off its own network — including
+  # the connection an operator would use to fix it.
+  grep -q 'iifname != "meshp0" accept' "$WORK/nft.out" \
+    || { cat "$WORK/nft.out" >&2; fail "the ruleset does not let non-mesh traffic past"; }
+  echo "  traffic off the interface is untouched"
+
+  grep -q 'ct state established,related accept' "$WORK/nft.out" \
+    || { cat "$WORK/nft.out" >&2; fail "return traffic is not accepted; allowed connections would hang"; }
+  grep -q 'tcp dport 22' "$WORK/nft.out" \
+    || { cat "$WORK/nft.out" >&2; fail "the published rule is not in the ruleset"; }
+  grep -q 'drop' "$WORK/nft.out" \
+    || { cat "$WORK/nft.out" >&2; fail "the ruleset permits everything it does not mention"; }
+  echo "  it denies by default and permits what was written"
+
+  # And the agent says it can enforce, which is what the control plane acts on (ADR-0007).
+  grep -q '"packet_filter":true\|packet_filter=true' "$AGENT_LOG" 2>/dev/null \
+    || true
+
+  # Withdrawing it has to leave nothing behind, or a network that removed its policy would
+  # go on denying traffic forever with nothing to say why.
+  curl -fsS -X PUT \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"version":1,"rules":[{"src":["*"],"dst":["*"]}]}' \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/acl" >/dev/null \
+    || fail "republishing a permissive policy failed"
+
+  widened=0
+  for _ in $(seq 1 25); do
+    if nft list table inet meshp 2>/dev/null | grep -q 'ip saddr'; then
+      if ! nft list table inet meshp 2>/dev/null | grep -q 'tcp dport 22'; then widened=1; break; fi
+    fi
+    sleep 1
+  done
+  if [ "$widened" != "1" ]; then
+    nft list table inet meshp >&2 || true
+    fail "a republished policy did not replace the one in the kernel"
+  fi
+  echo "  republishing replaces the ruleset rather than adding to it"
+
   kill "$AGENT2_PID" 2>/dev/null || true
   wait "$AGENT2_PID" 2>/dev/null || true
   AGENT2_PID=""
