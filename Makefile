@@ -12,6 +12,10 @@ GOVULN_VERSION   := v1.6.0
 
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
+# The container image tag. Overridable so CI can build a throwaway tag without
+# clobbering whatever a developer has locally.
+IMAGE    ?= meshp:ci
 LDFLAGS  := -X github.com/meshpnet/meshp/internal/version.version=$(VERSION) \
             -X github.com/meshpnet/meshp/internal/version.commit=$(COMMIT)
 
@@ -202,6 +206,19 @@ standalone-check: ## Invariant 12: the core must not depend on the commercial la
 e2e: build ## Enrol a device end to end against MESHP_TEST_DATABASE_URL
 	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
 	@./scripts/e2e-enrol.sh "$(MESHP_TEST_DATABASE_URL)"
+
+.PHONY: image
+image: ## Build the container image (VERSION and COMMIT are stamped in)
+	docker build \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg COMMIT=$(COMMIT) \
+	  -f deploy/docker/Dockerfile \
+	  -t $(IMAGE) .
+
+.PHONY: image-smoke
+image-smoke: image ## Start the image against MESHP_TEST_DATABASE_URL and wait for readiness
+	@test -n "$(MESHP_TEST_DATABASE_URL)" || { echo "set MESHP_TEST_DATABASE_URL"; exit 2; }
+	@MESHP_IMAGE=$(IMAGE) MESHP_DATABASE_URL="$(MESHP_TEST_DATABASE_URL)" ./scripts/image-smoke.sh
 
 .PHONY: migrate-check
 migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TEST_DATABASE_URL

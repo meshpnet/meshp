@@ -127,10 +127,15 @@ decide where its traffic goes. `meshpd --socket-group <group>` relaxes that to a
 group, which is a privilege grant and should be read as one.
 
 ```bash
-make help    # every available target
-make ci      # everything CI runs, except the jobs that need Postgres
-make e2e     # enrol a device against a real database, start to finish
+make help         # every available target
+make ci           # everything CI runs, except the jobs that need Postgres or Docker
+make e2e          # enrol a device against a real database, start to finish
+make image        # build the server-side container image
+make image-smoke  # start that image against a real database and wait for readiness
 ```
+
+`make ci` deliberately excludes the container build: it needs Docker and adds a minute
+to a target meant to be run constantly. CI gates it instead.
 
 ## How this is tested
 

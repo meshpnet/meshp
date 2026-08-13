@@ -1,0 +1,30 @@
+# The Dockerfile does COPY . . after its dependency layer, so everything not listed
+# here is sent to the daemon and lands in a build layer. Two reasons to be strict:
+# the context is uploaded on every build, and .git carries the whole history into a
+# layer that has no use for it.
+.git
+.github
+.gitignore
+.dockerignore
+
+# Build output. Copying host binaries into a build that is about to produce its own
+# is pure waste, and on a different architecture they would not run anyway.
+bin/
+dist/
+coverage.out
+coverage.*.out
+*.test
+
+# Editor and agent state. Never in an image, never in a layer.
+.claude/
+.cursor/
+.aider*
+.continue/
+.idea/
+.vscode/
+*.swp
+
+# Documentation and local scripts the image does not need. Migrations are embedded in
+# the binary and also copied deliberately by the Dockerfile, so they are not excluded.
+docs/
+deploy/
