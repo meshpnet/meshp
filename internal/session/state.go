@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/meshpnet/meshp/internal/relayproto"
 	"github.com/meshpnet/meshp/internal/store"
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
@@ -24,10 +25,21 @@ const keepaliveSeconds = 25
 // StateBuilder turns what the database says into what an agent should do.
 type StateBuilder struct {
 	store *store.Store
+
+	// relays is what this deployment offers, sent to every agent as part of desired state.
+	// Nil where relaying is not configured, in which case peers carry neither an endpoint
+	// nor a relay and know about each other without being able to reach each other.
+	relays *meshpv1.RelayConfig
 }
 
 // NewStateBuilder returns a builder reading from st.
 func NewStateBuilder(st *store.Store) *StateBuilder { return &StateBuilder{store: st} }
+
+// WithRelays returns a builder that tells agents about these relays.
+func (b *StateBuilder) WithRelays(relays *meshpv1.RelayConfig) *StateBuilder {
+	b.relays = relays
+	return b
+}
 
 // For returns the state to send an agent that has applied fromVersion.
 //
@@ -125,10 +137,11 @@ func (b *StateBuilder) snapshotFromPeers(membership dbgen.GetMembershipForSessio
 		FromVersion: 0,
 		ToVersion:   uint64(membership.StateVersion),
 		UpsertPeers: make([]*meshpv1.Peer, 0, len(peers)),
-		Tunnel:      tunnelConfig(),
+		Tunnel:      b.tunnelConfig(),
+		Relays:      b.relays,
 	}
 	for _, p := range peers {
-		delta.UpsertPeers = append(delta.UpsertPeers, peerFrom(
+		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
 			p.WireguardPublicKey, p.DeviceName, p.Tags, p.AddressV4, p.AddressV6))
 	}
 	return delta
@@ -173,6 +186,11 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	delta := &meshpv1.StateDelta{
 		FromVersion: fromVersion,
 		ToVersion:   head,
+		// Sent with every delta, not only snapshots. It is small, it changes rarely, and an
+		// agent that missed the snapshot carrying it would have peers naming a relay it
+		// knows nothing about.
+		Relays: b.relays,
+		Tunnel: b.tunnelConfig(),
 	}
 
 	for id := range upserts {
@@ -189,7 +207,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// A key that is being removed and re-added in the same delta is a rotation. The
 		// upsert is the newer fact, so it must not also be removed.
 		delete(removes, peer.WireguardPublicKey)
-		delta.UpsertPeers = append(delta.UpsertPeers, peerFrom(
+		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
 			peer.WireguardPublicKey, peer.DeviceName, peer.Tags, peer.AddressV4, peer.AddressV6))
 	}
 
@@ -206,25 +224,53 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	return delta, nil
 }
 
-func peerFrom(publicKey, deviceName string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
-	return &meshpv1.Peer{
+func (b *StateBuilder) peerFrom(publicKey, deviceName string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
+	peer := &meshpv1.Peer{
 		PublicKey:                  publicKey,
 		AllowedIps:                 allowedIPs(v4, v6),
 		PersistentKeepaliveSeconds: keepaliveSeconds,
 		DeviceName:                 deviceName,
 		Tags:                       tags,
-		// No endpoints and no relay yet: neither exists, so an agent receiving this knows
-		// about its peers and has no way to reach them. That is the honest state of the
-		// system and the next milestone.
+		// No endpoints. Nothing discovers where a peer is yet, so every peer is reached
+		// through a relay — which is what relay-first means (ADR-0002) rather than a
+		// limitation to apologise for. Endpoints arrive with discovery, and a peer that has
+		// one will prefer it.
 	}
+	if relay := b.preferredRelay(); relay != nil {
+		peer.RelayId = relay.GetId()
+	}
+	return peer
 }
 
-func tunnelConfig() *meshpv1.TunnelConfig {
+// preferredRelay is the relay this deployment offers, or nothing.
+func (b *StateBuilder) preferredRelay() *meshpv1.RelayConfig_Relay {
+	if b.relays == nil || len(b.relays.GetRelays()) == 0 {
+		return nil
+	}
+	// One relay today. When there are several, this is where region and load belong — and
+	// the agent is told all of them regardless, so it can fall back without asking.
+	return b.relays.GetRelays()[0]
+}
+
+func (b *StateBuilder) tunnelConfig() *meshpv1.TunnelConfig {
+	// 1420 leaves room for WireGuard's overhead inside a 1500-byte path.
+	mtu := uint32(1420)
+
+	// A relayed packet carries the relay's header outside the WireGuard packet, so it needs
+	// a smaller tunnel. WireGuard's MTU is per interface rather than per peer, so one
+	// relayed peer lowers it for all of them — and since every peer is relayed until
+	// discovery exists, that is every interface today.
+	//
+	// Chosen over switching the MTU as peers move between relayed and direct: a changing
+	// MTU makes the failure intermittent, and the failure mode is loss of large packets
+	// only, which is the hardest thing to attribute. A stable conservative number costs a
+	// little throughput on direct paths and nothing else.
+	if b.preferredRelay() != nil {
+		mtu = uint32(relayproto.RelayedTunnelMTU)
+	}
+
 	return &meshpv1.TunnelConfig{
-		// 1420 leaves room for WireGuard's overhead inside a 1500-byte path. A starting
-		// point, not a measurement: the agent probes and reports what it finds, and a wrong
-		// MTU is the usual cause of "connected but some sites hang".
-		Mtu: 1420,
+		Mtu: mtu,
 		// No default route is claimed yet, so there is nothing to fail closed around. This
 		// turns on with route groups (ADR-0011).
 		FailClosed: false,
