@@ -239,3 +239,136 @@ func TestAPacketCrossesTheTunnel(t *testing.T) {
 		t.Errorf("the tunnel stopped working after a reconcile: %v\n%s", err, out)
 	}
 }
+
+// WireGuard learns a peer's endpoint from the traffic it receives: the kernel updates it to
+// the source of the most recent authenticated packet, which is how roaming works at all.
+//
+// So the kernel's endpoint for a peer is frequently one meshp never configured, and it is
+// better information than anything the control plane has — it is where that peer actually
+// is. A reconciler that treats it as drift and writes its own value back would undo roaming
+// on a timer, and would never stop finding work to do (Invariant 18).
+//
+// This is the case with no configured endpoint at all, which is what every peer looks like
+// until endpoint discovery exists: B does not know where A is, A knows where B is, and one
+// ping from A teaches B.
+func TestALearnedEndpointIsNotTreatedAsDrift(t *testing.T) {
+	if !privileged() {
+		t.Skip("needs root to create namespaces and interfaces")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Skip("needs iproute2")
+	}
+
+	const (
+		nsA, nsB             = "meshpRA", "meshpRB"
+		underlayA, underlayB = "10.98.0.1", "10.98.0.2"
+		portA, portB         = 51830, 51831
+		meshA, meshB         = "100.93.0.1", "100.93.0.2"
+	)
+
+	cleanup := func() {
+		_ = exec.Command("ip", "netns", "del", nsA).Run()
+		_ = exec.Command("ip", "netns", "del", nsB).Run()
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	run(t, "ip", "netns", "add", nsA)
+	run(t, "ip", "netns", "add", nsB)
+	run(t, "ip", "link", "add", "vRA", "type", "veth", "peer", "name", "vRB")
+	run(t, "ip", "link", "set", "vRA", "netns", nsA)
+	run(t, "ip", "link", "set", "vRB", "netns", nsB)
+	run(t, "ip", "-n", nsA, "addr", "add", underlayA+"/24", "dev", "vRA")
+	run(t, "ip", "-n", nsA, "link", "set", "vRA", "up")
+	run(t, "ip", "-n", nsB, "addr", "add", underlayB+"/24", "dev", "vRB")
+	run(t, "ip", "-n", nsB, "link", "set", "vRB", "up")
+
+	privA, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	privB, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A knows where B is. B knows nothing about where A is — no endpoint at all.
+	wantA := wgplan.Interface{
+		Name: "meshp0", PrivateKey: wgplan.Key(privA.String()), ListenPort: portA, MTU: 1420,
+		Addresses: []netip.Prefix{netip.MustParsePrefix(meshA + "/32")},
+		Peers: []wgplan.Peer{{
+			PublicKey:        wgplan.Key(privB.PublicKey().String()),
+			AllowedIPs:       []netip.Prefix{netip.MustParsePrefix(meshB + "/32")},
+			Endpoint:         fmt.Sprintf("%s:%d", underlayB, portB),
+			KeepaliveSeconds: 25,
+		}},
+	}
+	wantB := wgplan.Interface{
+		Name: "meshp0", PrivateKey: wgplan.Key(privB.String()), ListenPort: portB, MTU: 1420,
+		Addresses: []netip.Prefix{netip.MustParsePrefix(meshB + "/32")},
+		Peers: []wgplan.Peer{{
+			PublicKey:  wgplan.Key(privA.PublicKey().String()),
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix(meshA + "/32")},
+			// No endpoint: this is every peer, before discovery exists.
+			KeepaliveSeconds: 25,
+		}},
+	}
+
+	for ns, want := range map[string]wgplan.Interface{nsA: wantA, nsB: wantB} {
+		netnsRun(t, ns, func() {
+			l, err := New()
+			if err != nil {
+				t.Fatalf("%s: %v", ns, err)
+			}
+			defer func() { _ = l.Close() }()
+			obs, err := l.Observe(want.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := wgplan.For(want, obs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyPlan(l, want.Name, plan); err != nil {
+				t.Fatalf("%s: %v", ns, err)
+			}
+		})
+	}
+
+	// A initiates. B now knows where A is, having been told by the packet rather than by us.
+	if out, err := exec.Command("ip", "netns", "exec", nsA,
+		"ping", "-c", "2", "-W", "5", meshB).CombinedOutput(); err != nil {
+		t.Fatalf("the tunnel did not come up, so nothing was learned: %v\n%s", err, out)
+	}
+
+	netnsRun(t, nsB, func() {
+		l, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = l.Close() }()
+
+		obs, err := l.Observe(wantB.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(obs.Peers) != 1 {
+			t.Fatalf("%d peers, want 1", len(obs.Peers))
+		}
+		learned := obs.Peers[0].Endpoint
+		if learned == "" {
+			t.Fatal("the kernel reports no endpoint, so it learned nothing and this test proves nothing")
+		}
+		t.Logf("B learned A's endpoint from traffic: %s", learned)
+
+		// The claim: knowing less than the kernel is not a reason to overwrite it.
+		plan, err := wgplan.For(wantB, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !plan.Empty() {
+			t.Errorf("a learned endpoint was treated as drift; every reconcile would rewrite\n"+
+				"the peer and undo roaming:\n%s", plan)
+		}
+	})
+}

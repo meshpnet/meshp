@@ -3,6 +3,7 @@
 package wglink
 
 import (
+	"fmt"
 	"net/netip"
 	"os/exec"
 	"strings"
@@ -333,5 +334,83 @@ func TestANonWireGuardInterfaceIsRefused(t *testing.T) {
 		t.Error("a non-WireGuard interface was adopted")
 	} else if !strings.Contains(err.Error(), "not a WireGuard interface") {
 		t.Errorf("the error does not explain the problem: %v", err)
+	}
+}
+
+// Anything whose written form differs from the form the kernel reports back is a field the
+// diff can never satisfy: the peer is rewritten on every reconcile, its session resets each
+// time, and nothing looks wrong because both values are individually correct. Invariant 18
+// is the guard, and these are the fields most likely to breach it.
+func TestEveryPeerFieldSurvivesARoundTripThroughTheKernel(t *testing.T) {
+	l := requireInterfaces(t)
+
+	psk := genKey(t)
+	cases := map[string]wgplan.Peer{
+		"an IPv4 endpoint": {
+			Endpoint: "203.0.113.9:51820",
+		},
+		"an IPv6 endpoint, where the bracketed form could differ": {
+			Endpoint: "[2001:db8::9]:51820",
+		},
+		"a preshared key, which some interfaces decline to report": {
+			PresharedKey: psk,
+		},
+		"a keepalive": {
+			KeepaliveSeconds: 25,
+		},
+		"all of them at once": {
+			Endpoint:         "[2001:db8::9]:51820",
+			PresharedKey:     psk,
+			KeepaliveSeconds: 25,
+		},
+	}
+
+	i := 0
+	for name, tweak := range cases {
+		i++
+		iface := fmt.Sprintf("wgrt%d", i)
+		t.Run(name, func(t *testing.T) {
+			removeInterface(t, l, iface)
+			t.Cleanup(func() { removeInterface(t, l, iface) })
+
+			want := wanted(t, iface)
+			want.Peers[0].Endpoint = tweak.Endpoint
+			want.Peers[0].PresharedKey = tweak.PresharedKey
+			want.Peers[0].KeepaliveSeconds = tweak.KeepaliveSeconds
+
+			obs, err := l.Observe(iface)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := wgplan.For(want, obs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyPlan(l, iface, plan); err != nil {
+				t.Fatal(err)
+			}
+
+			obs, err = l.Observe(iface)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := wgplan.For(want, obs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !again.Empty() {
+				got := "no peers"
+				if len(obs.Peers) > 0 {
+					p := obs.Peers[0]
+					got = fmt.Sprintf("endpoint=%q psk_set=%t keepalive=%d",
+						p.Endpoint, p.PresharedKey != "", p.KeepaliveSeconds)
+				}
+				t.Errorf("this peer would be rewritten on every reconcile.\n"+
+					"asked for: endpoint=%q psk_set=%t keepalive=%d\n"+
+					"kernel reports: %s\nplan:\n%s",
+					want.Peers[0].Endpoint, want.Peers[0].PresharedKey != "",
+					want.Peers[0].KeepaliveSeconds, got, again)
+			}
+		})
 	}
 }

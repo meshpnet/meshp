@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jsimonetti/rtnetlink/v2"
@@ -25,6 +26,13 @@ import (
 // makes it a WireGuard device — keys and peers — and speaks netlink to a kernel device or
 // the UAPI socket to a userspace one, so the same code configures either (ADR-0015).
 type linux struct {
+	// mu serialises operations. mdlayher/netlink documents its Conn as safe for concurrent
+	// use; wgctrl's client makes no such promise, and one of these is shared by every
+	// membership on the host, each with its own reconcile timer. Netlink operations take
+	// microseconds and reconciles are a minute apart, so serialising costs nothing and
+	// removes a class of failure that would only appear on a device in several networks.
+	mu sync.Mutex
+
 	rt *rtnetlink.Conn
 	wg *wgctrl.Client
 }
@@ -48,6 +56,9 @@ func (l *linux) Close() error {
 }
 
 func (l *linux) Kind(name string) (Kind, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	dev, err := l.wg.Device(name)
 	if err != nil {
 		return KindUnknown, fmt.Errorf("wglink: reading %s: %w", name, err)
@@ -64,6 +75,9 @@ func (l *linux) Kind(name string) (Kind, error) {
 
 // Observe reports what the interface currently holds.
 func (l *linux) Observe(name string) (wgplan.Observed, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	iface, gone, err := lookup(name)
 	if err != nil {
 		return wgplan.Observed{}, err
@@ -153,6 +167,9 @@ func (l *linux) routes(index uint32) ([]netip.Prefix, error) {
 
 // Apply carries out one operation.
 func (l *linux) Apply(name string, op wgplan.Op) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	switch op.Kind {
 	case wgplan.CreateDevice:
 		return l.createDevice(name)
@@ -446,6 +463,12 @@ func peerFromDevice(peer wgtypes.Peer) wgplan.Peer {
 	out := wgplan.Peer{
 		PublicKey:        wgplan.Key(peer.PublicKey.String()),
 		KeepaliveSeconds: int(peer.PersistentKeepaliveInterval.Seconds()),
+	}
+	// Whether this peer's current endpoint is working, which is what decides whether
+	// replacing it would be a repair or would undo roaming.
+	if !peer.LastHandshakeTime.IsZero() {
+		out.HasHandshake = true
+		out.HandshakeAge = time.Since(peer.LastHandshakeTime)
 	}
 	if peer.Endpoint != nil {
 		out.Endpoint = peer.Endpoint.String()
