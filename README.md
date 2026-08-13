@@ -26,12 +26,15 @@ kernel WireGuard interfaces reconciled against what the control plane asked for
 attaches to it (ADR-0016, ADR-0017). Plus the parts nothing calls yet: IPAM, advertiser
 health and route-group selection.
 
+Devices can also be revoked: an administrator removes one and every other agent drops
+its key, which is what actually cuts it off — enforcement is at the peers, not at the
+device being removed, so a machine that is switched off or hostile is out just the same.
+
 What does not, and matters: **there is no policy enforcement** — every device in a
-network can reach every other, because the ACL engine is not wired up. **A device
-cannot be removed from a network**; nothing writes a revocation. **The control plane
-speaks plaintext HTTP.** Direct paths, DNS and internet egress are all unimplemented,
-and the data plane is Linux-only — elsewhere a device enrols, holds an address, and
-reports honestly that it has no tunnel.
+network can reach every other, because the ACL engine is not wired up. **The control
+plane speaks plaintext HTTP.** Direct paths, DNS and internet egress are all
+unimplemented, and the data plane is Linux-only — elsewhere a device enrols, holds an
+address, and reports honestly that it has no tunnel.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

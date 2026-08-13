@@ -49,6 +49,15 @@ type Session struct {
 	send   chan *meshpv1.ServerMessage
 	notify chan struct{}
 
+	// farewell carries a last message that must reach the agent before the session ends.
+	//
+	// Separate from send because ending the session is part of delivering it, and the two
+	// cannot be expressed as "enqueue, then close": the writer selects on the queue and on
+	// closure together, so when both are ready Go picks between them at random and the
+	// message is dropped about half the time. One case that writes and then closes is the
+	// only version with a defined order.
+	farewell chan *meshpv1.ServerMessage
+
 	closeOnce sync.Once
 	closed    chan struct{}
 
@@ -67,6 +76,7 @@ func newSession(id string, membershipID, networkID, deviceID uuid.UUID, now time
 		ConnectedAt:  now,
 		send:         make(chan *meshpv1.ServerMessage, sendQueue),
 		notify:       make(chan struct{}, 1),
+		farewell:     make(chan *meshpv1.ServerMessage, 1),
 		closed:       make(chan struct{}),
 	}
 }
@@ -127,6 +137,19 @@ func (s *Session) enqueue(msg *meshpv1.ServerMessage) bool {
 		s.overrun.Store(true)
 		s.Close()
 		return false
+	}
+}
+
+// Farewell asks the session to deliver one last message and then end.
+//
+// Best effort by design. It is a courtesy to a device that happens to be connected —
+// revocation is enforced by the other agents dropping the key, not by reaching this one —
+// so a session already closing simply does not get it.
+func (s *Session) Farewell(msg *meshpv1.ServerMessage) {
+	select {
+	case <-s.closed:
+	case s.farewell <- msg:
+	default:
 	}
 }
 

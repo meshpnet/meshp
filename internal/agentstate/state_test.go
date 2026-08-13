@@ -242,3 +242,64 @@ func TestIdentityRejectsCorruptKeys(t *testing.T) {
 		t.Error("Identity accepted unparseable keys")
 	}
 }
+
+// A revoked membership is forgotten, and only that one: a device may belong to several
+// networks (ADR-0004), and one revoking it says nothing about the others.
+func TestRemoveMembershipTakesOnlyTheOneNamed(t *testing.T) {
+	s := &State{}
+	keep, drop := uuid.New(), uuid.New()
+	s.AddMembership(Membership{MembershipID: keep, NetworkID: uuid.New(),
+		InterfaceName: "meshp0", WireGuardPrivateKey: "keep-key"})
+	s.AddMembership(Membership{MembershipID: drop, NetworkID: uuid.New(),
+		InterfaceName: "meshp1", WireGuardPrivateKey: "drop-key"})
+
+	if !s.RemoveMembership(drop) {
+		t.Fatal("removing a membership that exists reported nothing to do")
+	}
+	if len(s.Memberships) != 1 || s.Memberships[0].MembershipID != keep {
+		t.Fatalf("memberships = %+v, want only the kept one", s.Memberships)
+	}
+	// The key went with it. Keys are per membership and never shared (Invariant 19), so
+	// leaving one behind would keep material for a network this device is out of.
+	for _, m := range s.Memberships {
+		if m.WireGuardPrivateKey == "drop-key" {
+			t.Error("the revoked membership's key survived")
+		}
+	}
+
+	if s.RemoveMembership(drop) {
+		t.Error("removing the same membership twice reported that it did something")
+	}
+	if s.RemoveMembership(uuid.New()) {
+		t.Error("removing an unknown membership reported that it did something")
+	}
+}
+
+// The identity names this device to every network it has joined (ADR-0006), so it survives
+// one network revoking the device. Only an explicit wipe, once nothing is left, discards it.
+func TestRemoveMembershipKeepsTheIdentity(t *testing.T) {
+	s := &State{}
+	id, err := keys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetIdentity(id)
+	membershipID := uuid.New()
+	s.AddMembership(Membership{MembershipID: membershipID, NetworkID: uuid.New(), InterfaceName: "meshp0"})
+
+	s.RemoveMembership(membershipID)
+	if s.IdentityPublicKey == "" {
+		t.Fatal("removing a membership discarded the device's identity")
+	}
+	if _, err := s.Identity(); err != nil {
+		t.Fatalf("the identity is no longer usable: %v", err)
+	}
+
+	s.ForgetIdentity()
+	if s.IdentityPublicKey != "" || s.IdentityPrivateKey != "" {
+		t.Error("ForgetIdentity left key material behind")
+	}
+	if _, err := s.Identity(); err == nil {
+		t.Error("a forgotten identity still loads")
+	}
+}
