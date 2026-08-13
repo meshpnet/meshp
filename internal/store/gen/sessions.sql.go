@@ -77,6 +77,24 @@ func (q *Queries) GetMembershipForSession(ctx context.Context, id uuid.UUID) (Ge
 	return i, err
 }
 
+const getWireGuardKeyForMembership = `-- name: GetWireGuardKeyForMembership :one
+SELECT public_key
+FROM wireguard_keys
+WHERE membership_id = $1
+`
+
+// The current WireGuard public key a membership presents.
+//
+// Separate from GetMembershipForSession because almost nothing needs it: the key identifies
+// this device to its peers and to a relay, and loading it on every state build would be work
+// for one caller.
+func (q *Queries) GetWireGuardKeyForMembership(ctx context.Context, membershipID uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getWireGuardKeyForMembership, membershipID)
+	var public_key string
+	err := row.Scan(&public_key)
+	return public_key, err
+}
+
 const listPeersForMembership = `-- name: ListPeersForMembership :many
 SELECT
     m.id            AS membership_id,

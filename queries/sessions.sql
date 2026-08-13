@@ -81,3 +81,13 @@ WHERE membership_id = $1;
 UPDATE device_network_memberships
 SET last_seen_at = sqlc.arg(now)
 WHERE id = $1;
+
+-- name: GetWireGuardKeyForMembership :one
+-- The current WireGuard public key a membership presents.
+--
+-- Separate from GetMembershipForSession because almost nothing needs it: the key identifies
+-- this device to its peers and to a relay, and loading it on every state build would be work
+-- for one caller.
+SELECT public_key
+FROM wireguard_keys
+WHERE membership_id = $1;

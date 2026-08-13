@@ -25,6 +25,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0014](0014-hand-written-migration-runner.md) | A hand-written migration runner that checksums what it applied |
 | [0015](0015-data-plane-kernel-first.md) | Kernel WireGuard where it exists, userspace where it does not, and say which |
 | [0016](0016-relay-transport.md) | One relay port, multiplexed, with the agent carrying relayed packets |
+| [0017](0017-relay-credentials-over-the-control-channel.md) | An agent asks for its relay credential; the server does not push it |
 
 ## Format
 

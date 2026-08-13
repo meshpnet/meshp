@@ -11,13 +11,18 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +31,7 @@ import (
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
+	"github.com/meshpnet/meshp/internal/relaytoken"
 	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
 	"github.com/meshpnet/meshp/internal/version"
@@ -43,6 +49,15 @@ func main() {
 			"do not apply migrations at startup; readiness still requires the schema to be current")
 		logLevel = flag.String("log-level", envOr("MESHP_LOG_LEVEL", "info"), "debug, info, warn or error")
 
+		// The Ed25519 key this deployment signs relay tokens with. Relays are configured
+		// with the public half and can therefore verify without being able to issue
+		// (ADR-0016). Absent means relaying is not offered: devices still enrol and
+		// converge, and an agent asking for a token is told so.
+		relayKey = flag.String("relay-signing-key", os.Getenv("MESHP_RELAY_SIGNING_KEY"),
+			"base64 Ed25519 seed or private key for signing relay tokens; empty disables relaying")
+		generateRelayKey = flag.Bool("generate-relay-key", false,
+			"print a new relay signing keypair and exit")
+
 		// How far back deltas can be built. An agent offline longer than this is sent a
 		// snapshot when it returns, which is correct but expensive — so this is the
 		// trade-off between the size of the change log and how cheap a reconnection is
@@ -54,6 +69,16 @@ func main() {
 
 	if *showVersion {
 		fmt.Println(version.String("meshp-control"))
+		return
+	}
+
+	if *generateRelayKey {
+		// Here rather than in a README, because the alternative is an openssl incantation
+		// that people copy from a search result and get subtly wrong.
+		if err := printRelayKeypair(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "meshp-control:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -84,13 +109,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	signer, err := parseRelaySigningKey(*relayKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meshp-control: relay signing key: %v\n", err)
+		os.Exit(2)
+	}
+
 	cfg := runConfig{
-		addr:           *listenAddr,
-		databaseURL:    *databaseURL,
-		secretKey:      []byte(*secretKey),
-		adminToken:     *adminToken,
-		skipMigrate:    *skipMigrate,
-		deltaRetention: *deltaRetention,
+		relaySigningKey: signer,
+		addr:            *listenAddr,
+		databaseURL:     *databaseURL,
+		secretKey:       []byte(*secretKey),
+		adminToken:      *adminToken,
+		skipMigrate:     *skipMigrate,
+		deltaRetention:  *deltaRetention,
 	}
 	if err := run(ctx, log, cfg); err != nil {
 		log.Error("meshp-control exited with error", "error", err)
@@ -100,12 +132,13 @@ func main() {
 }
 
 type runConfig struct {
-	addr           string
-	databaseURL    string
-	secretKey      []byte
-	adminToken     string
-	skipMigrate    bool
-	deltaRetention time.Duration
+	relaySigningKey ed25519.PrivateKey
+	addr            string
+	databaseURL     string
+	secretKey       []byte
+	adminToken      string
+	skipMigrate     bool
+	deltaRetention  time.Duration
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -156,8 +189,24 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			log.Error("could not derive the enrolment challenge key", "error", err)
 			return
 		}
+		issuer, err := session.NewRelayIssuer(cfg.relaySigningKey, relaytoken.DefaultTTL)
+		if err != nil {
+			log.Error("could not prepare the relay issuer", "error", err)
+			return
+		}
+		if issuer == nil {
+			log.Warn("relaying is disabled: no signing key configured",
+				"hint", "meshp-control --generate-relay-key prints a pair; give the private half here and the public half to each relay")
+		} else {
+			// Logged so an operator can see what to configure a relay with, and can check a
+			// relay's configuration matches without reading a secret anywhere.
+			log.Info("relay tokens will be signed by this deployment",
+				"public_key", base64.StdEncoding.EncodeToString(issuer.PublicKey()))
+		}
+
 		sessionServer, err := session.NewServer(st, session.NewHub(), session.Config{
 			MasterSecret: cfg.secretKey,
+			RelayIssuer:  issuer,
 			Clock:        clock.System{},
 			Log:          log,
 		})
@@ -365,6 +414,50 @@ func pruneDeltaLog(ctx context.Context, log *slog.Logger, st *store.Store, reten
 				"networks", res.Networks, "rows", res.Rows, "retention", retention)
 		}
 	}
+}
+
+// parseRelaySigningKey accepts either a 32-byte seed or a full 64-byte private key.
+//
+// Both, because `--generate-relay-key` prints a seed and someone will inevitably paste the
+// longer form from somewhere else; refusing one of them would be a papercut with no benefit.
+func parseRelaySigningKey(s string) (ed25519.PrivateKey, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("not base64: %w", err)
+	}
+	switch len(raw) {
+	case ed25519.SeedSize:
+		return ed25519.NewKeyFromSeed(raw), nil
+	case ed25519.PrivateKeySize:
+		return ed25519.PrivateKey(raw), nil
+	default:
+		return nil, fmt.Errorf("%d bytes, want a %d-byte seed or a %d-byte private key",
+			len(raw), ed25519.SeedSize, ed25519.PrivateKeySize)
+	}
+}
+
+// printRelayKeypair writes a fresh pair, labelled so the halves cannot be confused.
+func printRelayKeypair(w io.Writer) error {
+	seed := make([]byte, ed25519.SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		return fmt.Errorf("reading randomness: %w", err)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+
+	// One write, one error to check. Writing a keypair half-way and reporting success would
+	// hand someone a secret with no matching public key.
+	_, err := fmt.Fprintf(w,
+		"# Keep this secret. Give it to meshp-control only.\n"+
+			"MESHP_RELAY_SIGNING_KEY=%s\n\n"+
+			"# Not secret. Give this to every relay.\n"+
+			"MESHP_RELAY_ISSUER_KEY=%s\n",
+		base64.StdEncoding.EncodeToString(seed),
+		base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	return err
 }
 
 func envOr(key, fallback string) string {
