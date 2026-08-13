@@ -37,7 +37,7 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/arm \
 # are held lower rather than pretended into the top tier. Packages needing PostgreSQL
 # are checked separately: without a database their tests skip, and the figure would be
 # meaningless rather than merely low.
-COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset
+COVER_FLOOR_PKGS := internal/clock internal/health internal/ipam internal/routes internal/keys internal/challenge internal/logx internal/controlurl internal/peerset internal/wgplan
 COVER_FLOOR      := 90
 
 COVER_FLOOR_IO_PKGS := internal/agentapi internal/agentstate internal/httpx
@@ -173,6 +173,16 @@ lint: fmt-check ## Run go vet and golangci-lint
 	go vet ./...
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run
 
+.PHONY: tidy-check
+tidy-check: ## Fail if go.mod or go.sum are not what `go mod tidy` would write
+	@# -diff reports what would change and writes nothing, so this cannot leave the
+	@# working tree modified if it is interrupted.
+	@go mod tidy -diff || { \
+	  echo "go.mod or go.sum is not tidy; run 'go mod tidy' and commit the result"; \
+	  exit 1; \
+	}
+	@echo "  go.mod and go.sum are tidy"
+
 .PHONY: vuln
 vuln: ## Check dependencies and stdlib against the Go vulnerability database
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULN_VERSION) ./...
@@ -228,7 +238,7 @@ migrate-check: ## Apply, roll back and re-apply every migration against MESHP_TE
 ## --- aggregate ------------------------------------------------------------
 
 .PHONY: ci
-ci: lint standalone-check build cross test cover-check cover-check-io fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
+ci: lint tidy-check standalone-check build cross test cover-check cover-check-io fuzz-seeds ## Everything CI runs, minus the jobs needing Postgres
 	@echo
 	@echo "  all local CI checks passed"
 
