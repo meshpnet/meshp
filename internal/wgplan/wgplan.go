@@ -49,6 +49,17 @@ type Peer struct {
 	// path has been found rather than an error.
 	Endpoint string
 
+	// Relayed says this endpoint is a loopback socket the agent itself serves, forwarding to
+	// and from a relay (ADR-0016).
+	//
+	// Stated rather than inferred from the address. It would be tempting to test whether the
+	// endpoint is a loopback address, but that would leave the important part unsaid: a
+	// loopback endpoint requires a live socket behind it, and wgctrl cannot clear an
+	// endpoint — writing a peer with none leaves whatever was there. So a peer pointing at
+	// 127.0.0.1 must keep something serving that address until a different endpoint is
+	// written, and only the agent knows whether it intends to.
+	Relayed bool
+
 	// PresharedKey is optional per-pair symmetric material.
 	PresharedKey Key
 
@@ -298,6 +309,17 @@ func For(want Interface, observed Observed) (Plan, error) {
 			add(Op{Kind: SetPeer, Peer: desired})
 			continue
 		}
+		// Stopping relaying with nothing to replace the endpoint is the one change a single
+		// SetPeer cannot express: wgctrl treats an absent endpoint as "leave it", so the peer
+		// would keep pointing at a loopback socket about to stop existing. Removing and
+		// re-adding is the only way to clear one. It costs that peer's session, which is
+		// unavoidable and better than a silent black hole.
+		if isLoopback(current.Endpoint) && !desired.Relayed && desired.Endpoint == "" {
+			add(Op{Kind: RemovePeer, Peer: Peer{PublicKey: key}})
+			add(Op{Kind: SetPeer, Peer: desired})
+			continue
+		}
+
 		if write, peer := resolvePeer(current, desired); write {
 			add(Op{Kind: SetPeer, Peer: peer})
 		}
@@ -365,6 +387,18 @@ func (i Interface) Validate() error {
 		}
 		seen[peer.PublicKey] = struct{}{}
 
+		if peer.Relayed && peer.Endpoint == "" {
+			return fmt.Errorf("wgplan: interface %s peer %s is relayed with no endpoint; "+
+				"a relayed peer must point at the socket serving it", i.Name, peer.PublicKey)
+		}
+		if peer.Relayed && !isLoopback(peer.Endpoint) {
+			return fmt.Errorf("wgplan: interface %s peer %s is relayed but points at %s, "+
+				"which is not a socket this agent serves", i.Name, peer.PublicKey, peer.Endpoint)
+		}
+		if !peer.Relayed && isLoopback(peer.Endpoint) {
+			return fmt.Errorf("wgplan: interface %s peer %s points at %s without being marked "+
+				"relayed; nothing would keep that socket alive", i.Name, peer.PublicKey, peer.Endpoint)
+		}
 		if len(peer.AllowedIPs) == 0 {
 			// A peer with no allowed IPs can neither be sent to nor accepted from. It is
 			// not harmful, but it is never what anyone meant.
@@ -532,6 +566,18 @@ func resolvePeer(have, want Peer) (bool, Peer) {
 // keepObservedEndpoint reports whether the device's endpoint should be left as it is.
 func keepObservedEndpoint(have, want Peer) bool {
 	switch {
+	case want.Relayed:
+		// Ours by construction: the agent is serving that socket, so nothing the device
+		// reports is better information. Notably a loopback endpoint always looks alive —
+		// a local socket answers — so the evidence rule below would pin a relayed peer to
+		// the relay forever and no direct path could ever replace it.
+		return false
+
+	case isLoopback(have.Endpoint):
+		// The device points at a socket we no longer intend to serve. Whatever we do now,
+		// leaving it there is not an option: it is a black hole with a live-looking endpoint.
+		return false
+
 	case want.Endpoint == "":
 		// Nothing to offer. Whatever the device has — configured earlier, or learned from
 		// traffic — is more than we know, and this is every peer's state until endpoint
@@ -548,6 +594,21 @@ func keepObservedEndpoint(have, want Peer) bool {
 		// agent consumes candidate lists (ADR-0003).
 		return have.HasHandshake && have.HandshakeAge <= endpointGrace
 	}
+}
+
+// isLoopback reports whether an endpoint is one of ours.
+//
+// A loopback address can never be learned from the network — the kernel only has it because
+// something local wrote it — so it is never evidence about where a peer is.
+func isLoopback(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	addr, err := netip.ParseAddrPort(endpoint)
+	if err != nil {
+		return false
+	}
+	return addr.Addr().IsLoopback()
 }
 
 // sameApartFromEndpoint compares everything the control plane decides outright.
