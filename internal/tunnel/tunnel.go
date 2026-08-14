@@ -157,7 +157,7 @@ func (r *Reconciler) Status() Status {
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
 func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
-	want, err := Desired(r.membership, state, r.relay, r.log)
+	want, unhonoured, err := Desired(r.membership, state, r.relay, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
 		// rather than approximated: applying part of a rejected configuration is how an
@@ -242,6 +242,15 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 	r.appliedV = state.Version()
 	r.port = port
 	r.mu.Unlock()
+
+	if len(unhonoured) > 0 {
+		// Unapplied without an error: the interface converged, and what did not is named so
+		// the control plane can see this device is not carrying everything it was assigned.
+		// An error here would report the whole apply as failed and hide the part that worked.
+		r.log.Warn("some route groups are not being carried",
+			"interface", want.Name, "groups", len(unhonoured))
+		return []string{"route-groups"}, nil
+	}
 	return nil, nil
 }
 
@@ -341,12 +350,15 @@ func (r *Reconciler) fail(err error) {
 // relay may be nil, and a relayed peer is then left without an endpoint rather than
 // refused. One peer whose relay this device is not attached to must not take down the
 // interface every other peer is reached through.
-func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (wgplan.Interface, error) {
+// The second return names route groups this device was assigned and could not carry. It is
+// a translation result rather than part of the interface description, which is why it comes
+// back separately: wgplan plans kernel operations, and "what is missing" is not one.
+func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (wgplan.Interface, []string, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	if m.PrivateKey == "" {
-		return wgplan.Interface{}, errors.New("tunnel: this membership has no WireGuard private key")
+		return wgplan.Interface{}, nil, errors.New("tunnel: this membership has no WireGuard private key")
 	}
 
 	iface := wgplan.Interface{
@@ -369,12 +381,12 @@ func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (w
 		}
 		prefix, err := hostPrefix(addr)
 		if err != nil {
-			return wgplan.Interface{}, fmt.Errorf("tunnel: this device's address %q: %w", addr, err)
+			return wgplan.Interface{}, nil, fmt.Errorf("tunnel: this device's address %q: %w", addr, err)
 		}
 		iface.Addresses = append(iface.Addresses, prefix)
 	}
 	if len(iface.Addresses) == 0 {
-		return wgplan.Interface{}, errors.New("tunnel: this membership holds no addresses")
+		return wgplan.Interface{}, nil, errors.New("tunnel: this membership holds no addresses")
 	}
 
 	for _, peer := range state.Peers() {
@@ -382,12 +394,19 @@ func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (w
 		if err != nil {
 			// Refused rather than skipped. A peer quietly dropped is a device that cannot be
 			// reached, with everything reporting success.
-			return wgplan.Interface{}, fmt.Errorf("tunnel: peer %s: %w",
+			return wgplan.Interface{}, nil, fmt.Errorf("tunnel: peer %s: %w",
 				truncate(peer.GetPublicKey()), err)
 		}
 		iface.Peers = append(iface.Peers, converted)
 	}
-	return iface, nil
+
+	// After the peers, because a carried prefix is added to the peer that carries it and
+	// there has to be a peer to add it to.
+	//
+	// Reported rather than fatal: one group this device cannot honour must not cost it the
+	// peers and prefixes it can.
+	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), log)
+	return iface, unhonoured, nil
 }
 
 func peerFrom(p *meshpv1.Peer, relay Relay, log *slog.Logger) (wgplan.Peer, error) {
