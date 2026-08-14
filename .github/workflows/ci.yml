@@ -193,7 +193,12 @@ jobs:
   integration:
     name: integration (postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Generous because the failover run waits out a real liveness window: internal/tunnel
+    # treats a handshake as live for three minutes, so the earliest possible failover is a
+    # little past that, and a run where failover never happens waits the poll out before it
+    # can say so. Too tight a budget turns that into a job timeout, which reports the wrong
+    # cause — the message an operator needs is "the client never moved", not "cancelled".
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16-alpine
