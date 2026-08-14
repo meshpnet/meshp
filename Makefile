@@ -275,7 +275,7 @@ dataplane: ## Run the data-plane tests against real interfaces, in a privileged 
 	  -v "$(CURDIR)":/src -w /src \
 	  -v "$$(go env GOMODCACHE)":/go/pkg/mod \
 	  golang:$(GO_IMAGE_VERSION)-alpine sh -c \
-	  'apk add --no-cache iproute2 wireguard-tools nftables >/dev/null && \
+	  'apk add --no-cache iproute2 wireguard-tools nftables iputils >/dev/null && \
 	   go test ./internal/wglink/ ./internal/nftables/ -count=1 -v'
 
 .PHONY: migrate-check
