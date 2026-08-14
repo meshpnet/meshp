@@ -21,6 +21,7 @@ import (
 
 	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
+	"github.com/meshpnet/meshp/internal/routeprobe"
 	"github.com/meshpnet/meshp/internal/wglink"
 	"github.com/meshpnet/meshp/internal/wgplan"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
@@ -98,6 +99,11 @@ type Reconciler struct {
 	// counters an operator is reading.
 	lastFilter *meshpv1.PacketFilter
 
+	// chooser decides which candidate carries each group. Nil where local failover is not
+	// wanted, in which case the server's order is taken verbatim — which is what this did
+	// before there was a chooser.
+	chooser *routeprobe.Chooser
+
 	// lastAdvertised is the same idea for forwarding, and matters more: reloading the NAT
 	// table flushes its conntrack-independent counters and, on some kernels, disturbs
 	// in-flight masqueraded flows. An unchanged assignment is left alone.
@@ -137,6 +143,16 @@ func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.L
 	}
 }
 
+// WithChooser gives the reconciler local failover.
+//
+// Separate from New because a reconciler without one is a legitimate configuration — a
+// build with no probing takes the server's order, which is what every device did before
+// this existed — and because the chooser holds state that outlives one Apply.
+func (r *Reconciler) WithChooser(c *routeprobe.Chooser) *Reconciler {
+	r.chooser = c
+	return r
+}
+
 // Status is what the daemon reports about this tunnel.
 type Status struct {
 	Up             bool
@@ -167,7 +183,7 @@ func (r *Reconciler) Status() Status {
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
 func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
-	want, unhonoured, err := Desired(r.membership, state, r.relay, r.log)
+	want, unhonoured, err := Desired(r.membership, state, r.relay, r.chooser, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
 		// rather than approximated: applying part of a rejected configuration is how an
@@ -200,6 +216,11 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 			"peers", len(want.Peers),
 			"operations", len(plan.Ops))
 	}
+
+	// Every probe this pass costs is a read the reconciler already did. A device whose
+	// gateway has gone silent therefore fails over on the next tick without sending a
+	// single extra packet.
+	r.observeAdvertisers(observed, state.RouteGroups())
 
 	// Which implementation ended up behind it, read rather than assumed. ADR-0015 requires
 	// this to be reportable: a silent userspace fallback makes a tenfold difference in
@@ -312,6 +333,36 @@ func (r *Reconciler) applyFilter(ctx context.Context, iface string, want *meshpv
 	return nil
 }
 
+// observeAdvertisers folds what the interface shows into the chooser.
+//
+// Decisions are not acted on here. The chooser records them, and the next Apply configures
+// whatever it now points at — which keeps "decide" and "converge" in the order the rest of
+// this package uses, rather than reconfiguring an interface half way through reading it.
+func (r *Reconciler) observeAdvertisers(observed wgplan.Observed, assignments []*meshpv1.RouteGroupAssignment) {
+	if r.chooser == nil || len(assignments) == 0 {
+		return
+	}
+	for _, assignment := range assignments {
+		current := r.chooser.Current(assignment)
+		if current == nil {
+			continue
+		}
+		result, ok := probeFromHandshake(observed, current.GetPeerPublicKey())
+		if !ok {
+			continue
+		}
+		if decision := r.chooser.Observe(assignment, result); decision.Switched != "" {
+			r.log.Info("moving to another advertiser",
+				"group", logx.Safe(assignment.GetName()),
+				"from", logx.Safe(decision.Switched), "to", logx.Safe(decision.Current),
+				"reason", logx.Safe(decision.Reason))
+		}
+	}
+	// A group no longer assigned should not be remembered, or a device that carried a
+	// prefix for a while keeps its choice forever.
+	r.chooser.Forget(assignments)
+}
+
 // applyForwarding makes this host carry what it advertises, or stop.
 //
 // Skipped when nothing changed, like the filter and for a sharper reason: rebuilding the NAT
@@ -413,7 +464,7 @@ func (r *Reconciler) fail(err error) {
 // The second return names route groups this device was assigned and could not carry. It is
 // a translation result rather than part of the interface description, which is why it comes
 // back separately: wgplan plans kernel operations, and "what is missing" is not one.
-func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (wgplan.Interface, []string, error) {
+func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.Chooser, log *slog.Logger) (wgplan.Interface, []string, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -465,7 +516,7 @@ func Desired(m Membership, state *peerset.Set, relay Relay, log *slog.Logger) (w
 	//
 	// Reported rather than fatal: one group this device cannot honour must not cost it the
 	// peers and prefixes it can.
-	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), log)
+	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), chooser, log)
 	return iface, unhonoured, nil
 }
 
