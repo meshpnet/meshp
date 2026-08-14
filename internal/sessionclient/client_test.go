@@ -172,30 +172,8 @@ func (noopApplier) Apply(context.Context, *peerset.Set) ([]string, error) { retu
 // start runs one session against fc and returns the connection the server holds.
 func start(t *testing.T, fc *fakeControl, sink RelayCredentials) *websocket.Conn {
 	t.Helper()
-
-	identity, err := keys.NewIdentity()
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	client := New(Options{
-		ControlURL:   fc.srv.URL,
-		Identity:     identity,
-		MembershipID: uuid.New(),
-		Relay:        sink,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = client.RunOnce(ctx, noopApplier{}) }()
-
-	select {
-	case conn := <-fc.conn:
-		t.Cleanup(func() { _ = conn.CloseNow() })
-		return conn
-	case <-time.After(5 * time.Second):
-		t.Fatal("the agent never opened a session")
-		return nil
-	}
+	_, conn := startSession(t, fc, Options{Relay: sink}, noopApplier{})
+	return conn
 }
 
 func stateWithRelay() *meshpv1.ServerMessage {
@@ -387,16 +365,22 @@ func (a *recordingApplier) count() int {
 // startWith is start, with an applier of the caller's choosing.
 func startWith(t *testing.T, fc *fakeControl, applier Applier) (*Client, *websocket.Conn) {
 	t.Helper()
+	return startSession(t, fc, Options{}, applier)
+}
+
+// startSession runs one session with whatever options and applier a test needs. Everything
+// that identifies the session is filled in here so no caller has to.
+func startSession(t *testing.T, fc *fakeControl, opts Options, applier Applier) (*Client, *websocket.Conn) {
+	t.Helper()
 
 	identity, err := keys.NewIdentity()
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	client := New(Options{
-		ControlURL:   fc.srv.URL,
-		Identity:     identity,
-		MembershipID: uuid.New(),
-	})
+	opts.ControlURL = fc.srv.URL
+	opts.Identity = identity
+	opts.MembershipID = uuid.New()
+	client := New(opts)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

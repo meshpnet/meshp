@@ -339,9 +339,12 @@ func (r *Reconciler) applyFilter(ctx context.Context, iface string, want *meshpv
 // whatever it now points at — which keeps "decide" and "converge" in the order the rest of
 // this package uses, rather than reconfiguring an interface half way through reading it.
 func (r *Reconciler) observeAdvertisers(observed wgplan.Observed, assignments []*meshpv1.RouteGroupAssignment) {
-	if r.chooser == nil || len(assignments) == 0 {
+	if r.chooser == nil {
 		return
 	}
+	// Deliberately not short-circuiting on an empty list. A device taken out of every route
+	// group is the one case where forgetting matters most, and returning early here left it
+	// holding a choice and an unsent verdict about prefixes it no longer carries.
 	for _, assignment := range assignments {
 		current := r.chooser.Current(assignment)
 		if current == nil {
