@@ -23,7 +23,7 @@ IMAGE    ?= meshp:ci
 
 # The Go image used for the data-plane tests. Matches the toolchain CI uses; kept here
 # rather than inline so there is one place to change when the toolchain moves.
-GO_IMAGE_VERSION ?= 1.25
+GO_IMAGE_VERSION ?= 1.25.13
 LDFLAGS  := -X github.com/meshpnet/meshp/internal/version.version=$(VERSION) \
             -X github.com/meshpnet/meshp/internal/version.commit=$(COMMIT)
 
