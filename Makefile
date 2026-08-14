@@ -21,9 +21,11 @@ COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # clobbering whatever a developer has locally.
 IMAGE    ?= meshp:ci
 
-# The Go image used for the data-plane tests. Matches the toolchain CI uses; kept here
-# rather than inline so there is one place to change when the toolchain moves.
-GO_IMAGE_VERSION ?= 1.25.13
+# The Go toolchain, read from the one file that holds it. Every setup-go step in CI reads
+# the same file, and `image` passes this to the Dockerfile — so the container that ships is
+# built by the toolchain the tests ran under, rather than by whatever a floating tag
+# resolved to that day.
+GO_IMAGE_VERSION ?= $(shell cat .go-version)
 LDFLAGS  := -X github.com/meshpnet/meshp/internal/version.version=$(VERSION) \
             -X github.com/meshpnet/meshp/internal/version.commit=$(COMMIT)
 
@@ -247,6 +249,7 @@ image: ## Build the container image (VERSION and COMMIT are stamped in)
 	docker build \
 	  --build-arg VERSION=$(VERSION) \
 	  --build-arg COMMIT=$(COMMIT) \
+	  --build-arg GO_VERSION=$(GO_IMAGE_VERSION) \
 	  -f deploy/docker/Dockerfile \
 	  -t $(IMAGE) .
 
