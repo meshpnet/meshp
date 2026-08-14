@@ -826,9 +826,19 @@ func TestTheListenPortIsHandedToTheRelayAfterConverging(t *testing.T) {
 
 // fakeFilter records what it was asked to enforce.
 type fakeFilter struct {
-	applied []*meshpv1.PacketFilter
-	iface   string
-	failErr error
+	applied   []*meshpv1.PacketFilter
+	forwarded [][]*meshpv1.AdvertisedRoutes_Group
+	iface     string
+	failErr   error
+	fwdErr    error
+}
+
+func (f *fakeFilter) ApplyForward(_ context.Context, _ string, groups []*meshpv1.AdvertisedRoutes_Group) error {
+	if f.fwdErr != nil {
+		return f.fwdErr
+	}
+	f.forwarded = append(f.forwarded, groups)
+	return nil
 }
 
 func (f *fakeFilter) Apply(_ context.Context, iface string, filter *meshpv1.PacketFilter) error {
@@ -1245,4 +1255,149 @@ func slicesContain(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func stateAdvertising(version uint64, advertised *meshpv1.AdvertisedRoutes, peers ...*meshpv1.Peer) *peerset.Set {
+	s := peerset.New()
+	s.Apply(&meshpv1.StateDelta{
+		FromVersion: 0, ToVersion: version, UpsertPeers: peers,
+		Tunnel:     &meshpv1.TunnelConfig{Mtu: 1420},
+		Advertised: advertised,
+	})
+	return s
+}
+
+func advertising(prefixes ...string) *meshpv1.AdvertisedRoutes {
+	return &meshpv1.AdvertisedRoutes{Groups: []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g", Name: "branch", Prefixes: prefixes},
+	}}
+}
+
+func TestAnAdvertiserIsMadeToForward(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.forwarded) != 1 || len(filter.forwarded[0]) != 1 {
+		t.Fatalf("forwarding was configured %d times: %+v", len(filter.forwarded), filter.forwarded)
+	}
+}
+
+// A network that has never mentioned route groups says nothing about forwarding, and that
+// must not be read as "stop".
+func TestSilenceAboutForwardingIsLeftAlone(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateAdvertising(1, nil, peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.forwarded) != 0 {
+		t.Errorf("silence was read as an instruction: %+v", filter.forwarded)
+	}
+}
+
+// An explicit empty list means stop, and has to reach the kernel — otherwise a withdrawn
+// gateway keeps forwarding for a network that no longer routes to it.
+func TestBeingToldToCarryNothingStopsForwarding(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Apply(context.Background(),
+		stateAdvertising(2, &meshpv1.AdvertisedRoutes{}, peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.forwarded) != 2 {
+		t.Fatalf("%d forwarding applies, want 2", len(filter.forwarded))
+	}
+	if len(filter.forwarded[1]) != 0 {
+		t.Errorf("stopping did not reach the kernel: %+v", filter.forwarded[1])
+	}
+}
+
+// Rebuilding the NAT table is not free for traffic already crossing it.
+func TestUnchangedForwardingIsNotReapplied(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+	state := stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32"))
+
+	for range 3 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(filter.forwarded) != 1 {
+		t.Errorf("forwarding was rebuilt %d times for an unchanged assignment", len(filter.forwarded))
+	}
+}
+
+// A device meant to carry prefixes on a host that cannot forward must say so, or it looks
+// like a working gateway that drops everything.
+func TestAHostThatCannotForwardReportsIt(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil, nil, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(unapplied) != 1 || unapplied[0] != "forwarding" {
+		t.Errorf("unapplied = %v, want [forwarding]", unapplied)
+	}
+}
+
+// And a failure to load is reported rather than remembered as done.
+func TestForwardingThatFailsIsRetried(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{fwdErr: errors.New("nft: no such table")}
+	r := New(link, membership(), nil, filter, nil)
+	state := stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32"))
+
+	unapplied, err := r.Apply(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unapplied) != 1 || unapplied[0] != "forwarding" {
+		t.Fatalf("unapplied = %v", unapplied)
+	}
+
+	filter.fwdErr = nil
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.forwarded) != 1 {
+		t.Error("forwarding that failed to load was never retried")
+	}
+}
+
+// Forwarding rules outliving the interface would leave the host a gateway for a network it
+// has left (Invariant 20).
+func TestTeardownStopsForwarding(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	if _, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Teardown(); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.forwarded) != 2 || len(filter.forwarded[1]) != 0 {
+		t.Errorf("teardown did not stop forwarding: %+v", filter.forwarded)
+	}
 }

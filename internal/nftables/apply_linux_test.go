@@ -186,3 +186,131 @@ func TestAMalformedScriptIsReportedWithItsReason(t *testing.T) {
 		t.Errorf("the error does not carry nft's complaint: %v", err)
 	}
 }
+
+// The forwarding ruleset has to load too, and it uses expressions the filter does not — a
+// nat hook, masquerade, snat. A mistake in any of them is invisible to a string test.
+func TestAForwardingRulesetLoads(t *testing.T) {
+	requireNFT(t)
+	ctx := context.Background()
+
+	groups := []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g", Name: "branch", Prefixes: []string{"192.168.10.0/24", "fd00::/64"}},
+	}
+	script, err := RenderForward("meshp0", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, script); err != nil {
+		t.Fatalf("the kernel refused the forwarding ruleset: %v", err)
+	}
+	t.Cleanup(func() {
+		if empty, err := RenderForward("meshp0", nil); err == nil {
+			_ = Apply(context.Background(), empty)
+		}
+	})
+
+	out, err := exec.Command("nft", "list", "table", "inet", ForwardTableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("listing the forwarding table: %v: %s", err, out)
+	}
+	for _, want := range []string{"masquerade", "192.168.10.0/24", "ct state established,related accept"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("the loaded table does not contain %q:\n%s", want, out)
+		}
+	}
+}
+
+// snat is a different expression from masquerade and fails differently if it is wrong.
+func TestAStableEgressRulesetLoads(t *testing.T) {
+	requireNFT(t)
+	groups := []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g", Prefixes: []string{"192.168.10.0/24"}, StableEgressIp: "203.0.113.7"},
+	}
+	script, err := RenderForward("meshp0", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), script); err != nil {
+		t.Fatalf("the kernel refused a stable-egress ruleset: %v", err)
+	}
+	t.Cleanup(func() {
+		if empty, err := RenderForward("meshp0", nil); err == nil {
+			_ = Apply(context.Background(), empty)
+		}
+	})
+}
+
+// An egress advertiser's catch-all rules are the ones most likely to be rejected, because
+// they match on interface rather than on address.
+func TestAnEgressForwardingRulesetLoads(t *testing.T) {
+	requireNFT(t)
+	groups := []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g", Prefixes: []string{"0.0.0.0/0", "::/0"}},
+	}
+	script, err := RenderForward("meshp0", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), script); err != nil {
+		t.Fatalf("the kernel refused an egress ruleset: %v", err)
+	}
+	t.Cleanup(func() {
+		if empty, err := RenderForward("meshp0", nil); err == nil {
+			_ = Apply(context.Background(), empty)
+		}
+	})
+}
+
+// The two tables are separate so a policy change does not disturb a gateway's forwarding.
+func TestPolicyAndForwardingDoNotDisturbEachOther(t *testing.T) {
+	requireNFT(t)
+	ctx := context.Background()
+
+	fwd, err := RenderForward("meshp0", []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g", Prefixes: []string{"192.168.10.0/24"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, fwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if empty, err := RenderForward("meshp0", nil); err == nil {
+			_ = Apply(context.Background(), empty)
+		}
+	})
+
+	// Now reload the policy, which rebuilds its own table entirely.
+	policy, err := Render("meshp0", sampleFilter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("nft", "list", "table", "inet", ForwardTableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the forwarding table did not survive a policy reload: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "192.168.10.0/24") {
+		t.Errorf("forwarding lost its rules when the policy reloaded:\n%s", out)
+	}
+}
+
+// Enabling forwarding is asymmetric on purpose: never turned off, because a host can be
+// forwarding for Docker or another VPN and turning it off would break that silently.
+func TestEnablingForwardingIsIdempotent(t *testing.T) {
+	requireNFT(t)
+	if _, err := EnableForwarding(); err != nil {
+		t.Fatalf("EnableForwarding: %v", err)
+	}
+	changed, err := EnableForwarding()
+	if err != nil {
+		t.Fatalf("EnableForwarding again: %v", err)
+	}
+	if len(changed) != 0 {
+		t.Errorf("reported changing %v on a host where it was already on", changed)
+	}
+}
