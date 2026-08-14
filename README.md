@@ -276,4 +276,9 @@ repository, not in a public issue. See the organisation `SECURITY.md`.
 
 ## License
 
-[Apache 2.0](LICENSE).
+[Apache 2.0](LICENSE), with copyright and attribution in [NOTICE](NOTICE).
+
+Commercial use is permitted, including running this as a service and reselling it. That
+is deliberate rather than an oversight — see
+[ADR-0009](docs/adr/0009-licensing-and-commercial-boundary.md) for what is proprietary and
+why the boundary is an API rather than a licence.
