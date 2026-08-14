@@ -6,6 +6,7 @@ import (
 	"net/netip"
 
 	"github.com/meshpnet/meshp/internal/logx"
+	"github.com/meshpnet/meshp/internal/routeprobe"
 	"github.com/meshpnet/meshp/internal/wgplan"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
@@ -26,7 +27,7 @@ import (
 // Returns the group names it could not honour, which the caller reports as unapplied rather
 // than swallowing: a device quietly not carrying a prefix it was assigned is indistinguishable
 // from one that is, right up until somebody tries to use it.
-func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, log *slog.Logger) []string {
+func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, chooser *routeprobe.Chooser, log *slog.Logger) []string {
 	if len(assignments) == 0 {
 		return nil
 	}
@@ -62,16 +63,17 @@ func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroup
 			continue
 		}
 
-		candidates := assignment.GetCandidates()
-		if len(candidates) == 0 {
+		// The chooser's answer, not the server's first preference. The server orders the
+		// candidates and the agent decides how far down the list to be (ADR-0003), which is
+		// what makes a device fail over without asking the control plane first.
+		best := chosenCandidate(chooser, assignment)
+		if best == nil {
 			// The server withdraws a group nobody can carry rather than sending it empty,
 			// so this means the two ends disagree. Reported rather than ignored.
 			log.Warn("a route group arrived with no candidates", "group", logx.Safe(name))
 			unhonoured = append(unhonoured, name)
 			continue
 		}
-
-		best := candidates[0]
 		index, ok := byKey[wgplan.Key(best.GetPeerPublicKey())]
 		if !ok {
 			// Assigned a carrier that is not in this device's peer list. Nothing can be

@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/peerset"
+	"github.com/meshpnet/meshp/internal/routeprobe"
 	"github.com/meshpnet/meshp/internal/wglink"
 	"github.com/meshpnet/meshp/internal/wgplan"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
@@ -335,7 +337,7 @@ func TestDesiredRendersAddressesAsHostPrefixes(t *testing.T) {
 	m.AddressV4 = "100.90.0.1"
 	m.AddressV6 = "fd7c::1"
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +359,7 @@ func TestDesiredRefusesAnAddressThatIsNotOneHost(t *testing.T) {
 		m := membership()
 		m.AddressV4 = addr
 		m.AddressV6 = ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil); err == nil {
 			t.Errorf("%s was accepted", addr)
 		}
 	}
@@ -370,7 +372,7 @@ func TestDesiredAcceptsAnAddressThatAlreadyCarriesItsPrefix(t *testing.T) {
 	m.AddressV4 = "100.90.0.1/32"
 	m.AddressV6 = "fd7c::1/128"
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Desired: %v", err)
 	}
@@ -383,14 +385,14 @@ func TestDesiredRefusesAMembershipWithNothingToWorkFrom(t *testing.T) {
 	t.Run("no private key", func(t *testing.T) {
 		m := membership()
 		m.PrivateKey = ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil); err == nil {
 			t.Error("a membership with no private key was accepted")
 		}
 	})
 	t.Run("no addresses", func(t *testing.T) {
 		m := membership()
 		m.AddressV4, m.AddressV6 = "", ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil); err == nil {
 			t.Error("a membership with no addresses was accepted")
 		}
 	})
@@ -405,7 +407,7 @@ func TestDesiredTakesTheMTUFromTheServer(t *testing.T) {
 		Tunnel: &meshpv1.TunnelConfig{Mtu: 1280},
 	})
 
-	iface, _, err := Desired(membership(), state, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +422,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 	state := peerset.New()
 	state.Apply(&meshpv1.StateDelta{FromVersion: 0, ToVersion: 1})
 
-	iface, _, err := Desired(membership(), state, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +437,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 // A peer with no endpoint is configured and unreachable, which is the honest state of every
 // peer today: nothing discovers endpoints yet.
 func TestAPeerWithNoEndpointIsStillConfigured(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +458,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 	p := peer(bobKey, "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820", "198.51.100.2:51820"}
 
-	iface, _, err := Desired(membership(), stateWith(1, p), nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, p), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +470,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 // The key is carried through untouched. wgplan does not parse keys, so a translation that
 // mangled one would only fail at the kernel, on a real host, with a confusing message.
 func TestKeysArePassedThroughUnchanged(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +584,7 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 	m := membership()
 	m.ListenPort = 51999
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +595,7 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 
 // A membership that has never come up asks for any port.
 func TestAMembershipWithNoPortAsksForAny(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1), nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +655,7 @@ func TestARelayedPeerIsGivenItsLoopbackEndpoint(t *testing.T) {
 	relay := newFakeRelay("relay1")
 
 	iface, _, err := Desired(membership(),
-		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), relay, nil)
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), relay, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +683,7 @@ func TestADirectEndpointWinsOverARelay(t *testing.T) {
 	p := relayedPeer(bobKey, "relay1", "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820"}
 
-	iface, _, err := Desired(membership(), stateWith(1, p), relay, nil)
+	iface, _, err := Desired(membership(), stateWith(1, p), relay, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +706,7 @@ func TestAPeerOnAnUnreachableRelayDoesNotBreakTheOthers(t *testing.T) {
 	iface, _, err := Desired(membership(), stateWith(1,
 		relayedPeer(bobKey, "relay1", "100.90.0.2/32"),
 		relayedPeer(carolKey, "relay2", "100.90.0.3/32"),
-	), relay, nil)
+	), relay, nil, nil)
 	if err != nil {
 		t.Fatalf("one unreachable relay refused the whole interface: %v", err)
 	}
@@ -728,7 +730,7 @@ func TestAPeerOnAnUnreachableRelayDoesNotBreakTheOthers(t *testing.T) {
 // relayed peer is unreachable rather than refused.
 func TestNoRelayLeavesRelayedPeersWithoutEndpoints(t *testing.T) {
 	iface, _, err := Desired(membership(),
-		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), nil, nil)
+		stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1072,7 @@ func TestACarriedPrefixReachesTheCarrierAndTheRoutingTable(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", bobKey, "192.168.10.0/24")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1112,7 +1114,7 @@ func TestAnEgressGroupIsRefusedUntilItIsSafe(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("an egress group made the whole description fail: %v", err)
 	}
@@ -1146,7 +1148,7 @@ func TestACarrierThatIsNotAPeerIsReported(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", carolKey, "192.168.10.0/24")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1165,7 +1167,7 @@ func TestAnUnparseablePrefixIsReportedRatherThanGuessed(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", bobKey, "not-a-prefix")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	_, unhonoured, err := Desired(membership(), state, nil, nil)
+	_, unhonoured, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1183,7 +1185,7 @@ func TestAGroupWithNoCandidatesIsReported(t *testing.T) {
 	state := stateWithRoutes(1, []*meshpv1.RouteGroupAssignment{assignment},
 		peer(bobKey, "100.90.0.2/32"))
 
-	_, unhonoured, err := Desired(membership(), state, nil, nil)
+	_, unhonoured, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1207,7 @@ func TestTheFirstCandidateCarriesIt(t *testing.T) {
 	state := stateWithRoutes(1, []*meshpv1.RouteGroupAssignment{assignment},
 		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
-	iface, _, err := Desired(membership(), state, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1399,5 +1401,146 @@ func TestTeardownStopsForwarding(t *testing.T) {
 	}
 	if len(filter.forwarded) != 2 || len(filter.forwarded[1]) != 0 {
 		t.Errorf("teardown did not stop forwarding: %+v", filter.forwarded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Local failover
+
+func twoCandidates(name, first, second string, prefixes ...string) *meshpv1.RouteGroupAssignment {
+	return &meshpv1.RouteGroupAssignment{
+		RouteGroupId: "group-" + name, Name: name, Prefixes: prefixes,
+		Candidates: []*meshpv1.RouteCandidate{
+			{PeerPublicKey: first, AdvertiserId: "adv-first", Priority: 1},
+			{PeerPublicKey: second, AdvertiserId: "adv-second", Priority: 2},
+		},
+		LocalFailover: &meshpv1.LocalFailoverPolicy{Enabled: true, FailThreshold: 1},
+	}
+}
+
+// A device fails over from a gateway that has gone silent, without asking the control plane
+// and without sending a packet the reconciler was not already going to send.
+func TestADeviceFailsOverFromASilentAdvertiser(t *testing.T) {
+	clk := clock.NewFake()
+	link := newFakeLink()
+	r := New(link, membership(), nil, nil, nil).WithChooser(routeprobe.New(clk))
+
+	state := stateWithRoutes(1,
+		[]*meshpv1.RouteGroupAssignment{twoCandidates("branch", bobKey, carolKey, "192.168.10.0/24")},
+		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
+
+	// Both peers handshaking: the first preference carries it.
+	for i := range link.observed.Peers {
+		link.observed.Peers[i].HasHandshake = true
+		link.observed.Peers[i].HandshakeAge = time.Second
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	for i := range link.observed.Peers {
+		link.observed.Peers[i].HasHandshake = true
+		link.observed.Peers[i].HandshakeAge = time.Second
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	iface, _, err := Desired(membership(), state, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = iface
+
+	// Now the first advertiser goes silent. The reconciler already reads this.
+	for i := range link.observed.Peers {
+		if string(link.observed.Peers[i].PublicKey) == bobKey {
+			link.observed.Peers[i].HandshakeAge = time.Hour
+		}
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	// The prefix is now carried by the second candidate.
+	if !slicesContain(allowedIPsOf(currentInterface(t, r, state), carolKey), "192.168.10.0/24") {
+		t.Error("the device did not move to the second advertiser")
+	}
+}
+
+// currentInterface recomputes what the reconciler would configure now.
+func currentInterface(t *testing.T, r *Reconciler, state *peerset.Set) wgplan.Interface {
+	t.Helper()
+	iface, _, err := Desired(r.membership, state, r.relay, r.chooser, r.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return iface
+}
+
+// A peer that has just been configured has not had time to handshake, and counting that
+// against the advertiser would fail a device over before it had ever tried.
+func TestNoHandshakeYetIsNotAFailure(t *testing.T) {
+	clk := clock.NewFake()
+	link := newFakeLink()
+	chooser := routeprobe.New(clk)
+	r := New(link, membership(), nil, nil, nil).WithChooser(chooser)
+
+	state := stateWithRoutes(1,
+		[]*meshpv1.RouteGroupAssignment{twoCandidates("branch", bobKey, carolKey, "192.168.10.0/24")},
+		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
+
+	// HasHandshake stays false throughout.
+	for range 5 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slicesContain(allowedIPsOf(currentInterface(t, r, state), bobKey), "192.168.10.0/24") {
+		t.Error("a device moved away from an advertiser that had not had time to handshake")
+	}
+}
+
+// Without a chooser the server's order is taken verbatim, which is what every device did
+// before local failover existed.
+func TestWithoutAChooserTheServersOrderStands(t *testing.T) {
+	link := newFakeLink()
+	r := New(link, membership(), nil, nil, nil)
+
+	state := stateWithRoutes(1,
+		[]*meshpv1.RouteGroupAssignment{twoCandidates("branch", bobKey, carolKey, "192.168.10.0/24")},
+		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
+	for i := range link.observed.Peers {
+		link.observed.Peers[i].HasHandshake = true
+		link.observed.Peers[i].HandshakeAge = time.Hour
+	}
+
+	for range 5 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slicesContain(allowedIPsOf(currentInterface(t, r, state), bobKey), "192.168.10.0/24") {
+		t.Error("a build with no chooser moved off the server's first preference")
+	}
+}
+
+// A handshake within the grace window is reachable; one well outside it is not.
+func TestTheHandshakeGraceIsHonoured(t *testing.T) {
+	observed := wgplan.Observed{Peers: []wgplan.Peer{
+		{PublicKey: wgplan.Key(bobKey), HasHandshake: true, HandshakeAge: livenessGrace - time.Second},
+		{PublicKey: wgplan.Key(carolKey), HasHandshake: true, HandshakeAge: livenessGrace + time.Minute},
+	}}
+
+	if result, ok := probeFromHandshake(observed, bobKey); !ok || !result.Reachable {
+		t.Errorf("a fresh handshake was read as unreachable: %+v ok=%v", result, ok)
+	}
+	if result, ok := probeFromHandshake(observed, carolKey); !ok || result.Reachable {
+		t.Errorf("a stale handshake was read as reachable: %+v ok=%v", result, ok)
+	}
+	// A peer that is not on the interface is a different problem, already reported.
+	if _, ok := probeFromHandshake(observed, ourKey); ok {
+		t.Error("a peer that is not configured produced a verdict")
 	}
 }
