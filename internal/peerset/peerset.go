@@ -38,6 +38,15 @@ type Set struct {
 	// routeGroups is keyed by id, because a delta names groups to upsert and groups to
 	// withdraw rather than replacing the set.
 	routeGroups map[string]*meshpv1.RouteGroupAssignment
+
+	// advertised is what this device must forward, or nil when it has never been told.
+	//
+	// Present-and-empty is meaningful: it says this device carries nothing now, which a
+	// device that used to carry something has to hear. That is why the wire carries a
+	// message rather than a repeated field — proto3 cannot tell an empty one from an
+	// absent one, and here the difference is a gateway that keeps forwarding after it
+	// stopped being one.
+	advertised *meshpv1.AdvertisedRoutes
 }
 
 // New returns an empty set at version zero.
@@ -80,6 +89,9 @@ func (s *Set) RouteGroups() []*meshpv1.RouteGroupAssignment {
 	sort.Slice(out, func(i, j int) bool { return out[i].GetRouteGroupId() < out[j].GetRouteGroupId() })
 	return out
 }
+
+// Advertised is what this device must forward, or nil when it has never been told.
+func (s *Set) Advertised() *meshpv1.AdvertisedRoutes { return s.advertised }
 
 // Relays is the relay configuration last received, or nil.
 //
@@ -134,6 +146,7 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 		// groups means this device carries nothing — keeping the last set would leave it
 		// routing a prefix its network no longer asks it to.
 		s.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment)
+		s.advertised = nil
 	}
 
 	// Removals first. Within one delta a key that is both removed and upserted is a
@@ -166,6 +179,9 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 	for _, group := range delta.GetRouteGroups() {
 		s.routeGroups[group.GetRouteGroupId()] = proto.CloneOf(group)
 	}
+	if delta.GetAdvertised() != nil {
+		s.advertised = proto.CloneOf(delta.GetAdvertised())
+	}
 	s.version = delta.GetToVersion()
 }
 
@@ -192,6 +208,9 @@ func (s *Set) Clone() *Set {
 	out.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment, len(s.routeGroups))
 	for id, group := range s.routeGroups {
 		out.routeGroups[id] = proto.CloneOf(group)
+	}
+	if s.advertised != nil {
+		out.advertised = proto.CloneOf(s.advertised)
 	}
 	return out
 }
@@ -253,6 +272,9 @@ func (s *Set) Equal(other *Set) bool {
 		return false
 	}
 	if !proto.Equal(s.filter, other.filter) {
+		return false
+	}
+	if !proto.Equal(s.advertised, other.advertised) {
 		return false
 	}
 	if len(s.routeGroups) != len(other.routeGroups) {

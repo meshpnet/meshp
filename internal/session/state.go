@@ -164,12 +164,13 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 
 	// And the route groups, for the same reason: a snapshot is the whole world, so an agent
 	// reconnecting would otherwise carry no prefixes until one changed.
-	assignments, withdrawn, err := b.routeGroupsFor(ctx, membership)
+	assignments, withdrawn, advertised, err := b.routeGroupsFor(ctx, membership)
 	if err != nil {
 		return nil, err
 	}
 	delta.RouteGroups = assignments
 	delta.RemovedRouteGroupIds = withdrawn
+	delta.Advertised = advertised
 	return delta, nil
 }
 
@@ -253,12 +254,13 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// Only when they changed. Recomputing on every delta would resend the whole
 		// assignment set for an unrelated peer change, and an agent diffing it would
 		// reinstall routes it already has.
-		assignments, withdrawn, err := b.routeGroupsFor(ctx, membership)
+		assignments, withdrawn, advertised, err := b.routeGroupsFor(ctx, membership)
 		if err != nil {
 			return nil, err
 		}
 		delta.RouteGroups = assignments
 		delta.RemovedRouteGroupIds = withdrawn
+		delta.Advertised = advertised
 	}
 
 	if policyChanged {

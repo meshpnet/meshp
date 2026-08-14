@@ -662,3 +662,82 @@ func TestRouteGroupsCountForEqualityAndAreCloned(t *testing.T) {
 		t.Error("editing the clone changed the original")
 	}
 }
+
+// Present-and-empty says "you carry nothing now", which a device that used to carry
+// something has to hear. A snapshot clears it for the same reason it clears everything
+// else: a reconnect is delivered as a snapshot.
+func TestAdvertisedRoutesAreFoldedAndCleared(t *testing.T) {
+	s := New()
+	if s.Advertised() != nil {
+		t.Fatal("a fresh set already claims to carry something")
+	}
+
+	first := snapshot(1)
+	first.Advertised = &meshpv1.AdvertisedRoutes{Groups: []*meshpv1.AdvertisedRoutes_Group{
+		{RouteGroupId: "g1", Prefixes: []string{"192.168.10.0/24"}},
+	}}
+	s.Apply(first)
+	if len(s.Advertised().GetGroups()) != 1 {
+		t.Fatalf("the advertisement was not kept: %+v", s.Advertised())
+	}
+
+	// Absent in a delta means unchanged.
+	s.Apply(delta(1, 2, []*meshpv1.Peer{peer("a", "100.90.0.1")}, nil))
+	if len(s.Advertised().GetGroups()) != 1 {
+		t.Errorf("an unrelated delta changed what this device carries")
+	}
+
+	// Present-and-empty means it stopped.
+	stop := delta(2, 3, nil, nil)
+	stop.Advertised = &meshpv1.AdvertisedRoutes{}
+	s.Apply(stop)
+	if s.Advertised() == nil {
+		t.Fatal("an explicit stop was read as no news")
+	}
+	if len(s.Advertised().GetGroups()) != 0 {
+		t.Errorf("it is still carrying %+v", s.Advertised().GetGroups())
+	}
+
+	// And a snapshot clears it: a device that reconnects must not resume forwarding for a
+	// network that no longer asks it to.
+	s.Apply(snapshot(4))
+	if s.Advertised() != nil {
+		t.Errorf("a snapshot left %+v behind", s.Advertised())
+	}
+}
+
+// What a device forwards is desired state like everything else, so it counts for equality
+// and Clone must copy it.
+func TestAdvertisedRoutesCountForEqualityAndAreCloned(t *testing.T) {
+	build := func(prefix string) *Set {
+		s := New()
+		d := snapshot(1)
+		if prefix != "" {
+			d.Advertised = &meshpv1.AdvertisedRoutes{Groups: []*meshpv1.AdvertisedRoutes_Group{
+				{RouteGroupId: "g1", Prefixes: []string{prefix}},
+			}}
+		}
+		s.Apply(d)
+		return s
+	}
+
+	if !build("192.168.10.0/24").Equal(build("192.168.10.0/24")) {
+		t.Error("identical sets compared unequal")
+	}
+	if build("192.168.10.0/24").Equal(build("192.168.20.0/24")) {
+		t.Error("sets carrying different prefixes compared equal")
+	}
+	if build("192.168.10.0/24").Equal(build("")) {
+		t.Error("a forwarding device compared equal to one that carries nothing")
+	}
+
+	original := build("192.168.10.0/24")
+	clone := original.Clone()
+	if len(clone.Advertised().GetGroups()) != 1 {
+		t.Fatal("the clone lost what the device carries")
+	}
+	clone.advertised.Groups[0].Prefixes[0] = "tampered"
+	if original.Advertised().GetGroups()[0].GetPrefixes()[0] != "192.168.10.0/24" {
+		t.Error("editing the clone changed the original")
+	}
+}

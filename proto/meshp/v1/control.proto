@@ -123,6 +123,36 @@ message StateDelta {
   repeated string removed_route_group_ids = 8;
   RelayConfig relays = 9;
   TunnelConfig tunnel = 10;
+
+  // What this device has been made responsible for carrying into the network it
+  // sits in. Present only when changed; an empty groups list inside a present
+  // message means this device carries nothing, which is different from absent.
+  AdvertisedRoutes advertised = 11;
+}
+
+// AdvertisedRoutes is the advertiser's own half of a route group.
+//
+// Separate from RouteGroupAssignment because the two say opposite things to
+// opposite devices: an assignment tells a device where to send traffic for a
+// prefix, and this tells the device on the far end to forward it. A device is
+// never sent an assignment for a group it advertises — it would be routing its
+// own LAN into a tunnel that comes back out of the same machine — so the two are
+// never both present for the same group.
+message AdvertisedRoutes {
+  message Group {
+    string route_group_id = 1;
+    string name = 2;
+
+    // The prefixes to forward into. For an egress group this is the default
+    // route, and forwarding it means being somebody's way out to the internet.
+    repeated string prefixes = 3;
+
+    // Source forwarded traffic from this address rather than the interface's,
+    // when the group has one. Customers who allowlist an outbound IP with a bank
+    // or a vendor depend on it surviving a failover.
+    string stable_egress_ip = 4;
+  }
+  repeated Group groups = 1;
 }
 
 message StateAck {
