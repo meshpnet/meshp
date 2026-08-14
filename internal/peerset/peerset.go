@@ -34,11 +34,18 @@ type Set struct {
 	tunnel  *meshpv1.TunnelConfig
 	relays  *meshpv1.RelayConfig
 	filter  *meshpv1.PacketFilter
+
+	// routeGroups is keyed by id, because a delta names groups to upsert and groups to
+	// withdraw rather than replacing the set.
+	routeGroups map[string]*meshpv1.RouteGroupAssignment
 }
 
 // New returns an empty set at version zero.
 func New() *Set {
-	return &Set{peers: make(map[string]*meshpv1.Peer)}
+	return &Set{
+		peers:       make(map[string]*meshpv1.Peer),
+		routeGroups: make(map[string]*meshpv1.RouteGroupAssignment),
+	}
 }
 
 // Version is the state version this set reflects.
@@ -60,6 +67,19 @@ func (s *Set) Tunnel() *meshpv1.TunnelConfig { return s.tunnel }
 // a policy, so everything is permitted, while an empty filter with default_deny set means
 // a policy exists and permits nothing.
 func (s *Set) Filter() *meshpv1.PacketFilter { return s.filter }
+
+// RouteGroups are the carried prefixes this device has been assigned, ordered by id.
+//
+// Sorted, so two sets with the same contents render identically and a reconciler comparing
+// them does not mistake map order for a change.
+func (s *Set) RouteGroups() []*meshpv1.RouteGroupAssignment {
+	out := make([]*meshpv1.RouteGroupAssignment, 0, len(s.routeGroups))
+	for _, g := range s.routeGroups {
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].GetRouteGroupId() < out[j].GetRouteGroupId() })
+	return out
+}
 
 // Relays is the relay configuration last received, or nil.
 //
@@ -110,6 +130,10 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 		// an agent that kept the last filter it saw would go on denying traffic its network
 		// no longer denies, with nothing to say why.
 		s.filter = nil
+		// And the assignments. A snapshot describes the whole world, so one naming no route
+		// groups means this device carries nothing — keeping the last set would leave it
+		// routing a prefix its network no longer asks it to.
+		s.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment)
 	}
 
 	// Removals first. Within one delta a key that is both removed and upserted is a
@@ -131,6 +155,16 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 	}
 	if delta.GetFilter() != nil {
 		s.filter = proto.CloneOf(delta.GetFilter())
+	}
+
+	// Withdrawals first, so a group both withdrawn and reassigned in one delta ends up
+	// assigned — the same rule the peer list uses, and for the same reason: the upsert is
+	// the newer fact.
+	for _, id := range delta.GetRemovedRouteGroupIds() {
+		delete(s.routeGroups, id)
+	}
+	for _, group := range delta.GetRouteGroups() {
+		s.routeGroups[group.GetRouteGroupId()] = proto.CloneOf(group)
 	}
 	s.version = delta.GetToVersion()
 }
@@ -154,6 +188,10 @@ func (s *Set) Clone() *Set {
 	}
 	if s.filter != nil {
 		out.filter = proto.CloneOf(s.filter)
+	}
+	out.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment, len(s.routeGroups))
+	for id, group := range s.routeGroups {
+		out.routeGroups[id] = proto.CloneOf(group)
 	}
 	return out
 }
@@ -216,6 +254,15 @@ func (s *Set) Equal(other *Set) bool {
 	}
 	if !proto.Equal(s.filter, other.filter) {
 		return false
+	}
+	if len(s.routeGroups) != len(other.routeGroups) {
+		return false
+	}
+	for id, mine := range s.routeGroups {
+		theirs, ok := other.routeGroups[id]
+		if !ok || !proto.Equal(mine, theirs) {
+			return false
+		}
 	}
 	for key, mine := range s.peers {
 		theirs, ok := other.peers[key]
