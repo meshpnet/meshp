@@ -103,3 +103,39 @@ ORDER BY a.route_group_id, a.priority, a.id;
 -- name: DeleteRouteAdvertiser :execrows
 DELETE FROM route_advertisers
 WHERE route_group_id = $1 AND membership_id = $2;
+
+-- name: GetAdvertiserHealth :one
+-- What the control plane last concluded about an advertiser, if anything.
+SELECT advertiser_id, state, consecutive_ok, consecutive_fail, consecutive_partial,
+       last_improved_at, last_checked_at
+FROM advertiser_health
+WHERE advertiser_id = $1;
+
+-- name: UpsertAdvertiserHealth :exec
+-- Store what the monitor concluded.
+--
+-- The whole snapshot rather than the state alone: the counters are what make the next
+-- observation mean anything, and a state persisted without them would restart every
+-- hysteresis window on each control-plane restart — turning a policy designed to resist
+-- flapping into one that flaps on deploys.
+INSERT INTO advertiser_health (
+    advertiser_id, state, consecutive_ok, consecutive_fail, consecutive_partial,
+    last_improved_at, last_checked_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (advertiser_id) DO UPDATE SET
+    state = EXCLUDED.state,
+    consecutive_ok = EXCLUDED.consecutive_ok,
+    consecutive_fail = EXCLUDED.consecutive_fail,
+    consecutive_partial = EXCLUDED.consecutive_partial,
+    last_improved_at = EXCLUDED.last_improved_at,
+    last_checked_at = EXCLUDED.last_checked_at;
+
+-- name: GetAdvertiserForReport :one
+-- The advertiser a device claims to be using, scoped to the network the session belongs to.
+--
+-- Scoped, because the id arrives from a device: without this a device in one network could
+-- report health for an advertiser in another, and steer a network it cannot see.
+SELECT a.id, a.route_group_id, g.network_id
+FROM route_advertisers a
+JOIN route_groups g ON g.id = a.route_group_id
+WHERE a.id = $1 AND g.network_id = $2;

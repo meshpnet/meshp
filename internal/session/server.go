@@ -350,6 +350,9 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn, sess *Sessi
 		case *meshpv1.ClientMessage_StateAck:
 			s.handleAck(ctx, sess, payload.StateAck)
 
+		case *meshpv1.ClientMessage_ReachabilityReport:
+			s.handleReachabilityReport(ctx, sess, payload.ReachabilityReport)
+
 		case *meshpv1.ClientMessage_RelayTokenRequest:
 			s.handleRelayTokenRequest(ctx, sess)
 
