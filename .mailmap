@@ -1,0 +1,11 @@
+# Canonical identities, so `git shortlog -sne` and every tool that respects a mailmap
+# report one author rather than one per address.
+#
+# A mailmap rather than a history rewrite. Rewriting would mean force-pushing main, which
+# the repository ruleset refuses on purpose, and would change every commit id in every
+# clone — a large amount of damage to tidy up attribution.
+#
+# The canonical address is the one in the DCO sign-off on every commit, which is the
+# identity of record for a contribution. The other is GitHub's per-account noreply address,
+# which is what a squash merge performed on github.com attributes the result to.
+Aswin Alexander Sam <aswinsam@gmail.com> <62598639+aswinsam@users.noreply.github.com>
