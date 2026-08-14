@@ -261,6 +261,34 @@ jobs:
             || { echo "the end-to-end run never reported a kernel tunnel"; exit 1; }
           echo "the tunnel came up and was asserted"
 
+      # Two agents at once, which the enrolment script cannot do: every device is handed
+      # the interface name meshp0, so two daemons on one host fight over it. A namespace
+      # each is what makes a real handshake — and therefore a real reachability report —
+      # possible to assert.
+      - name: two agents in network namespaces, reporting to the control plane
+        run: |
+          set -o pipefail
+          {
+            echo "### Two agents, two namespaces"
+            echo
+            echo '```'
+            sudo -E env "PATH=$PATH" ./scripts/e2e-failover.sh "$MESHP_TEST_DATABASE_URL" 2>&1 | tee failover.log
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: the namespace assertions were not skipped
+        run: |
+          if grep -q "^skipped:" failover.log; then
+            echo "the namespace run skipped, so it gates nothing"
+            sed -n 's/^skipped: /reason: /p' failover.log
+            exit 1
+          fi
+          # The one assertion this run exists for. A device with no chooser routes through
+          # the server's first candidate and passes every other check in that script.
+          grep -q "recorded the client's verdict" failover.log \
+            || { echo "no reachability report reached the control plane"; exit 1; }
+          echo "a verdict from a live client reached the control plane"
+
   migrations-immutable:
     name: migrations are append only
     runs-on: ubuntu-latest
