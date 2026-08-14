@@ -447,6 +447,133 @@ if [ "$tunnel_possible" = "1" ]; then
   echo "  the kernel's traffic is leaving through the relay (${sent} packet(s))"
 
   # ---------------------------------------------------------------------------
+  # Route groups
+  #
+  # A customer LAN that lives on nobody's interface until an administrator says which device
+  # carries it. This is the delivery chain end to end: the admin API records an advertiser,
+  # selection turns that into an ordered candidate list per device, a state delta carries it,
+  # and this host's kernel ends up doing cryptokey routing for a prefix it had never heard of.
+  #
+  # Worth asserting here for the reason every other section of this file exists. Each piece
+  # has unit tests and the pieces were joined up by hand — and local failover shipped across
+  # two releases wired into nothing at all, which no test noticed, because every test that
+  # could have was a unit test on the mechanism rather than on the daemon.
+  #
+  # Two things are deliberately out of scope. Whether traffic then crosses into the LAN is
+  # proved against a real kernel in internal/nftables. Whether a device fails over to a
+  # second advertiser needs two live agents with their own interfaces, which means network
+  # namespaces this script does not build yet — both daemons here are handed the name meshp0
+  # and would fight over it.
+  echo "carrying a customer prefix"
+
+  CARRIED="192.168.${OCTET}.0/24"
+
+  # Which membership is the peer? The second daemon's own state file says.
+  PEER_MEMBERSHIP="$(sed -n 's/.*"membership_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR2/state.json" | head -1)"
+  [ -n "$PEER_MEMBERSHIP" ] || fail "could not read the peer's membership id"
+  OUR_MEMBERSHIP="$(sed -n 's/.*"membership_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR/state.json" | head -1)"
+  [ -n "$OUR_MEMBERSHIP" ] || fail "could not read this device's membership id"
+
+  # Waits until this device has applied the state a change produced.
+  #
+  # Scoped to this membership rather than to the network, because the second daemon is
+  # stopped and its applied version never moves again — a network-wide lag check would wait
+  # out its timeout on every call. And needed at all because the assertions below include
+  # ones about what is *not* on the interface: an absence checked before the agent has seen
+  # the change that would have put it there passes for the wrong reason.
+  await_applied() {
+    for _ in $(seq 1 25); do
+      if [ "$(psql "$DB_URL" -tAqc "
+            SELECT coalesce(max(n.state_version - ms.applied_version), -1)
+            FROM membership_state ms JOIN networks n ON n.id = ms.network_id
+            WHERE ms.membership_id = '${OUR_MEMBERSHIP}'")" = "0" ]; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  }
+
+  curl -fsS "${CURL_CA[@]}" -X POST \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"slug\":\"branch-lan\",\"name\":\"Branch LAN\",\"kind\":\"subnet\",\"prefixes\":[\"${CARRIED}\"]}" \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups" >"$WORK/routegroup.out" \
+    || { cat "$WORK/routegroup.out" >&2; fail "creating the route group failed"; }
+  grep -q '"slug":"branch-lan"' "$WORK/routegroup.out" \
+    || { cat "$WORK/routegroup.out" >&2; fail "the route group was not created"; }
+  echo "  route group branch-lan declares ${CARRIED}"
+
+  # A group nobody advertises is a prefix nobody carries, and it must reach no interface. A
+  # device that installed a route the moment a group existed would blackhole the customer's
+  # LAN into a tunnel with no other end.
+  await_applied || fail "the agent never applied the state containing an unadvertised group"
+  if wg show meshp0 allowed-ips 2>/dev/null | grep -qF "$CARRIED"; then
+    wg show meshp0 allowed-ips >&2
+    fail "a prefix nobody advertises was installed on the interface"
+  fi
+  echo "  and nothing carries it until someone advertises it"
+
+  curl -fsS "${CURL_CA[@]}" -X POST \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"membership_id\":\"${PEER_MEMBERSHIP}\",\"priority\":1}" \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups/branch-lan/advertisers" >"$WORK/advertise.out" \
+    || { cat "$WORK/advertise.out" >&2; fail "recording the advertiser failed"; }
+  grep -q '"status":"advertising"' "$WORK/advertise.out" \
+    || { cat "$WORK/advertise.out" >&2; fail "the advertiser was not recorded"; }
+
+  # Cryptokey routing first. WireGuard refuses a packet for a prefix that is not in some
+  # peer's allowed IPs whatever the routing table says, so this is the half that decides
+  # whether the customer's LAN is reachable at all.
+  carried=0
+  for _ in $(seq 1 25); do
+    if wg show meshp0 allowed-ips 2>/dev/null | grep -qF "$CARRIED"; then carried=1; break; fi
+    sleep 1
+  done
+  if [ "$carried" != "1" ]; then
+    echo "--- wg ---" >&2; wg show meshp0 allowed-ips >&2
+    echo "--- agent log ---" >&2; grep -iE "route|group|advertis|carr" "$AGENT_LOG" | tail -20 >&2
+    fail "the carried prefix never reached the interface"
+  fi
+
+  # Against the advertiser specifically, and not merely against some peer. A prefix on the
+  # wrong peer hands the customer's traffic to a device that cannot deliver it, and every
+  # assertion above would still pass.
+  wg show meshp0 allowed-ips | grep -F "$CARRIED" | grep -qE "100\.90\.${OCTET}\.2/32" \
+    || { wg show meshp0 allowed-ips >&2; fail "the carried prefix is held by the wrong peer"; }
+  echo "  ${CARRIED} is carried by the advertising peer"
+
+  # And a system route, or nothing on this host hands those packets to the tunnel in the
+  # first place. Both halves come from the same change and both are asserted: allowed IPs
+  # without a route is a device that would accept the customer's LAN and never reach it.
+  ip route show dev meshp0 | grep -qF "$CARRIED" \
+    || { ip route show dev meshp0 >&2; fail "no system route for the carried prefix"; }
+  echo "  and routed through the interface"
+
+  # Withdrawing takes it away again (Invariant 20). A device that kept carrying a prefix
+  # after its advertiser was withdrawn would hold the customer's LAN in a tunnel the control
+  # plane has already stopped pointing anywhere.
+  curl -fsS "${CURL_CA[@]}" -X DELETE \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups/branch-lan/advertisers/${PEER_MEMBERSHIP}" \
+    >"$WORK/withdraw.out" \
+    || { cat "$WORK/withdraw.out" >&2; fail "withdrawing the advertiser failed"; }
+
+  gone_prefix=0
+  for _ in $(seq 1 25); do
+    if ! wg show meshp0 allowed-ips 2>/dev/null | grep -qF "$CARRIED"; then gone_prefix=1; break; fi
+    sleep 1
+  done
+  if [ "$gone_prefix" != "1" ]; then
+    echo "--- wg ---" >&2; wg show meshp0 allowed-ips >&2
+    fail "the prefix survived its advertiser being withdrawn"
+  fi
+  ip route show dev meshp0 | grep -qF "$CARRIED" \
+    && { ip route show dev meshp0 >&2; fail "the route survived its advertiser being withdrawn"; }
+  echo "  withdrawing the advertiser removed both the prefix and its route"
+
+  # ---------------------------------------------------------------------------
   # Revocation
   #
   # Everything above describes a device that is in the network. This is the other half:
@@ -455,11 +582,8 @@ if [ "$tunnel_possible" = "1" ]; then
   # the first daemon while the second one is not even running.
   echo "revoking the second device"
 
-  # Which membership is the peer? The second daemon's own state file says, which is also a
-  # check that the listing endpoint agrees with it.
-  PEER_MEMBERSHIP="$(sed -n 's/.*"membership_id": *"\([^"]*\)".*/\1/p' "$STATE_DIR2/state.json" | head -1)"
-  [ -n "$PEER_MEMBERSHIP" ] || fail "could not read the peer's membership id"
-
+  # PEER_MEMBERSHIP was read from the second daemon's own state file above. That the listing
+  # endpoint agrees with it is a check in its own right.
   curl -fsS "${CURL_CA[@]}" -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     "${BASE}/api/v1/networks/${NETWORK_ID}/devices" >"$WORK/devices.out" \
     || fail "could not list the network's devices"
