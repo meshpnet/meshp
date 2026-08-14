@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/meshpnet/meshp/internal/httpx"
+	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/store"
 )
 
@@ -112,7 +113,9 @@ func (s *Server) handleDeleteRouteGroup(w http.ResponseWriter, r *http.Request) 
 		s.respondError(w, r, err)
 		return
 	}
-	s.log.Info("route group deleted", "network_id", networkID, "slug", slug)
+	// Same reasoning as handleAdvertise: this slug names a group to look up rather than
+	// one to create, so nothing has checked its shape.
+	s.log.Info("route group deleted", "network_id", networkID, "slug", logx.Safe(slug))
 	s.tellNetwork(networkID)
 	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -161,8 +164,12 @@ func (s *Server) handleAdvertise(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, r, err)
 		return
 	}
+	// Through logx.Safe: the slug comes from the URL path, and an unvalidated one reaching
+	// a log line lets whoever chose it write their own entries. Validated slugs elsewhere
+	// in this file cannot contain a newline; this one has not been through the store's
+	// pattern, because looking a group up does not require it to be well formed.
 	s.log.Info("advertiser recorded",
-		"network_id", networkID, "slug", slug, "membership_id", membershipID,
+		"network_id", networkID, "slug", logx.Safe(slug), "membership_id", membershipID,
 		"priority", body.Priority)
 	s.tellNetwork(networkID)
 	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]string{"status": "advertising"})
