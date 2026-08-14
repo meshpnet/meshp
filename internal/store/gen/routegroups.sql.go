@@ -203,6 +203,68 @@ func (q *Queries) DeleteRouteGroup(ctx context.Context, arg DeleteRouteGroupPara
 	return result.RowsAffected(), nil
 }
 
+const getAdvertiserForReport = `-- name: GetAdvertiserForReport :one
+SELECT a.id, a.route_group_id, g.network_id
+FROM route_advertisers a
+JOIN route_groups g ON g.id = a.route_group_id
+WHERE a.id = $1 AND g.network_id = $2
+`
+
+type GetAdvertiserForReportParams struct {
+	ID        uuid.UUID
+	NetworkID uuid.UUID
+}
+
+type GetAdvertiserForReportRow struct {
+	ID           uuid.UUID
+	RouteGroupID uuid.UUID
+	NetworkID    uuid.UUID
+}
+
+// The advertiser a device claims to be using, scoped to the network the session belongs to.
+//
+// Scoped, because the id arrives from a device: without this a device in one network could
+// report health for an advertiser in another, and steer a network it cannot see.
+func (q *Queries) GetAdvertiserForReport(ctx context.Context, arg GetAdvertiserForReportParams) (GetAdvertiserForReportRow, error) {
+	row := q.db.QueryRow(ctx, getAdvertiserForReport, arg.ID, arg.NetworkID)
+	var i GetAdvertiserForReportRow
+	err := row.Scan(&i.ID, &i.RouteGroupID, &i.NetworkID)
+	return i, err
+}
+
+const getAdvertiserHealth = `-- name: GetAdvertiserHealth :one
+SELECT advertiser_id, state, consecutive_ok, consecutive_fail, consecutive_partial,
+       last_improved_at, last_checked_at
+FROM advertiser_health
+WHERE advertiser_id = $1
+`
+
+type GetAdvertiserHealthRow struct {
+	AdvertiserID       uuid.UUID
+	State              string
+	ConsecutiveOk      int32
+	ConsecutiveFail    int32
+	ConsecutivePartial int32
+	LastImprovedAt     *time.Time
+	LastCheckedAt      *time.Time
+}
+
+// What the control plane last concluded about an advertiser, if anything.
+func (q *Queries) GetAdvertiserHealth(ctx context.Context, advertiserID uuid.UUID) (GetAdvertiserHealthRow, error) {
+	row := q.db.QueryRow(ctx, getAdvertiserHealth, advertiserID)
+	var i GetAdvertiserHealthRow
+	err := row.Scan(
+		&i.AdvertiserID,
+		&i.State,
+		&i.ConsecutiveOk,
+		&i.ConsecutiveFail,
+		&i.ConsecutivePartial,
+		&i.LastImprovedAt,
+		&i.LastCheckedAt,
+	)
+	return i, err
+}
+
 const getRouteGroupBySlug = `-- name: GetRouteGroupBySlug :one
 SELECT id, network_id, slug, name, kind, selection_mode,
        auto_failback, failback_delay_seconds, stable_egress_ip, created_at
@@ -441,6 +503,49 @@ func (q *Queries) ListRouteGroups(ctx context.Context, networkID uuid.UUID) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertAdvertiserHealth = `-- name: UpsertAdvertiserHealth :exec
+INSERT INTO advertiser_health (
+    advertiser_id, state, consecutive_ok, consecutive_fail, consecutive_partial,
+    last_improved_at, last_checked_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (advertiser_id) DO UPDATE SET
+    state = EXCLUDED.state,
+    consecutive_ok = EXCLUDED.consecutive_ok,
+    consecutive_fail = EXCLUDED.consecutive_fail,
+    consecutive_partial = EXCLUDED.consecutive_partial,
+    last_improved_at = EXCLUDED.last_improved_at,
+    last_checked_at = EXCLUDED.last_checked_at
+`
+
+type UpsertAdvertiserHealthParams struct {
+	AdvertiserID       uuid.UUID
+	State              string
+	ConsecutiveOk      int32
+	ConsecutiveFail    int32
+	ConsecutivePartial int32
+	LastImprovedAt     *time.Time
+	LastCheckedAt      *time.Time
+}
+
+// Store what the monitor concluded.
+//
+// The whole snapshot rather than the state alone: the counters are what make the next
+// observation mean anything, and a state persisted without them would restart every
+// hysteresis window on each control-plane restart — turning a policy designed to resist
+// flapping into one that flaps on deploys.
+func (q *Queries) UpsertAdvertiserHealth(ctx context.Context, arg UpsertAdvertiserHealthParams) error {
+	_, err := q.db.Exec(ctx, upsertAdvertiserHealth,
+		arg.AdvertiserID,
+		arg.State,
+		arg.ConsecutiveOk,
+		arg.ConsecutiveFail,
+		arg.ConsecutivePartial,
+		arg.LastImprovedAt,
+		arg.LastCheckedAt,
+	)
+	return err
 }
 
 const upsertRouteAdvertiser = `-- name: UpsertRouteAdvertiser :one
