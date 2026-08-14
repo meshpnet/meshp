@@ -29,3 +29,21 @@ func (f *Filter) Apply(ctx context.Context, iface string, filter *meshpv1.Packet
 	}
 	return Apply(ctx, script)
 }
+
+// ApplyForward makes this host carry what it has been assigned, or stop carrying.
+//
+// Forwarding is enabled before the rules rather than after: rules that permit forwarding on
+// a host whose kernel will not forward are correct and do nothing, and the gap between the
+// two would be a window where a gateway looks configured and drops everything.
+func (f *Filter) ApplyForward(ctx context.Context, iface string, groups []*meshpv1.AdvertisedRoutes_Group) error {
+	if len(groups) > 0 {
+		if _, err := EnableForwarding(); err != nil {
+			return err
+		}
+	}
+	script, err := RenderForward(iface, groups)
+	if err != nil {
+		return err
+	}
+	return Apply(ctx, script)
+}

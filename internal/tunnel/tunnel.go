@@ -98,6 +98,11 @@ type Reconciler struct {
 	// counters an operator is reading.
 	lastFilter *meshpv1.PacketFilter
 
+	// lastAdvertised is the same idea for forwarding, and matters more: reloading the NAT
+	// table flushes its conntrack-independent counters and, on some kernels, disturbs
+	// in-flight masqueraded flows. An unchanged assignment is left alone.
+	lastAdvertised *meshpv1.AdvertisedRoutes
+
 	mu       sync.Mutex
 	kind     wglink.Kind
 	up       bool
@@ -114,6 +119,11 @@ type Filter interface {
 	// Apply makes the host enforce this filter. A nil filter means no policy, and must
 	// remove whatever was enforced before rather than leaving it in place.
 	Apply(ctx context.Context, iface string, filter *meshpv1.PacketFilter) error
+
+	// ApplyForward makes the host carry what it advertises, or stop carrying. An empty
+	// list means stop: a device that has been withdrawn must not go on being a gateway
+	// nobody knows about.
+	ApplyForward(ctx context.Context, iface string, groups []*meshpv1.AdvertisedRoutes_Group) error
 }
 
 // New returns a Reconciler for one membership. relay and filter may be nil.
@@ -243,15 +253,24 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 	r.port = port
 	r.mu.Unlock()
 
+	// Named separately, because they are different failures with different fixes: a group
+	// this device cannot route is a configuration problem, and a host that cannot forward is
+	// a capability problem. Reporting both as one component would send an operator to the
+	// wrong end of it.
+	var unapplied []string
 	if len(unhonoured) > 0 {
-		// Unapplied without an error: the interface converged, and what did not is named so
-		// the control plane can see this device is not carrying everything it was assigned.
-		// An error here would report the whole apply as failed and hide the part that worked.
 		r.log.Warn("some route groups are not being carried",
 			"interface", want.Name, "groups", len(unhonoured))
-		return []string{"route-groups"}, nil
+		unapplied = append(unapplied, "route-groups")
 	}
-	return nil, nil
+	if failed := r.applyForwarding(ctx, want.Name, state.Advertised()); failed != nil {
+		unapplied = append(unapplied, failed...)
+	}
+
+	// Unapplied without an error: the interface converged, and what did not is named so the
+	// control plane can see this device is not where it says it is. An error here would
+	// report the whole apply as failed and hide the part that worked.
+	return unapplied, nil
 }
 
 // applyFilter enforces the policy, returning the components that did not apply.
@@ -293,17 +312,58 @@ func (r *Reconciler) applyFilter(ctx context.Context, iface string, want *meshpv
 	return nil
 }
 
+// applyForwarding makes this host carry what it advertises, or stop.
+//
+// Skipped when nothing changed, like the filter and for a sharper reason: rebuilding the NAT
+// table is not free for traffic already crossing it.
+//
+// A nil advertisement means the control plane has said nothing about forwarding — a network
+// with no route groups at all — and is left alone. An empty one means it has said this
+// device carries nothing, which must reach the kernel.
+func (r *Reconciler) applyForwarding(ctx context.Context, iface string, advertised *meshpv1.AdvertisedRoutes) []string {
+	if advertised == nil || r.filter == nil {
+		if advertised != nil && len(advertised.GetGroups()) > 0 {
+			r.log.Error("this device is meant to carry prefixes and cannot forward",
+				"hint", "forwarding needs nftables, which this host does not have")
+			return []string{"forwarding"}
+		}
+		return nil
+	}
+
+	if proto.Equal(r.lastAdvertised, advertised) {
+		return nil
+	}
+	if err := r.filter.ApplyForward(ctx, iface, advertised.GetGroups()); err != nil {
+		r.log.Error("could not carry the prefixes this device advertises",
+			"interface", iface, "error", err)
+		return []string{"forwarding"}
+	}
+
+	r.lastAdvertised = proto.CloneOf(advertised)
+	if n := len(advertised.GetGroups()); n > 0 {
+		r.log.Info("carrying prefixes for the network", "interface", iface, "groups", n)
+	} else {
+		r.log.Info("no longer carrying anything", "interface", iface)
+	}
+	return nil
+}
+
 // Teardown removes everything this membership installed (Invariant 20).
 func (r *Reconciler) Teardown() error {
 	name := r.membership.InterfaceName
 
-	// The policy first. A ruleset outliving the interface it names would go on matching
-	// nothing while an operator reads a table meshp installed and no longer maintains.
+	// The policy and the forwarding first. A ruleset outliving the interface it names would
+	// go on matching nothing while an operator reads a table meshp installed and no longer
+	// maintains — and forwarding rules that outlived it would leave the host a gateway for a
+	// network it has left.
 	if r.filter != nil {
 		if err := r.filter.Apply(context.Background(), name, nil); err != nil {
 			r.log.Warn("could not remove this network's policy", "interface", name, "error", err)
 		}
-		r.lastFilter = nil
+		if err := r.filter.ApplyForward(context.Background(), name, nil); err != nil {
+			r.log.Warn("could not stop carrying prefixes", "interface", name, "error", err)
+		}
+		r.lastFilter, r.lastAdvertised = nil, nil
 	}
 
 	observed, err := r.link.Observe(name)

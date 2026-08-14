@@ -251,3 +251,126 @@ func firstOr(lines []string) string {
 	}
 	return lines[0]
 }
+
+// ---------------------------------------------------------------------------
+// Forwarding
+
+func carried(prefixes ...string) []*meshpv1.AdvertisedRoutes_Group {
+	return []*meshpv1.AdvertisedRoutes_Group{{RouteGroupId: "g", Name: "branch", Prefixes: prefixes}}
+}
+
+func renderFwd(t *testing.T, groups []*meshpv1.AdvertisedRoutes_Group) string {
+	t.Helper()
+	script, err := RenderForward("meshp0", groups)
+	if err != nil {
+		t.Fatalf("RenderForward: %v", err)
+	}
+	return script
+}
+
+// Two things have to be true for a packet to cross, and both must be here: the forward
+// chain has to accept it, and the source has to be rewritten — a LAN device replying to
+// 100.90.0.2 has no route to it and never will.
+func TestForwardingAcceptsAndRewrites(t *testing.T) {
+	script := renderFwd(t, carried("192.168.10.0/24"))
+
+	if !strings.Contains(script, `forward iifname "meshp0" ip daddr 192.168.10.0/24 accept`) {
+		t.Errorf("nothing accepts traffic out of the tunnel:\n%s", script)
+	}
+	if !strings.Contains(script, `forward oifname "meshp0" ip saddr 192.168.10.0/24 accept`) {
+		t.Errorf("nothing accepts the LAN answering back:\n%s", script)
+	}
+	if !strings.Contains(script, `postrouting iifname "meshp0" ip daddr 192.168.10.0/24 masquerade`) {
+		t.Errorf("the source is not rewritten, so the LAN has no route back:\n%s", script)
+	}
+	if !strings.Contains(script, "ct state established,related accept") {
+		t.Errorf("without conntrack every forwarded connection establishes and hangs:\n%s", script)
+	}
+	// Its own table: a policy change must not disturb a gateway's forwarding.
+	if !strings.Contains(script, "inet meshp_fwd") {
+		t.Errorf("forwarding shares the policy table:\n%s", script)
+	}
+}
+
+// A customer who has allowlisted an outbound IP with a bank depends on it surviving a
+// failover, which masquerade cannot promise and snat can.
+func TestAStableEgressAddressIsUsedWhenGiven(t *testing.T) {
+	groups := carried("192.168.10.0/24")
+	groups[0].StableEgressIp = "203.0.113.7"
+
+	script := renderFwd(t, groups)
+	if !strings.Contains(script, "snat to 203.0.113.7") {
+		t.Errorf("the stable egress address was not used:\n%s", script)
+	}
+	if strings.Contains(script, "masquerade") {
+		t.Errorf("it masquerades anyway, so the allowlisted address would change:\n%s", script)
+	}
+}
+
+// A device that has stopped carrying must stop forwarding, or it stays a gateway nobody
+// knows about.
+func TestNoGroupsRemovesTheTable(t *testing.T) {
+	script := renderFwd(t, nil)
+	if !strings.Contains(script, "delete table inet meshp_fwd") {
+		t.Fatalf("nothing removes the forwarding table:\n%s", script)
+	}
+	if strings.Contains(script, "masquerade") || strings.Contains(script, "add chain") {
+		t.Fatalf("it still installs forwarding rules:\n%s", script)
+	}
+}
+
+// An egress advertiser forwards anything out of the tunnel — that is what being somebody's
+// way to the internet means — but a 0.0.0.0/0 daddr match would also catch traffic to this
+// host itself, so it is a catch-all on the interface instead.
+func TestEgressForwardsEverythingOutOfTheTunnel(t *testing.T) {
+	script := renderFwd(t, carried("0.0.0.0/0", "::/0"))
+
+	if !strings.Contains(script, `forward iifname "meshp0" accept`) {
+		t.Errorf("an egress advertiser forwards nothing:\n%s", script)
+	}
+	if !strings.Contains(script, `postrouting iifname "meshp0" oifname != "meshp0" masquerade`) {
+		t.Errorf("egress traffic is not masqueraded:\n%s", script)
+	}
+	if strings.Contains(script, "daddr 0.0.0.0/0") {
+		t.Errorf("a default route was matched as a prefix, which also catches this host:\n%s", script)
+	}
+}
+
+// A chain that somehow ends up empty must not cut this host off from forwarding it was
+// already doing for something else — Docker, another VPN, anything.
+func TestForwardingFailsOpenForTheHost(t *testing.T) {
+	script := renderFwd(t, carried("192.168.10.0/24"))
+	if strings.Contains(script, "policy drop") {
+		t.Errorf("the forward chain defaults to drop:\n%s", script)
+	}
+}
+
+func TestForwardingRefusesWhatItCannotParse(t *testing.T) {
+	if _, err := RenderForward("meshp0", carried("not-a-prefix")); err == nil {
+		t.Error("rendered forwarding for a prefix it could not parse")
+	}
+	if _, err := RenderForward("meshp0; flush ruleset", carried("192.168.10.0/24")); err == nil {
+		t.Error("accepted an interface name that is not one")
+	}
+	// An unparseable stable address falls back to masquerade rather than reaching the
+	// script: forwarding with the wrong source is better than a ruleset that will not load.
+	groups := carried("192.168.10.0/24")
+	groups[0].StableEgressIp = "; drop"
+	script, err := RenderForward("meshp0", groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "masquerade") || strings.Contains(script, "drop") {
+		t.Errorf("an unparseable egress address reached the script:\n%s", script)
+	}
+}
+
+func TestForwardRenderingIsDeterministic(t *testing.T) {
+	groups := carried("192.168.20.0/24", "192.168.10.0/24", "fd00::/64")
+	first := renderFwd(t, groups)
+	for range 20 {
+		if got := renderFwd(t, groups); got != first {
+			t.Fatalf("two renderings differ:\n%s\n---\n%s", first, got)
+		}
+	}
+}
