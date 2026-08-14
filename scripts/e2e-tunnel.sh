@@ -16,7 +16,8 @@ E2E_SCRIPT="${1:-./scripts/e2e-enrol.sh}"
 
 NETWORK="meshp-e2e-$$"
 PG="meshp-e2e-pg-$$"
-GO_IMAGE="${GO_IMAGE:-golang:1.25}"
+# The same toolchain CI and the shipped image use, read from the one file that holds it.
+GO_IMAGE="${GO_IMAGE:-golang:$(cat "$(dirname "$0")/../.go-version")}"
 
 cleanup() {
   docker rm -f "$PG" >/dev/null 2>&1 || true

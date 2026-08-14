@@ -1,6 +1,11 @@
 # Builds every meshp server-side binary. Clients ship as signed native
 # packages, not containers.
-FROM golang:1.25-alpine AS build
+# Pinned rather than floating on a major version, and the default is kept in step with
+# .go-version by `make image`, which passes it. A floating tag means the binary that ships
+# is built by whatever toolchain the registry resolved that day — which is not the one CI
+# tested with, and not reproducible from the same commit a month later.
+ARG GO_VERSION=1.26.6
+FROM golang:${GO_VERSION}-alpine AS build
 
 WORKDIR /src
 

@@ -21,8 +21,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GO_VERSION: "1.25.13"
+# The toolchain version lives in .go-version, which every setup-go step here reads and
+# which the Makefile hands to the Dockerfile. One file rather than an env var per workflow:
+# these three workflows and three more places outside them used to carry it separately, and
+# four of the six floated on a major version — which is how a stdlib CVE stayed shipped
+# after the fix had already landed in CI.
 
 jobs:
   lint:
@@ -33,7 +36,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
       - run: make lint
 
@@ -50,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
 
       - run: make build
@@ -92,7 +95,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
 
       # Go cross-compiles pure Go cleanly, so one Linux runner catches almost
@@ -124,7 +127,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
 
       - name: lint
@@ -208,7 +211,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
 
       # The store package's interesting behaviour is behaviour PostgreSQL
@@ -330,7 +333,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
       # Invariant 12. The commercial layer talks to this over HTTP and is never
       # linked into it, so self-hosters run exactly the binary we run.
@@ -344,7 +347,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
       - run: make vuln
 
@@ -356,7 +359,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
       # Seeds only, which is fast. Extended fuzzing runs nightly in fuzz.yml, and
       # any input it finds is committed here as a seed so it can never regress.
@@ -459,7 +462,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
           cache: true
 
       - name: the kernel here can do WireGuard
