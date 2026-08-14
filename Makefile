@@ -262,6 +262,13 @@ e2e-tunnel: ## Run the end-to-end enrolment with real tunnels, in a privileged L
 	@# is the only way to exercise them from here.
 	@./scripts/e2e-tunnel.sh
 
+.PHONY: e2e-failover
+e2e-failover: ## Run two agents in network namespaces, in a privileged Linux container
+	@# The one topology the enrolment script cannot build. Every device is handed the
+	@# interface name meshp0, so two daemons on one host fight over it — which is why
+	@# anything needing two devices alive at once has a namespace each.
+	@./scripts/e2e-tunnel.sh ./scripts/e2e-failover.sh
+
 .PHONY: dataplane
 dataplane: ## Run the data-plane tests against real interfaces, in a privileged Linux container
 	@# Privileged and Linux, because there is no way to create a WireGuard interface
