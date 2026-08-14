@@ -79,7 +79,7 @@ func (x RouteGroupAssignment_Mode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RouteGroupAssignment_Mode.Descriptor instead.
 func (RouteGroupAssignment_Mode) EnumDescriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{14, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{15, 0}
 }
 
 type RouteCandidate_Health int32
@@ -137,7 +137,7 @@ func (x RouteCandidate_Health) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RouteCandidate_Health.Descriptor instead.
 func (RouteCandidate_Health) EnumDescriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{15, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{16, 0}
 }
 
 type IceCandidate_Kind int32
@@ -192,7 +192,7 @@ func (x IceCandidate_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use IceCandidate_Kind.Descriptor instead.
 func (IceCandidate_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{21, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{22, 0}
 }
 
 type PathReport_PeerPath_Kind int32
@@ -244,7 +244,7 @@ func (x PathReport_PeerPath_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PathReport_PeerPath_Kind.Descriptor instead.
 func (PathReport_PeerPath_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{23, 0, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{24, 0, 0}
 }
 
 type ClientMessage struct {
@@ -871,8 +871,12 @@ type StateDelta struct {
 	RemovedRouteGroupIds []string                `protobuf:"bytes,8,rep,name=removed_route_group_ids,json=removedRouteGroupIds,proto3" json:"removed_route_group_ids,omitempty"`
 	Relays               *RelayConfig            `protobuf:"bytes,9,opt,name=relays,proto3" json:"relays,omitempty"`
 	Tunnel               *TunnelConfig           `protobuf:"bytes,10,opt,name=tunnel,proto3" json:"tunnel,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// What this device has been made responsible for carrying into the network it
+	// sits in. Present only when changed; an empty groups list inside a present
+	// message means this device carries nothing, which is different from absent.
+	Advertised    *AdvertisedRoutes `protobuf:"bytes,11,opt,name=advertised,proto3" json:"advertised,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StateDelta) Reset() {
@@ -975,6 +979,65 @@ func (x *StateDelta) GetTunnel() *TunnelConfig {
 	return nil
 }
 
+func (x *StateDelta) GetAdvertised() *AdvertisedRoutes {
+	if x != nil {
+		return x.Advertised
+	}
+	return nil
+}
+
+// AdvertisedRoutes is the advertiser's own half of a route group.
+//
+// Separate from RouteGroupAssignment because the two say opposite things to
+// opposite devices: an assignment tells a device where to send traffic for a
+// prefix, and this tells the device on the far end to forward it. A device is
+// never sent an assignment for a group it advertises — it would be routing its
+// own LAN into a tunnel that comes back out of the same machine — so the two are
+// never both present for the same group.
+type AdvertisedRoutes struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Groups        []*AdvertisedRoutes_Group `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdvertisedRoutes) Reset() {
+	*x = AdvertisedRoutes{}
+	mi := &file_meshp_v1_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdvertisedRoutes) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdvertisedRoutes) ProtoMessage() {}
+
+func (x *AdvertisedRoutes) ProtoReflect() protoreflect.Message {
+	mi := &file_meshp_v1_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdvertisedRoutes.ProtoReflect.Descriptor instead.
+func (*AdvertisedRoutes) Descriptor() ([]byte, []int) {
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *AdvertisedRoutes) GetGroups() []*AdvertisedRoutes_Group {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
 type StateAck struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	AppliedVersion uint64                 `protobuf:"varint,1,opt,name=applied_version,json=appliedVersion,proto3" json:"applied_version,omitempty"`
@@ -989,7 +1052,7 @@ type StateAck struct {
 
 func (x *StateAck) Reset() {
 	*x = StateAck{}
-	mi := &file_meshp_v1_control_proto_msgTypes[6]
+	mi := &file_meshp_v1_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1001,7 +1064,7 @@ func (x *StateAck) String() string {
 func (*StateAck) ProtoMessage() {}
 
 func (x *StateAck) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[6]
+	mi := &file_meshp_v1_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1014,7 +1077,7 @@ func (x *StateAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateAck.ProtoReflect.Descriptor instead.
 func (*StateAck) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StateAck) GetAppliedVersion() uint64 {
@@ -1059,7 +1122,7 @@ type Peer struct {
 
 func (x *Peer) Reset() {
 	*x = Peer{}
-	mi := &file_meshp_v1_control_proto_msgTypes[7]
+	mi := &file_meshp_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1071,7 +1134,7 @@ func (x *Peer) String() string {
 func (*Peer) ProtoMessage() {}
 
 func (x *Peer) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[7]
+	mi := &file_meshp_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1084,7 +1147,7 @@ func (x *Peer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Peer.ProtoReflect.Descriptor instead.
 func (*Peer) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{7}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Peer) GetPublicKey() string {
@@ -1160,7 +1223,7 @@ type TunnelConfig struct {
 
 func (x *TunnelConfig) Reset() {
 	*x = TunnelConfig{}
-	mi := &file_meshp_v1_control_proto_msgTypes[8]
+	mi := &file_meshp_v1_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1172,7 +1235,7 @@ func (x *TunnelConfig) String() string {
 func (*TunnelConfig) ProtoMessage() {}
 
 func (x *TunnelConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[8]
+	mi := &file_meshp_v1_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1185,7 +1248,7 @@ func (x *TunnelConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelConfig.ProtoReflect.Descriptor instead.
 func (*TunnelConfig) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{8}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TunnelConfig) GetMtu() uint32 {
@@ -1222,7 +1285,7 @@ type DnsConfig struct {
 
 func (x *DnsConfig) Reset() {
 	*x = DnsConfig{}
-	mi := &file_meshp_v1_control_proto_msgTypes[9]
+	mi := &file_meshp_v1_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1297,7 @@ func (x *DnsConfig) String() string {
 func (*DnsConfig) ProtoMessage() {}
 
 func (x *DnsConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[9]
+	mi := &file_meshp_v1_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1310,7 @@ func (x *DnsConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DnsConfig.ProtoReflect.Descriptor instead.
 func (*DnsConfig) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DnsConfig) GetNameservers() []string {
@@ -1292,7 +1355,7 @@ type PacketFilter struct {
 
 func (x *PacketFilter) Reset() {
 	*x = PacketFilter{}
-	mi := &file_meshp_v1_control_proto_msgTypes[10]
+	mi := &file_meshp_v1_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1304,7 +1367,7 @@ func (x *PacketFilter) String() string {
 func (*PacketFilter) ProtoMessage() {}
 
 func (x *PacketFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[10]
+	mi := &file_meshp_v1_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1317,7 +1380,7 @@ func (x *PacketFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PacketFilter.ProtoReflect.Descriptor instead.
 func (*PacketFilter) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{10}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PacketFilter) GetInbound() []*PacketFilter_Rule {
@@ -1352,7 +1415,7 @@ type RelayTokenRequest struct {
 
 func (x *RelayTokenRequest) Reset() {
 	*x = RelayTokenRequest{}
-	mi := &file_meshp_v1_control_proto_msgTypes[11]
+	mi := &file_meshp_v1_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1364,7 +1427,7 @@ func (x *RelayTokenRequest) String() string {
 func (*RelayTokenRequest) ProtoMessage() {}
 
 func (x *RelayTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[11]
+	mi := &file_meshp_v1_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1377,7 +1440,7 @@ func (x *RelayTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelayTokenRequest.ProtoReflect.Descriptor instead.
 func (*RelayTokenRequest) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{11}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{12}
 }
 
 type RelayToken struct {
@@ -1393,7 +1456,7 @@ type RelayToken struct {
 
 func (x *RelayToken) Reset() {
 	*x = RelayToken{}
-	mi := &file_meshp_v1_control_proto_msgTypes[12]
+	mi := &file_meshp_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1405,7 +1468,7 @@ func (x *RelayToken) String() string {
 func (*RelayToken) ProtoMessage() {}
 
 func (x *RelayToken) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[12]
+	mi := &file_meshp_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1418,7 +1481,7 @@ func (x *RelayToken) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelayToken.ProtoReflect.Descriptor instead.
 func (*RelayToken) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{12}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RelayToken) GetToken() []byte {
@@ -1452,7 +1515,7 @@ type RelayConfig struct {
 
 func (x *RelayConfig) Reset() {
 	*x = RelayConfig{}
-	mi := &file_meshp_v1_control_proto_msgTypes[13]
+	mi := &file_meshp_v1_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1527,7 @@ func (x *RelayConfig) String() string {
 func (*RelayConfig) ProtoMessage() {}
 
 func (x *RelayConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[13]
+	mi := &file_meshp_v1_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1540,7 @@ func (x *RelayConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelayConfig.ProtoReflect.Descriptor instead.
 func (*RelayConfig) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{13}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RelayConfig) GetRelays() []*RelayConfig_Relay {
@@ -1515,7 +1578,7 @@ type RouteGroupAssignment struct {
 
 func (x *RouteGroupAssignment) Reset() {
 	*x = RouteGroupAssignment{}
-	mi := &file_meshp_v1_control_proto_msgTypes[14]
+	mi := &file_meshp_v1_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1527,7 +1590,7 @@ func (x *RouteGroupAssignment) String() string {
 func (*RouteGroupAssignment) ProtoMessage() {}
 
 func (x *RouteGroupAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[14]
+	mi := &file_meshp_v1_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1540,7 +1603,7 @@ func (x *RouteGroupAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteGroupAssignment.ProtoReflect.Descriptor instead.
 func (*RouteGroupAssignment) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{14}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RouteGroupAssignment) GetRouteGroupId() string {
@@ -1610,7 +1673,7 @@ type RouteCandidate struct {
 
 func (x *RouteCandidate) Reset() {
 	*x = RouteCandidate{}
-	mi := &file_meshp_v1_control_proto_msgTypes[15]
+	mi := &file_meshp_v1_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1622,7 +1685,7 @@ func (x *RouteCandidate) String() string {
 func (*RouteCandidate) ProtoMessage() {}
 
 func (x *RouteCandidate) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[15]
+	mi := &file_meshp_v1_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1635,7 +1698,7 @@ func (x *RouteCandidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteCandidate.ProtoReflect.Descriptor instead.
 func (*RouteCandidate) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{15}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RouteCandidate) GetAdvertiserId() string {
@@ -1711,7 +1774,7 @@ type LocalFailoverPolicy struct {
 
 func (x *LocalFailoverPolicy) Reset() {
 	*x = LocalFailoverPolicy{}
-	mi := &file_meshp_v1_control_proto_msgTypes[16]
+	mi := &file_meshp_v1_control_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1723,7 +1786,7 @@ func (x *LocalFailoverPolicy) String() string {
 func (*LocalFailoverPolicy) ProtoMessage() {}
 
 func (x *LocalFailoverPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[16]
+	mi := &file_meshp_v1_control_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1736,7 +1799,7 @@ func (x *LocalFailoverPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LocalFailoverPolicy.ProtoReflect.Descriptor instead.
 func (*LocalFailoverPolicy) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *LocalFailoverPolicy) GetEnabled() bool {
@@ -1806,7 +1869,7 @@ type SignalEnvelope struct {
 
 func (x *SignalEnvelope) Reset() {
 	*x = SignalEnvelope{}
-	mi := &file_meshp_v1_control_proto_msgTypes[17]
+	mi := &file_meshp_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1818,7 +1881,7 @@ func (x *SignalEnvelope) String() string {
 func (*SignalEnvelope) ProtoMessage() {}
 
 func (x *SignalEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[17]
+	mi := &file_meshp_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1831,7 +1894,7 @@ func (x *SignalEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalEnvelope.ProtoReflect.Descriptor instead.
 func (*SignalEnvelope) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{17}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SignalEnvelope) GetFromMembershipId() string {
@@ -1938,7 +2001,7 @@ type IceOffer struct {
 
 func (x *IceOffer) Reset() {
 	*x = IceOffer{}
-	mi := &file_meshp_v1_control_proto_msgTypes[18]
+	mi := &file_meshp_v1_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1950,7 +2013,7 @@ func (x *IceOffer) String() string {
 func (*IceOffer) ProtoMessage() {}
 
 func (x *IceOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[18]
+	mi := &file_meshp_v1_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1963,7 +2026,7 @@ func (x *IceOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IceOffer.ProtoReflect.Descriptor instead.
 func (*IceOffer) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{18}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *IceOffer) GetCandidates() []*IceCandidate {
@@ -2007,7 +2070,7 @@ type IceAnswer struct {
 
 func (x *IceAnswer) Reset() {
 	*x = IceAnswer{}
-	mi := &file_meshp_v1_control_proto_msgTypes[19]
+	mi := &file_meshp_v1_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2019,7 +2082,7 @@ func (x *IceAnswer) String() string {
 func (*IceAnswer) ProtoMessage() {}
 
 func (x *IceAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[19]
+	mi := &file_meshp_v1_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2032,7 +2095,7 @@ func (x *IceAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IceAnswer.ProtoReflect.Descriptor instead.
 func (*IceAnswer) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{19}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *IceAnswer) GetCandidates() []*IceCandidate {
@@ -2079,7 +2142,7 @@ type IceCandidates struct {
 
 func (x *IceCandidates) Reset() {
 	*x = IceCandidates{}
-	mi := &file_meshp_v1_control_proto_msgTypes[20]
+	mi := &file_meshp_v1_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2091,7 +2154,7 @@ func (x *IceCandidates) String() string {
 func (*IceCandidates) ProtoMessage() {}
 
 func (x *IceCandidates) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[20]
+	mi := &file_meshp_v1_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2104,7 +2167,7 @@ func (x *IceCandidates) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IceCandidates.ProtoReflect.Descriptor instead.
 func (*IceCandidates) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{20}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *IceCandidates) GetCandidates() []*IceCandidate {
@@ -2127,7 +2190,7 @@ type IceCandidate struct {
 
 func (x *IceCandidate) Reset() {
 	*x = IceCandidate{}
-	mi := &file_meshp_v1_control_proto_msgTypes[21]
+	mi := &file_meshp_v1_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2139,7 +2202,7 @@ func (x *IceCandidate) String() string {
 func (*IceCandidate) ProtoMessage() {}
 
 func (x *IceCandidate) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[21]
+	mi := &file_meshp_v1_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2152,7 +2215,7 @@ func (x *IceCandidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IceCandidate.ProtoReflect.Descriptor instead.
 func (*IceCandidate) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{21}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *IceCandidate) GetKind() IceCandidate_Kind {
@@ -2199,7 +2262,7 @@ type PathGiveUp struct {
 
 func (x *PathGiveUp) Reset() {
 	*x = PathGiveUp{}
-	mi := &file_meshp_v1_control_proto_msgTypes[22]
+	mi := &file_meshp_v1_control_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2274,7 @@ func (x *PathGiveUp) String() string {
 func (*PathGiveUp) ProtoMessage() {}
 
 func (x *PathGiveUp) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[22]
+	mi := &file_meshp_v1_control_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2287,7 @@ func (x *PathGiveUp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathGiveUp.ProtoReflect.Descriptor instead.
 func (*PathGiveUp) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{22}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PathGiveUp) GetReason() string {
@@ -2244,7 +2307,7 @@ type PathReport struct {
 
 func (x *PathReport) Reset() {
 	*x = PathReport{}
-	mi := &file_meshp_v1_control_proto_msgTypes[23]
+	mi := &file_meshp_v1_control_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2256,7 +2319,7 @@ func (x *PathReport) String() string {
 func (*PathReport) ProtoMessage() {}
 
 func (x *PathReport) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[23]
+	mi := &file_meshp_v1_control_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2269,7 +2332,7 @@ func (x *PathReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathReport.ProtoReflect.Descriptor instead.
 func (*PathReport) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{23}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *PathReport) GetPaths() []*PathReport_PeerPath {
@@ -2304,7 +2367,7 @@ type ReachabilityReport struct {
 
 func (x *ReachabilityReport) Reset() {
 	*x = ReachabilityReport{}
-	mi := &file_meshp_v1_control_proto_msgTypes[24]
+	mi := &file_meshp_v1_control_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2316,7 +2379,7 @@ func (x *ReachabilityReport) String() string {
 func (*ReachabilityReport) ProtoMessage() {}
 
 func (x *ReachabilityReport) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[24]
+	mi := &file_meshp_v1_control_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2329,7 +2392,7 @@ func (x *ReachabilityReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReachabilityReport.ProtoReflect.Descriptor instead.
 func (*ReachabilityReport) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{24}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ReachabilityReport) GetRouteGroupId() string {
@@ -2398,7 +2461,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_meshp_v1_control_proto_msgTypes[25]
+	mi := &file_meshp_v1_control_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2410,7 +2473,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[25]
+	mi := &file_meshp_v1_control_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2423,7 +2486,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{25}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Heartbeat) GetAppliedStateVersion() uint64 {
@@ -2452,7 +2515,7 @@ type HeartbeatAck struct {
 
 func (x *HeartbeatAck) Reset() {
 	*x = HeartbeatAck{}
-	mi := &file_meshp_v1_control_proto_msgTypes[26]
+	mi := &file_meshp_v1_control_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2464,7 +2527,7 @@ func (x *HeartbeatAck) String() string {
 func (*HeartbeatAck) ProtoMessage() {}
 
 func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[26]
+	mi := &file_meshp_v1_control_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2477,7 +2540,7 @@ func (x *HeartbeatAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatAck.ProtoReflect.Descriptor instead.
 func (*HeartbeatAck) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{26}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *HeartbeatAck) GetCurrentStateVersion() uint64 {
@@ -2515,7 +2578,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_meshp_v1_control_proto_msgTypes[27]
+	mi := &file_meshp_v1_control_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2527,7 +2590,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[27]
+	mi := &file_meshp_v1_control_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2540,7 +2603,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{27}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Command) GetPayload() isCommand_Payload {
@@ -2611,7 +2674,7 @@ type Revoke struct {
 
 func (x *Revoke) Reset() {
 	*x = Revoke{}
-	mi := &file_meshp_v1_control_proto_msgTypes[28]
+	mi := &file_meshp_v1_control_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2623,7 +2686,7 @@ func (x *Revoke) String() string {
 func (*Revoke) ProtoMessage() {}
 
 func (x *Revoke) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[28]
+	mi := &file_meshp_v1_control_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2636,7 +2699,7 @@ func (x *Revoke) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Revoke.ProtoReflect.Descriptor instead.
 func (*Revoke) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{28}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *Revoke) GetReason() string {
@@ -2663,7 +2726,7 @@ type Reconnect struct {
 
 func (x *Reconnect) Reset() {
 	*x = Reconnect{}
-	mi := &file_meshp_v1_control_proto_msgTypes[29]
+	mi := &file_meshp_v1_control_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2675,7 +2738,7 @@ func (x *Reconnect) String() string {
 func (*Reconnect) ProtoMessage() {}
 
 func (x *Reconnect) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[29]
+	mi := &file_meshp_v1_control_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2688,7 +2751,7 @@ func (x *Reconnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reconnect.ProtoReflect.Descriptor instead.
 func (*Reconnect) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{29}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Reconnect) GetReason() string {
@@ -2716,7 +2779,7 @@ type CollectDiagnostics struct {
 
 func (x *CollectDiagnostics) Reset() {
 	*x = CollectDiagnostics{}
-	mi := &file_meshp_v1_control_proto_msgTypes[30]
+	mi := &file_meshp_v1_control_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2728,7 +2791,7 @@ func (x *CollectDiagnostics) String() string {
 func (*CollectDiagnostics) ProtoMessage() {}
 
 func (x *CollectDiagnostics) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[30]
+	mi := &file_meshp_v1_control_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2741,7 +2804,7 @@ func (x *CollectDiagnostics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CollectDiagnostics.ProtoReflect.Descriptor instead.
 func (*CollectDiagnostics) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{30}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *CollectDiagnostics) GetUploadUrl() string {
@@ -2758,6 +2821,79 @@ func (x *CollectDiagnostics) GetRequireUserConsent() bool {
 	return false
 }
 
+type AdvertisedRoutes_Group struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RouteGroupId string                 `protobuf:"bytes,1,opt,name=route_group_id,json=routeGroupId,proto3" json:"route_group_id,omitempty"`
+	Name         string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// The prefixes to forward into. For an egress group this is the default
+	// route, and forwarding it means being somebody's way out to the internet.
+	Prefixes []string `protobuf:"bytes,3,rep,name=prefixes,proto3" json:"prefixes,omitempty"`
+	// Source forwarded traffic from this address rather than the interface's,
+	// when the group has one. Customers who allowlist an outbound IP with a bank
+	// or a vendor depend on it surviving a failover.
+	StableEgressIp string `protobuf:"bytes,4,opt,name=stable_egress_ip,json=stableEgressIp,proto3" json:"stable_egress_ip,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *AdvertisedRoutes_Group) Reset() {
+	*x = AdvertisedRoutes_Group{}
+	mi := &file_meshp_v1_control_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdvertisedRoutes_Group) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdvertisedRoutes_Group) ProtoMessage() {}
+
+func (x *AdvertisedRoutes_Group) ProtoReflect() protoreflect.Message {
+	mi := &file_meshp_v1_control_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdvertisedRoutes_Group.ProtoReflect.Descriptor instead.
+func (*AdvertisedRoutes_Group) Descriptor() ([]byte, []int) {
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{6, 0}
+}
+
+func (x *AdvertisedRoutes_Group) GetRouteGroupId() string {
+	if x != nil {
+		return x.RouteGroupId
+	}
+	return ""
+}
+
+func (x *AdvertisedRoutes_Group) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AdvertisedRoutes_Group) GetPrefixes() []string {
+	if x != nil {
+		return x.Prefixes
+	}
+	return nil
+}
+
+func (x *AdvertisedRoutes_Group) GetStableEgressIp() string {
+	if x != nil {
+		return x.StableEgressIp
+	}
+	return ""
+}
+
 // Per-domain routing. Domains not listed fall through to the system
 // resolver.
 type DnsConfig_Route struct {
@@ -2770,7 +2906,7 @@ type DnsConfig_Route struct {
 
 func (x *DnsConfig_Route) Reset() {
 	*x = DnsConfig_Route{}
-	mi := &file_meshp_v1_control_proto_msgTypes[31]
+	mi := &file_meshp_v1_control_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2782,7 +2918,7 @@ func (x *DnsConfig_Route) String() string {
 func (*DnsConfig_Route) ProtoMessage() {}
 
 func (x *DnsConfig_Route) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[31]
+	mi := &file_meshp_v1_control_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2795,7 +2931,7 @@ func (x *DnsConfig_Route) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DnsConfig_Route.ProtoReflect.Descriptor instead.
 func (*DnsConfig_Route) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{9, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{10, 0}
 }
 
 func (x *DnsConfig_Route) GetDomain() string {
@@ -2825,7 +2961,7 @@ type PacketFilter_Rule struct {
 
 func (x *PacketFilter_Rule) Reset() {
 	*x = PacketFilter_Rule{}
-	mi := &file_meshp_v1_control_proto_msgTypes[32]
+	mi := &file_meshp_v1_control_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2837,7 +2973,7 @@ func (x *PacketFilter_Rule) String() string {
 func (*PacketFilter_Rule) ProtoMessage() {}
 
 func (x *PacketFilter_Rule) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[32]
+	mi := &file_meshp_v1_control_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2850,7 +2986,7 @@ func (x *PacketFilter_Rule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PacketFilter_Rule.ProtoReflect.Descriptor instead.
 func (*PacketFilter_Rule) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{10, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{11, 0}
 }
 
 func (x *PacketFilter_Rule) GetSrcPrefixes() []string {
@@ -2900,7 +3036,7 @@ type RelayConfig_Relay struct {
 
 func (x *RelayConfig_Relay) Reset() {
 	*x = RelayConfig_Relay{}
-	mi := &file_meshp_v1_control_proto_msgTypes[33]
+	mi := &file_meshp_v1_control_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2912,7 +3048,7 @@ func (x *RelayConfig_Relay) String() string {
 func (*RelayConfig_Relay) ProtoMessage() {}
 
 func (x *RelayConfig_Relay) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[33]
+	mi := &file_meshp_v1_control_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2925,7 +3061,7 @@ func (x *RelayConfig_Relay) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelayConfig_Relay.ProtoReflect.Descriptor instead.
 func (*RelayConfig_Relay) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{13, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{14, 0}
 }
 
 func (x *RelayConfig_Relay) GetId() string {
@@ -2971,7 +3107,7 @@ type PathReport_PeerPath struct {
 
 func (x *PathReport_PeerPath) Reset() {
 	*x = PathReport_PeerPath{}
-	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	mi := &file_meshp_v1_control_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2983,7 +3119,7 @@ func (x *PathReport_PeerPath) String() string {
 func (*PathReport_PeerPath) ProtoMessage() {}
 
 func (x *PathReport_PeerPath) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	mi := &file_meshp_v1_control_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2996,7 +3132,7 @@ func (x *PathReport_PeerPath) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathReport_PeerPath.ProtoReflect.Descriptor instead.
 func (*PathReport_PeerPath) Descriptor() ([]byte, []int) {
-	return file_meshp_v1_control_proto_rawDescGZIP(), []int{23, 0}
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{24, 0}
 }
 
 func (x *PathReport_PeerPath) GetPeerPublicKey() string {
@@ -3103,7 +3239,7 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"network_id\x18\x03 \x01(\tR\tnetworkId\x12\x1c\n" +
 	"\taddresses\x18\x04 \x03(\tR\taddresses\x122\n" +
 	"\x15current_state_version\x18\x05 \x01(\x04R\x13currentStateVersion\x12)\n" +
-	"\x10snapshot_follows\x18\x06 \x01(\bR\x0fsnapshotFollows\"\xdb\x03\n" +
+	"\x10snapshot_follows\x18\x06 \x01(\bR\x0fsnapshotFollows\"\x97\x04\n" +
 	"\n" +
 	"StateDelta\x12!\n" +
 	"\ffrom_version\x18\x01 \x01(\x04R\vfromVersion\x12\x1d\n" +
@@ -3117,7 +3253,17 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"\x17removed_route_group_ids\x18\b \x03(\tR\x14removedRouteGroupIds\x12-\n" +
 	"\x06relays\x18\t \x01(\v2\x15.meshp.v1.RelayConfigR\x06relays\x12.\n" +
 	"\x06tunnel\x18\n" +
-	" \x01(\v2\x16.meshp.v1.TunnelConfigR\x06tunnel\"|\n" +
+	" \x01(\v2\x16.meshp.v1.TunnelConfigR\x06tunnel\x12:\n" +
+	"\n" +
+	"advertised\x18\v \x01(\v2\x1a.meshp.v1.AdvertisedRoutesR\n" +
+	"advertised\"\xd6\x01\n" +
+	"\x10AdvertisedRoutes\x128\n" +
+	"\x06groups\x18\x01 \x03(\v2 .meshp.v1.AdvertisedRoutes.GroupR\x06groups\x1a\x87\x01\n" +
+	"\x05Group\x12$\n" +
+	"\x0eroute_group_id\x18\x01 \x01(\tR\frouteGroupId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
+	"\bprefixes\x18\x03 \x03(\tR\bprefixes\x12(\n" +
+	"\x10stable_egress_ip\x18\x04 \x01(\tR\x0estableEgressIp\"|\n" +
 	"\bStateAck\x12'\n" +
 	"\x0fapplied_version\x18\x01 \x01(\x04R\x0eappliedVersion\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x121\n" +
@@ -3320,7 +3466,7 @@ func file_meshp_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_meshp_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_meshp_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_meshp_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_meshp_v1_control_proto_goTypes = []any{
 	(RouteGroupAssignment_Mode)(0), // 0: meshp.v1.RouteGroupAssignment.Mode
 	(RouteCandidate_Health)(0),     // 1: meshp.v1.RouteCandidate.Health
@@ -3332,83 +3478,87 @@ var file_meshp_v1_control_proto_goTypes = []any{
 	(*AgentCapabilities)(nil),      // 7: meshp.v1.AgentCapabilities
 	(*ServerHello)(nil),            // 8: meshp.v1.ServerHello
 	(*StateDelta)(nil),             // 9: meshp.v1.StateDelta
-	(*StateAck)(nil),               // 10: meshp.v1.StateAck
-	(*Peer)(nil),                   // 11: meshp.v1.Peer
-	(*TunnelConfig)(nil),           // 12: meshp.v1.TunnelConfig
-	(*DnsConfig)(nil),              // 13: meshp.v1.DnsConfig
-	(*PacketFilter)(nil),           // 14: meshp.v1.PacketFilter
-	(*RelayTokenRequest)(nil),      // 15: meshp.v1.RelayTokenRequest
-	(*RelayToken)(nil),             // 16: meshp.v1.RelayToken
-	(*RelayConfig)(nil),            // 17: meshp.v1.RelayConfig
-	(*RouteGroupAssignment)(nil),   // 18: meshp.v1.RouteGroupAssignment
-	(*RouteCandidate)(nil),         // 19: meshp.v1.RouteCandidate
-	(*LocalFailoverPolicy)(nil),    // 20: meshp.v1.LocalFailoverPolicy
-	(*SignalEnvelope)(nil),         // 21: meshp.v1.SignalEnvelope
-	(*IceOffer)(nil),               // 22: meshp.v1.IceOffer
-	(*IceAnswer)(nil),              // 23: meshp.v1.IceAnswer
-	(*IceCandidates)(nil),          // 24: meshp.v1.IceCandidates
-	(*IceCandidate)(nil),           // 25: meshp.v1.IceCandidate
-	(*PathGiveUp)(nil),             // 26: meshp.v1.PathGiveUp
-	(*PathReport)(nil),             // 27: meshp.v1.PathReport
-	(*ReachabilityReport)(nil),     // 28: meshp.v1.ReachabilityReport
-	(*Heartbeat)(nil),              // 29: meshp.v1.Heartbeat
-	(*HeartbeatAck)(nil),           // 30: meshp.v1.HeartbeatAck
-	(*Command)(nil),                // 31: meshp.v1.Command
-	(*Revoke)(nil),                 // 32: meshp.v1.Revoke
-	(*Reconnect)(nil),              // 33: meshp.v1.Reconnect
-	(*CollectDiagnostics)(nil),     // 34: meshp.v1.CollectDiagnostics
-	(*DnsConfig_Route)(nil),        // 35: meshp.v1.DnsConfig.Route
-	(*PacketFilter_Rule)(nil),      // 36: meshp.v1.PacketFilter.Rule
-	(*RelayConfig_Relay)(nil),      // 37: meshp.v1.RelayConfig.Relay
-	(*PathReport_PeerPath)(nil),    // 38: meshp.v1.PathReport.PeerPath
+	(*AdvertisedRoutes)(nil),       // 10: meshp.v1.AdvertisedRoutes
+	(*StateAck)(nil),               // 11: meshp.v1.StateAck
+	(*Peer)(nil),                   // 12: meshp.v1.Peer
+	(*TunnelConfig)(nil),           // 13: meshp.v1.TunnelConfig
+	(*DnsConfig)(nil),              // 14: meshp.v1.DnsConfig
+	(*PacketFilter)(nil),           // 15: meshp.v1.PacketFilter
+	(*RelayTokenRequest)(nil),      // 16: meshp.v1.RelayTokenRequest
+	(*RelayToken)(nil),             // 17: meshp.v1.RelayToken
+	(*RelayConfig)(nil),            // 18: meshp.v1.RelayConfig
+	(*RouteGroupAssignment)(nil),   // 19: meshp.v1.RouteGroupAssignment
+	(*RouteCandidate)(nil),         // 20: meshp.v1.RouteCandidate
+	(*LocalFailoverPolicy)(nil),    // 21: meshp.v1.LocalFailoverPolicy
+	(*SignalEnvelope)(nil),         // 22: meshp.v1.SignalEnvelope
+	(*IceOffer)(nil),               // 23: meshp.v1.IceOffer
+	(*IceAnswer)(nil),              // 24: meshp.v1.IceAnswer
+	(*IceCandidates)(nil),          // 25: meshp.v1.IceCandidates
+	(*IceCandidate)(nil),           // 26: meshp.v1.IceCandidate
+	(*PathGiveUp)(nil),             // 27: meshp.v1.PathGiveUp
+	(*PathReport)(nil),             // 28: meshp.v1.PathReport
+	(*ReachabilityReport)(nil),     // 29: meshp.v1.ReachabilityReport
+	(*Heartbeat)(nil),              // 30: meshp.v1.Heartbeat
+	(*HeartbeatAck)(nil),           // 31: meshp.v1.HeartbeatAck
+	(*Command)(nil),                // 32: meshp.v1.Command
+	(*Revoke)(nil),                 // 33: meshp.v1.Revoke
+	(*Reconnect)(nil),              // 34: meshp.v1.Reconnect
+	(*CollectDiagnostics)(nil),     // 35: meshp.v1.CollectDiagnostics
+	(*AdvertisedRoutes_Group)(nil), // 36: meshp.v1.AdvertisedRoutes.Group
+	(*DnsConfig_Route)(nil),        // 37: meshp.v1.DnsConfig.Route
+	(*PacketFilter_Rule)(nil),      // 38: meshp.v1.PacketFilter.Rule
+	(*RelayConfig_Relay)(nil),      // 39: meshp.v1.RelayConfig.Relay
+	(*PathReport_PeerPath)(nil),    // 40: meshp.v1.PathReport.PeerPath
 }
 var file_meshp_v1_control_proto_depIdxs = []int32{
 	6,  // 0: meshp.v1.ClientMessage.hello:type_name -> meshp.v1.ClientHello
-	10, // 1: meshp.v1.ClientMessage.state_ack:type_name -> meshp.v1.StateAck
-	21, // 2: meshp.v1.ClientMessage.signal:type_name -> meshp.v1.SignalEnvelope
-	27, // 3: meshp.v1.ClientMessage.path_report:type_name -> meshp.v1.PathReport
-	28, // 4: meshp.v1.ClientMessage.reachability_report:type_name -> meshp.v1.ReachabilityReport
-	29, // 5: meshp.v1.ClientMessage.heartbeat:type_name -> meshp.v1.Heartbeat
-	15, // 6: meshp.v1.ClientMessage.relay_token_request:type_name -> meshp.v1.RelayTokenRequest
+	11, // 1: meshp.v1.ClientMessage.state_ack:type_name -> meshp.v1.StateAck
+	22, // 2: meshp.v1.ClientMessage.signal:type_name -> meshp.v1.SignalEnvelope
+	28, // 3: meshp.v1.ClientMessage.path_report:type_name -> meshp.v1.PathReport
+	29, // 4: meshp.v1.ClientMessage.reachability_report:type_name -> meshp.v1.ReachabilityReport
+	30, // 5: meshp.v1.ClientMessage.heartbeat:type_name -> meshp.v1.Heartbeat
+	16, // 6: meshp.v1.ClientMessage.relay_token_request:type_name -> meshp.v1.RelayTokenRequest
 	8,  // 7: meshp.v1.ServerMessage.hello:type_name -> meshp.v1.ServerHello
 	9,  // 8: meshp.v1.ServerMessage.state_delta:type_name -> meshp.v1.StateDelta
-	21, // 9: meshp.v1.ServerMessage.signal:type_name -> meshp.v1.SignalEnvelope
-	31, // 10: meshp.v1.ServerMessage.command:type_name -> meshp.v1.Command
-	30, // 11: meshp.v1.ServerMessage.heartbeat_ack:type_name -> meshp.v1.HeartbeatAck
-	16, // 12: meshp.v1.ServerMessage.relay_token:type_name -> meshp.v1.RelayToken
+	22, // 9: meshp.v1.ServerMessage.signal:type_name -> meshp.v1.SignalEnvelope
+	32, // 10: meshp.v1.ServerMessage.command:type_name -> meshp.v1.Command
+	31, // 11: meshp.v1.ServerMessage.heartbeat_ack:type_name -> meshp.v1.HeartbeatAck
+	17, // 12: meshp.v1.ServerMessage.relay_token:type_name -> meshp.v1.RelayToken
 	7,  // 13: meshp.v1.ClientHello.capabilities:type_name -> meshp.v1.AgentCapabilities
-	11, // 14: meshp.v1.StateDelta.upsert_peers:type_name -> meshp.v1.Peer
-	13, // 15: meshp.v1.StateDelta.dns:type_name -> meshp.v1.DnsConfig
-	14, // 16: meshp.v1.StateDelta.filter:type_name -> meshp.v1.PacketFilter
-	18, // 17: meshp.v1.StateDelta.route_groups:type_name -> meshp.v1.RouteGroupAssignment
-	17, // 18: meshp.v1.StateDelta.relays:type_name -> meshp.v1.RelayConfig
-	12, // 19: meshp.v1.StateDelta.tunnel:type_name -> meshp.v1.TunnelConfig
-	35, // 20: meshp.v1.DnsConfig.routes:type_name -> meshp.v1.DnsConfig.Route
-	36, // 21: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
-	36, // 22: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
-	37, // 23: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
-	0,  // 24: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
-	19, // 25: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
-	20, // 26: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
-	1,  // 27: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
-	22, // 28: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
-	23, // 29: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
-	24, // 30: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
-	26, // 31: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
-	25, // 32: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
-	25, // 33: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
-	25, // 34: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
-	2,  // 35: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
-	38, // 36: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
-	32, // 37: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
-	33, // 38: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
-	34, // 39: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
-	3,  // 40: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
-	41, // [41:41] is the sub-list for method output_type
-	41, // [41:41] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	12, // 14: meshp.v1.StateDelta.upsert_peers:type_name -> meshp.v1.Peer
+	14, // 15: meshp.v1.StateDelta.dns:type_name -> meshp.v1.DnsConfig
+	15, // 16: meshp.v1.StateDelta.filter:type_name -> meshp.v1.PacketFilter
+	19, // 17: meshp.v1.StateDelta.route_groups:type_name -> meshp.v1.RouteGroupAssignment
+	18, // 18: meshp.v1.StateDelta.relays:type_name -> meshp.v1.RelayConfig
+	13, // 19: meshp.v1.StateDelta.tunnel:type_name -> meshp.v1.TunnelConfig
+	10, // 20: meshp.v1.StateDelta.advertised:type_name -> meshp.v1.AdvertisedRoutes
+	36, // 21: meshp.v1.AdvertisedRoutes.groups:type_name -> meshp.v1.AdvertisedRoutes.Group
+	37, // 22: meshp.v1.DnsConfig.routes:type_name -> meshp.v1.DnsConfig.Route
+	38, // 23: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
+	38, // 24: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
+	39, // 25: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
+	0,  // 26: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
+	20, // 27: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
+	21, // 28: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
+	1,  // 29: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
+	23, // 30: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
+	24, // 31: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
+	25, // 32: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
+	27, // 33: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
+	26, // 34: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
+	26, // 35: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
+	26, // 36: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
+	2,  // 37: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
+	40, // 38: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
+	33, // 39: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
+	34, // 40: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
+	35, // 41: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
+	3,  // 42: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
+	43, // [43:43] is the sub-list for method output_type
+	43, // [43:43] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_meshp_v1_control_proto_init() }
@@ -3433,13 +3583,13 @@ func file_meshp_v1_control_proto_init() {
 		(*ServerMessage_HeartbeatAck)(nil),
 		(*ServerMessage_RelayToken)(nil),
 	}
-	file_meshp_v1_control_proto_msgTypes[17].OneofWrappers = []any{
+	file_meshp_v1_control_proto_msgTypes[18].OneofWrappers = []any{
 		(*SignalEnvelope_Offer)(nil),
 		(*SignalEnvelope_Answer)(nil),
 		(*SignalEnvelope_Candidates)(nil),
 		(*SignalEnvelope_GiveUp)(nil),
 	}
-	file_meshp_v1_control_proto_msgTypes[27].OneofWrappers = []any{
+	file_meshp_v1_control_proto_msgTypes[28].OneofWrappers = []any{
 		(*Command_Revoke)(nil),
 		(*Command_Reconnect)(nil),
 		(*Command_CollectDiagnostics)(nil),
@@ -3450,7 +3600,7 @@ func file_meshp_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_meshp_v1_control_proto_rawDesc), len(file_meshp_v1_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   35,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

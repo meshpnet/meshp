@@ -293,3 +293,161 @@ func TestAssignmentsAreDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// The advertiser's own half. It is excluded from its group's assignments — it would be
+// routing its own LAN into a tunnel that comes back out of the same machine — so this is
+// the only thing that tells it to forward.
+func TestAnAdvertiserIsToldWhatItCarries(t *testing.T) {
+	f := newFixture(t)
+	router := f.enrolDevice("branch-router")
+	f.subnetGroup("branch-lan", "192.168.10.0/24")
+	f.advertise("branch-lan", router, 1)
+
+	snapshot, err := NewStateBuilder(f.store).Snapshot(f.ctx, router.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advertised := snapshot.GetAdvertised()
+	if advertised == nil {
+		t.Fatal("the advertiser was told nothing about what it carries")
+	}
+	if len(advertised.GetGroups()) != 1 {
+		t.Fatalf("%d carried groups, want 1", len(advertised.GetGroups()))
+	}
+	got := advertised.GetGroups()[0]
+	if len(got.GetPrefixes()) != 1 || got.GetPrefixes()[0] != "192.168.10.0/24" {
+		t.Errorf("prefixes = %v", got.GetPrefixes())
+	}
+	// And it is still not assigned its own group, which would be the loop.
+	if len(snapshot.GetRouteGroups()) != 0 {
+		t.Errorf("the advertiser was also assigned its own group: %+v", snapshot.GetRouteGroups())
+	}
+}
+
+// A device that carries nothing is told so, rather than told nothing. An empty list inside
+// a present message says "you carry nothing now", which a device that used to carry
+// something has to hear — proto3 cannot say that with a repeated field.
+func TestADeviceThatCarriesNothingIsToldSo(t *testing.T) {
+	f := newFixture(t)
+	laptop := f.enrolDevice("laptop")
+	router := f.enrolDevice("router")
+	f.subnetGroup("branch-lan", "192.168.10.0/24")
+	f.advertise("branch-lan", router, 1)
+
+	snapshot, err := NewStateBuilder(f.store).Snapshot(f.ctx, laptop.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.GetAdvertised() == nil {
+		t.Fatal("a device in a network with route groups was told nothing about advertising")
+	}
+	if len(snapshot.GetAdvertised().GetGroups()) != 0 {
+		t.Errorf("a non-advertiser was told to carry %+v", snapshot.GetAdvertised().GetGroups())
+	}
+}
+
+// A network with no route groups has never asked anyone to forward, which is not the same
+// as having asked and stopped.
+func TestANetworkWithNoGroupsSaysNothingAboutAdvertising(t *testing.T) {
+	f := newFixture(t)
+	laptop := f.enrolDevice("laptop")
+
+	snapshot, err := NewStateBuilder(f.store).Snapshot(f.ctx, laptop.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.GetAdvertised() != nil {
+		t.Errorf("a network with no route groups sent %+v", snapshot.GetAdvertised())
+	}
+}
+
+// Stopping has to reach the advertiser too. Leaving it forwarding while nobody is steered
+// at it is a path that works by accident.
+func TestWithdrawingStopsTheAdvertiserForwarding(t *testing.T) {
+	f := newFixture(t)
+	router := f.enrolDevice("branch-router")
+	f.subnetGroup("branch-lan", "192.168.10.0/24")
+	f.advertise("branch-lan", router, 1)
+
+	builder := NewStateBuilder(f.store)
+	before, err := builder.Snapshot(f.ctx, router.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.GetAdvertised().GetGroups()) != 1 {
+		t.Fatalf("expected it to be carrying one group to begin with")
+	}
+
+	if err := f.store.Withdraw(f.ctx, f.netID, "branch-lan", router.membershipID); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := builder.For(f.ctx, router.membershipID, before.GetToVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.GetAdvertised() == nil {
+		t.Fatal("withdrawing did not reach the advertiser")
+	}
+	if len(after.GetAdvertised().GetGroups()) != 0 {
+		t.Errorf("it is still being told to carry %+v", after.GetAdvertised().GetGroups())
+	}
+}
+
+// Disabled means stop. Draining does not: it keeps the devices already using this
+// advertiser and refuses new ones, so an advertiser that stopped forwarding while draining
+// would drop every session draining exists to let finish.
+func TestDisabledStopsForwardingAndDrainingDoesNot(t *testing.T) {
+	for _, tc := range []struct {
+		state string
+		want  int
+	}{
+		{"draining", 1},
+		{"disabled", 0},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			f := newFixture(t)
+			router := f.enrolDevice("branch-router")
+			f.subnetGroup("branch-lan", "192.168.10.0/24")
+			if err := f.store.Advertise(f.ctx, store.AdvertiseRequest{
+				NetworkID: f.netID, GroupSlug: "branch-lan",
+				MembershipID: router.membershipID, AdminState: tc.state,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot, err := NewStateBuilder(f.store).Snapshot(f.ctx, router.membershipID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(snapshot.GetAdvertised().GetGroups()); got != tc.want {
+				t.Errorf("admin state %q carries %d groups, want %d", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+// An egress advertiser forwards both default routes, so being somebody's way out does not
+// quietly mean IPv4 only.
+func TestAnEgressAdvertiserCarriesBothDefaultRoutes(t *testing.T) {
+	f := newFixture(t)
+	exit := f.enrolDevice("exit")
+	if _, err := f.store.CreateRouteGroup(f.ctx, store.CreateRouteGroupRequest{
+		NetworkID: f.netID, Slug: "exit", Kind: store.KindEgress,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.advertise("exit", exit, 1)
+
+	snapshot, err := NewStateBuilder(f.store).Snapshot(f.ctx, exit.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := snapshot.GetAdvertised().GetGroups()
+	if len(groups) != 1 {
+		t.Fatalf("%d carried groups, want 1", len(groups))
+	}
+	if p := groups[0].GetPrefixes(); len(p) != 2 || p[0] != "0.0.0.0/0" || p[1] != "::/0" {
+		t.Errorf("prefixes = %v, want both default routes", p)
+	}
+}

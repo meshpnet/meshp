@@ -26,13 +26,15 @@ import (
 // rather than as silence. Proto3 cannot tell an empty repeated field from an absent one, so
 // "you are assigned nothing" and "nothing about routes changed" would otherwise be the same
 // message — and a device that lost its last advertiser would keep routing to it forever.
-func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetMembershipForSessionRow) (assigned []*meshpv1.RouteGroupAssignment, withdrawn []string, err error) {
+func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetMembershipForSessionRow) (assigned []*meshpv1.RouteGroupAssignment, withdrawn []string, advertised *meshpv1.AdvertisedRoutes, err error) {
 	groups, err := b.store.RouteGroupsFor(ctx, membership.NetworkID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(groups) == 0 {
-		return nil, nil, nil
+		// Absent rather than empty. A network with no route groups has never asked this
+		// device to forward anything, which is not the same as having asked and stopped.
+		return nil, nil, nil, nil
 	}
 
 	ids := make([]uuid.UUID, 0, len(groups))
@@ -41,7 +43,7 @@ func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetM
 	}
 	advertiserRows, err := b.store.Advertisers(ctx, ids)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	byGroup := make(map[uuid.UUID][]dbgen.ListRouteAdvertisersRow, len(groups))
@@ -49,7 +51,17 @@ func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetM
 		byGroup[row.RouteGroupID] = append(byGroup[row.RouteGroupID], row)
 	}
 
+	// Present, and possibly empty. A device that carried a prefix and no longer does has to
+	// be told so, and an empty list inside a present message says exactly that — while
+	// proto3 cannot tell an empty repeated field from an absent one, which is why this is a
+	// message rather than a repeated field on the delta.
+	advertised = &meshpv1.AdvertisedRoutes{}
+
 	for _, group := range groups {
+		if carried := carriedBy(group, byGroup[group.ID], membership.MembershipID); carried != nil {
+			advertised.Groups = append(advertised.Groups, carried)
+		}
+
 		candidates := selectFor(group, byGroup[group.ID], membership.MembershipID)
 		if len(candidates) == 0 {
 			// A group with nobody to carry it is not an assignment. Sending one with an
@@ -61,7 +73,43 @@ func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetM
 		}
 		assigned = append(assigned, assignmentFor(group, candidates))
 	}
-	return assigned, withdrawn, nil
+	return assigned, withdrawn, advertised, nil
+}
+
+// carriedBy reports what this device must forward for a group, or nothing.
+//
+// Only an enabled or draining advertiser forwards. Draining still does, because it keeps
+// the devices already using it and refuses new ones — a draining advertiser that stopped
+// forwarding would drop every session it was meant to be letting finish, which is the
+// opposite of what draining is for.
+func carriedBy(group store.RouteGroup, rows []dbgen.ListRouteAdvertisersRow, self uuid.UUID) *meshpv1.AdvertisedRoutes_Group {
+	for _, row := range rows {
+		if row.MembershipID != self {
+			continue
+		}
+		if routes.AdminState(row.AdminState) == routes.AdminDisabled {
+			// Disabled means stop, and stopping has to reach the advertiser too. Leaving it
+			// forwarding while nobody is steered at it is a path that works by accident.
+			return nil
+		}
+
+		carried := &meshpv1.AdvertisedRoutes_Group{
+			RouteGroupId: group.ID.String(),
+			Name:         group.Name,
+		}
+		if group.Kind == store.KindEgress {
+			carried.Prefixes = []string{"0.0.0.0/0", "::/0"}
+		} else {
+			for _, prefix := range group.Prefixes {
+				carried.Prefixes = append(carried.Prefixes, prefix.String())
+			}
+		}
+		if group.StableEgressIP != nil {
+			carried.StableEgressIp = group.StableEgressIP.String()
+		}
+		return carried
+	}
+	return nil
 }
 
 // selectFor orders one group's advertisers for one device.
