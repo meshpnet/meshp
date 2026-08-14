@@ -161,6 +161,15 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 		return nil, err
 	}
 	delta.Filter = filter
+
+	// And the route groups, for the same reason: a snapshot is the whole world, so an agent
+	// reconnecting would otherwise carry no prefixes until one changed.
+	assignments, withdrawn, err := b.routeGroupsFor(ctx, membership)
+	if err != nil {
+		return nil, err
+	}
+	delta.RouteGroups = assignments
+	delta.RemovedRouteGroupIds = withdrawn
 	return delta, nil
 }
 
@@ -181,6 +190,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	upserts := make(map[uuid.UUID]struct{})
 	removes := make(map[string]struct{})
 	policyChanged := false
+	routesChanged := false
 
 	for _, change := range changes {
 		switch change.Kind {
@@ -188,6 +198,11 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 			// Names no peer: it changes what every device may do, so the answer is to
 			// recompile this one's filter rather than to touch the peer list.
 			policyChanged = true
+
+		case "routes":
+			// Likewise: who carries a prefix is desired state for everyone, so this
+			// recomputes the assignments rather than touching peers.
+			routesChanged = true
 
 		case "peer_upsert":
 			if change.MembershipID == nil {
@@ -232,6 +247,18 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		delete(removes, peer.WireguardPublicKey)
 		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
 			peer.WireguardPublicKey, peer.DeviceName, peer.Tags, peer.AddressV4, peer.AddressV6))
+	}
+
+	if routesChanged {
+		// Only when they changed. Recomputing on every delta would resend the whole
+		// assignment set for an unrelated peer change, and an agent diffing it would
+		// reinstall routes it already has.
+		assignments, withdrawn, err := b.routeGroupsFor(ctx, membership)
+		if err != nil {
+			return nil, err
+		}
+		delta.RouteGroups = assignments
+		delta.RemovedRouteGroupIds = withdrawn
 	}
 
 	if policyChanged {

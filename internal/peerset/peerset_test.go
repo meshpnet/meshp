@@ -554,3 +554,111 @@ func TestCloneCopiesConfiguration(t *testing.T) {
 		t.Error("editing the clone's relays changed the original's")
 	}
 }
+
+func assignment(id string, prefixes ...string) *meshpv1.RouteGroupAssignment {
+	return &meshpv1.RouteGroupAssignment{RouteGroupId: id, Prefixes: prefixes}
+}
+
+// A snapshot describes the whole world, so one naming no route groups means this device
+// carries nothing. Keeping the last set would leave it routing a prefix its network no
+// longer asks it to — and a reconnect is delivered as a snapshot, so this is the path a
+// withdrawn assignment actually takes.
+func TestASnapshotClearsTheRouteGroups(t *testing.T) {
+	s := New()
+	first := snapshot(1)
+	first.RouteGroups = []*meshpv1.RouteGroupAssignment{assignment("g1", "192.168.10.0/24")}
+	s.Apply(first)
+	if len(s.RouteGroups()) != 1 {
+		t.Fatalf("the assignment was not kept: %+v", s.RouteGroups())
+	}
+
+	s.Apply(snapshot(2))
+	if got := s.RouteGroups(); len(got) != 0 {
+		t.Fatalf("a snapshot with no route groups left %+v behind", got)
+	}
+}
+
+// A delta names groups to upsert and groups to withdraw, so absent means unchanged.
+func TestADeltaUpsertsAndWithdrawsRouteGroups(t *testing.T) {
+	s := New()
+	first := snapshot(1)
+	first.RouteGroups = []*meshpv1.RouteGroupAssignment{
+		assignment("g1", "192.168.10.0/24"),
+		assignment("g2", "192.168.20.0/24"),
+	}
+	s.Apply(first)
+
+	// Unrelated change: the assignments stay.
+	s.Apply(delta(1, 2, []*meshpv1.Peer{peer("a", "100.90.0.1")}, nil))
+	if len(s.RouteGroups()) != 2 {
+		t.Fatalf("an unrelated delta changed the assignments: %+v", s.RouteGroups())
+	}
+
+	d := delta(2, 3, nil, nil)
+	d.RemovedRouteGroupIds = []string{"g1"}
+	d.RouteGroups = []*meshpv1.RouteGroupAssignment{assignment("g3", "10.0.0.0/8")}
+	s.Apply(d)
+
+	got := s.RouteGroups()
+	if len(got) != 2 {
+		t.Fatalf("%d assignments, want 2: %+v", len(got), got)
+	}
+	// Sorted by id, so two sets with the same contents render identically.
+	if got[0].GetRouteGroupId() != "g2" || got[1].GetRouteGroupId() != "g3" {
+		t.Errorf("assignments = %v %v", got[0].GetRouteGroupId(), got[1].GetRouteGroupId())
+	}
+}
+
+// A group both withdrawn and reassigned in one delta ends up assigned: the upsert is the
+// newer fact, the same rule the peer list uses.
+func TestAReassignedGroupSurvivesItsOwnWithdrawal(t *testing.T) {
+	s := New()
+	first := snapshot(1)
+	first.RouteGroups = []*meshpv1.RouteGroupAssignment{assignment("g1", "192.168.10.0/24")}
+	s.Apply(first)
+
+	d := delta(1, 2, nil, nil)
+	d.RemovedRouteGroupIds = []string{"g1"}
+	d.RouteGroups = []*meshpv1.RouteGroupAssignment{assignment("g1", "192.168.99.0/24")}
+	s.Apply(d)
+
+	got := s.RouteGroups()
+	if len(got) != 1 {
+		t.Fatalf("%d assignments, want 1", len(got))
+	}
+	if got[0].GetPrefixes()[0] != "192.168.99.0/24" {
+		t.Errorf("the withdrawal won over the reassignment: %v", got[0].GetPrefixes())
+	}
+}
+
+// Assignments are desired state like the peers are, so two sets that disagree about them
+// are not the same state — and Clone must copy them or the holder reads the session's.
+func TestRouteGroupsCountForEqualityAndAreCloned(t *testing.T) {
+	build := func(prefix string) *Set {
+		s := New()
+		d := snapshot(1)
+		d.RouteGroups = []*meshpv1.RouteGroupAssignment{assignment("g1", prefix)}
+		s.Apply(d)
+		return s
+	}
+
+	if !build("192.168.10.0/24").Equal(build("192.168.10.0/24")) {
+		t.Error("identical sets compared unequal")
+	}
+	if build("192.168.10.0/24").Equal(build("192.168.20.0/24")) {
+		t.Error("sets carrying different prefixes compared equal")
+	}
+	if build("192.168.10.0/24").Equal(New()) {
+		t.Error("a set with an assignment compared equal to one with none")
+	}
+
+	original := build("192.168.10.0/24")
+	clone := original.Clone()
+	if len(clone.RouteGroups()) != 1 {
+		t.Fatal("the clone lost the assignments")
+	}
+	clone.routeGroups["g1"].Prefixes[0] = "tampered"
+	if original.RouteGroups()[0].GetPrefixes()[0] != "192.168.10.0/24" {
+		t.Error("editing the clone changed the original")
+	}
+}
