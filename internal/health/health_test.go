@@ -63,19 +63,40 @@ func TestVerdictFusion(t *testing.T) {
 	}
 }
 
+// Starting unknown is not the same as starting healthy — and how much evidence it takes to
+// leave depends on who is speaking.
 func TestStartsUnknownAndNeedsEvidence(t *testing.T) {
 	m := NewMonitor(testPolicy(), clock.NewFake())
 	if got := m.State(); got != StateUnknown {
 		t.Fatalf("initial state = %v, want %v", got, StateUnknown)
 	}
-	// One good check is not enough to declare an advertiser fit for traffic.
+
+	// A client's verdict is enough on its own. The agent counted its own failures and
+	// successes and waited out a minimum hold before sending this, so requiring a run of
+	// them here is the same filter applied twice — and since agents report on change
+	// rather than on a timer, the second one never fills.
 	m.Observe(allOK)
-	if got := m.State(); got != StateUnknown {
-		t.Errorf("after 1 of 3 successes: state = %v, want %v", got, StateUnknown)
-	}
-	observeN(m, allOK, 2)
 	if got := m.State(); got != StateHealthy {
-		t.Errorf("after 3 successes: state = %v, want %v", got, StateHealthy)
+		t.Errorf("a client reporting it works left it at %v", got)
+	}
+}
+
+// A polled signal still has to clear the counter, because its samples are raw.
+//
+// Nothing polls yet — the control probe and the advertiser's self-report are both unbuilt —
+// so this covers the path that exists for when they arrive, and pins the distinction that
+// makes the client path defensible rather than merely convenient.
+func TestAPolledSignalStillNeedsARunOfSuccesses(t *testing.T) {
+	m := NewMonitor(testPolicy(), clock.NewFake())
+	polled := Report{SelfReport: SignalOK, ControlProbe: SignalOK}
+
+	m.Observe(polled)
+	if got := m.State(); got != StateUnknown {
+		t.Errorf("one polled success promoted straight to %v", got)
+	}
+	observeN(m, polled, 2)
+	if got := m.State(); got != StateHealthy {
+		t.Errorf("after 3 polled successes: state = %v, want %v", got, StateHealthy)
 	}
 }
 
@@ -134,25 +155,50 @@ func TestSilenceGoesOffline(t *testing.T) {
 // Going offline must discard progress toward recovery. Otherwise an advertiser
 // that banks nine successes, vanishes, and returns with one more is promoted on
 // the strength of evidence gathered before it disappeared.
+//
+// Driven by a polled signal, because banked progress is only observable where the counter
+// governs. A client's verdict does not accumulate — it is authoritative when it arrives —
+// so it could never be promoted on stale evidence in the first place.
 func TestOfflineResetsRecoveryProgress(t *testing.T) {
 	clk := clock.NewFake()
 	p := testPolicy()
 	p.RecoverThreshold = 3
 	m := NewMonitor(p, clk)
+	polled := Report{SelfReport: SignalOK, ControlProbe: SignalOK}
 
-	observeN(m, allOK, 2) // two of the three needed
+	observeN(m, polled, 2) // two of the three needed
 	clk.Advance(2 * time.Minute)
 	if tr := m.Tick(); tr.To != StateOffline {
 		t.Fatalf("state = %v, want %v", tr.To, StateOffline)
 	}
 
-	m.Observe(allOK)
+	m.Observe(polled)
 	if got := m.State(); got == StateHealthy {
 		t.Error("one success after going offline promoted straight to healthy")
 	}
-	observeN(m, allOK, 2)
+	observeN(m, polled, 2)
 	if got := m.State(); got != StateHealthy {
 		t.Errorf("after a fresh run of 3: state = %v, want %v", got, StateHealthy)
+	}
+}
+
+// The other half of the same rule: an advertiser that comes back and is reported working by
+// a device actually routing through it is promoted at once. That is not stale evidence — it
+// is the freshest evidence available, from the only vantage point that measures what users
+// experience. Withholding it would leave a working gateway ranked below its peers until
+// nine more reports arrived that the agent has no reason to send.
+func TestAReturningAdvertiserIsPromotedOnAClientsWord(t *testing.T) {
+	clk := clock.NewFake()
+	m := NewMonitor(testPolicy(), clk)
+
+	observeN(m, allOK, 1)
+	clk.Advance(2 * time.Minute)
+	if tr := m.Tick(); tr.To != StateOffline {
+		t.Fatalf("state = %v, want %v", tr.To, StateOffline)
+	}
+
+	if tr := m.Observe(allOK); tr.To != StateHealthy {
+		t.Errorf("a returning advertiser reported reachable is %v, want healthy", tr.To)
 	}
 }
 

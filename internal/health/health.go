@@ -11,10 +11,25 @@
 //
 // Second, moving traffic is not free. Every reassignment breaks live connections
 // (Invariant 11), so a monitor that changes its mind readily is worse than one
-// that is slightly slow. The hysteresis here is deliberately asymmetric:
-// degradation is immediate, improvement is rate limited. Being slow to distrust
-// a broken advertiser costs users their traffic; being slow to trust a recovered
-// one costs nothing but a little capacity.
+// that is slightly slow. The hysteresis here is deliberately asymmetric, and the
+// asymmetry runs along which signal is speaking rather than along the direction
+// of the change.
+//
+// A client's verdict is authoritative on arrival, because the agent has already
+// applied its own hysteresis before sending one (internal/routeprobe counts
+// failures and successes and holds a minimum time before moving). So a client
+// report improves the state on its own evidence, bounded in time by the cooldown
+// rather than by a second sample count. Counting samples again would apply the
+// same filter twice, and since agents report on change rather than on a timer,
+// the second count is over events and never reaches a threshold sized for
+// polling.
+//
+// Degradation keeps its sample count, which is not symmetry but a different
+// concern: nothing here aggregates across clients yet, so that counter is the
+// only thing between one device's broken Wi-Fi and an advertiser marked
+// unhealthy for the whole network. Being slow to distrust a broken advertiser
+// costs users their traffic, and distrusting a working one on one device's word
+// costs everyone else theirs.
 package health
 
 import (
@@ -308,7 +323,7 @@ func (m *Monitor) Observe(r Report) Transition {
 	case verdictNone:
 	}
 
-	want, reason := m.desiredLocked(v)
+	want, reason := m.desiredLocked(v, r)
 	return m.transitionLocked(want, reason, now)
 }
 
@@ -321,7 +336,7 @@ func (m *Monitor) Tick() Transition {
 }
 
 // desiredLocked computes the state the evidence points at, ignoring cooldown.
-func (m *Monitor) desiredLocked(v verdict) (State, string) {
+func (m *Monitor) desiredLocked(v verdict, r Report) (State, string) {
 	switch v {
 	case verdictFail:
 		if m.consecutiveFail >= m.policy.FailThreshold {
@@ -332,6 +347,25 @@ func (m *Monitor) desiredLocked(v verdict) (State, string) {
 			return StateDegraded, fmt.Sprintf("%d consecutive checks with disagreeing signals", m.consecutivePartial)
 		}
 	case verdictOK:
+		// A client's verdict arrives already filtered. The agent counts its own
+		// failures and successes and holds a minimum time before it moves at all
+		// (internal/routeprobe), so by the time a report is sent the hysteresis
+		// has been applied once. Counting samples again here applies it twice —
+		// and because agents report on change rather than on a timer, the second
+		// count is over events and never reaches a threshold sized for polling.
+		// One client would contribute one sample and the advertiser would sit at
+		// unknown forever, which is what this used to do.
+		//
+		// Deliberately not symmetric with the failure path above. That counter is
+		// the only thing standing between one device's broken Wi-Fi and an
+		// advertiser marked unhealthy for the whole network, because the
+		// cross-client aggregation Report describes does not exist yet. Improving
+		// too readily costs nothing by comparison: an advertiser wrongly called
+		// healthy is one the agents will demote again from their own probes, and
+		// the cooldown in transitionLocked still bounds how often it can happen.
+		if r.ClientObserved == SignalOK {
+			return StateHealthy, "the devices routing through it report reaching it"
+		}
 		if m.consecutiveOK >= m.policy.RecoverThreshold {
 			return StateHealthy, fmt.Sprintf("%d consecutive successful checks", m.consecutiveOK)
 		}

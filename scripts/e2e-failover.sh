@@ -353,25 +353,16 @@ if [ "$reported" != "1" ]; then
 fi
 echo "  the control plane recorded the client's verdict (consecutive_ok=${observed})"
 
-# A healthy report must never make an advertiser unselectable. Asserted as "still
-# selectable" rather than as "healthy", and the difference is a finding rather than a
-# looser test:
-#
-# the agent reports only on change, and the monitor needs RecoverThreshold consecutive
-# healthy observations to leave a state. One client therefore contributes exactly one
-# observation and the advertiser stays 'unknown' indefinitely — it only reaches 'healthy'
-# if ten *different* clients happen to report, which is not a design so much as an
-# accident of arithmetic. Selection treats unknown as usable and ranks it last, so nothing
-# breaks today; what breaks is an operator's view, where every advertiser is permanently
-# 'unknown'. Pinning 'healthy' here would assert behaviour this deployment cannot produce,
-# and pinning 'unknown' would freeze the mismatch into a test.
+# One report from one device is enough, because it arrives already filtered: the agent
+# counted its own failures and successes and held a minimum time before sending it, so the
+# control plane does not count samples again. This assertion could not be made until it
+# did — an advertiser used to sit at 'unknown' until ten different clients happened to
+# report, which was arithmetic rather than design.
 state="$(psql "$DB_URL" -tAqc \
   "SELECT state FROM advertiser_health WHERE advertiser_id = '${ADVERTISER_ROW}'")"
-case "$state" in
-  healthy|degraded|unknown) ;;
-  *) fail "a healthy report left the advertiser '${state}', which selection will not use" ;;
-esac
-echo "  and left it selectable (state=${state})"
+[ "$state" = "healthy" ] \
+  || fail "one client reported it reachable and it is '${state}', want healthy"
+echo "  and moved it to healthy on that one report"
 
 echo
 echo "two agents, two namespaces, one real handshake, and a verdict that reached the control plane"
