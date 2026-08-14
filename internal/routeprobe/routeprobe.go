@@ -20,6 +20,7 @@
 package routeprobe
 
 import (
+	"sync"
 	"time"
 
 	"github.com/meshpnet/meshp/internal/clock"
@@ -38,11 +39,18 @@ const (
 
 // Chooser tracks which candidate is in use for each route group.
 //
-// Safe for concurrent use: the reconciler asks which candidate to configure while a prober
-// is folding results in.
+// Safe for concurrent use, and it has to be: the reconciler folds results in from its own
+// timer while the session drains reports out to the control plane, and the reconciler
+// itself is entered both from that timer and from an arriving state delta.
 type Chooser struct {
-	clk    clock.Clock
+	clk clock.Clock
+
+	mu     sync.Mutex
 	groups map[string]*groupState
+
+	// pending holds at most one unsent report per group. Why one and not a queue is in
+	// report.go, and it is a correctness argument rather than a tidiness one.
+	pending map[string]*meshpv1.ReachabilityReport
 }
 
 type groupState struct {
@@ -66,7 +74,11 @@ func New(clk clock.Clock) *Chooser {
 	if clk == nil {
 		clk = clock.System{}
 	}
-	return &Chooser{clk: clk, groups: make(map[string]*groupState)}
+	return &Chooser{
+		clk:     clk,
+		groups:  make(map[string]*groupState),
+		pending: make(map[string]*meshpv1.ReachabilityReport),
+	}
 }
 
 // Current returns the candidate to use for an assignment.
@@ -82,6 +94,9 @@ func (c *Chooser) Current(assignment *meshpv1.RouteGroupAssignment) *meshpv1.Rou
 	if len(candidates) == 0 {
 		return nil
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	id := assignment.GetRouteGroupId()
 	state, ok := c.groups[id]
@@ -144,10 +159,27 @@ type Decision struct {
 
 	// Current is the advertiser now in use.
 	Current string
+
+	// ConsecutiveFailures is how many failures in a row this result makes, and on a
+	// decision that moved, how many it took to move. Reported onward so the control plane
+	// can tell an advertiser that failed once from one that failed three times, which is
+	// the difference between a lost packet and an outage.
+	ConsecutiveFailures int
 }
 
 // Observe folds a probe result in and reports what it led to.
 func (c *Chooser) Observe(assignment *meshpv1.RouteGroupAssignment, result Result) Decision {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	decision := c.observeLocked(assignment, result)
+	if decision.Report {
+		c.recordLocked(assignment.GetRouteGroupId(), decision, result)
+	}
+	return decision
+}
+
+func (c *Chooser) observeLocked(assignment *meshpv1.RouteGroupAssignment, result Result) Decision {
 	id := assignment.GetRouteGroupId()
 	state, ok := c.groups[id]
 	if !ok || state.currentID == "" {
@@ -169,6 +201,9 @@ func (c *Chooser) Observe(assignment *meshpv1.RouteGroupAssignment, result Resul
 	if !result.Reachable {
 		state.consecutiveOK = 0
 		state.consecutiveFail++
+		// Read before any move. Moving resets the counter, so taking it afterwards would
+		// report every switch as having been caused by nothing.
+		decision.ConsecutiveFailures = state.consecutiveFail
 		if state.consecutiveFail < failThreshold {
 			return decision
 		}
@@ -241,7 +276,14 @@ func (c *Chooser) moveTo(state *groupState, advertiserID string) {
 
 // Forget drops state for groups no longer assigned, so a device that carried a prefix for a
 // while does not remember its choice forever.
+//
+// Unsent reports go with it. A verdict about a group this device has been taken out of is
+// not news the control plane can use: it would be folded into that advertiser's health on
+// behalf of a device that is no longer behind it.
 func (c *Chooser) Forget(assigned []*meshpv1.RouteGroupAssignment) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	keep := make(map[string]struct{}, len(assigned))
 	for _, a := range assigned {
 		keep[a.GetRouteGroupId()] = struct{}{}
@@ -249,6 +291,14 @@ func (c *Chooser) Forget(assigned []*meshpv1.RouteGroupAssignment) {
 	for id := range c.groups {
 		if _, ok := keep[id]; !ok {
 			delete(c.groups, id)
+		}
+	}
+	// Swept separately rather than alongside the groups: a report handed back by Requeue
+	// after its group was forgotten has no group state to be found by, and would otherwise
+	// sit in the queue for the life of the process.
+	for id := range c.pending {
+		if _, ok := keep[id]; !ok {
+			delete(c.pending, id)
 		}
 	}
 }

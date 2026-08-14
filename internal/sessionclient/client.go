@@ -35,11 +35,16 @@ import (
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
-const (
-	// heartbeatInterval is well inside the server's idle timeout, so a healthy
-	// connection is never mistaken for a dead one.
-	heartbeatInterval = 25 * time.Second
+// heartbeatInterval is well inside the server's idle timeout, so a healthy connection is
+// never mistaken for a dead one.
+//
+// A variable so a test can shorten it. The heartbeat is not only a liveness tick — it is the
+// only thing that carries a reachability report on a network quiet enough to send no state
+// deltas, which is exactly the network where a device failing over has news worth hearing.
+// Leaving that call site untestable is how it comes to be missing.
+var heartbeatInterval = 25 * time.Second
 
+const (
 	dialTimeout     = 20 * time.Second
 	writeTimeout    = 10 * time.Second
 	readIdleTimeout = 90 * time.Second
@@ -102,6 +107,27 @@ type Revoker interface {
 	Revoked(reason string, wipeLocalState bool)
 }
 
+// ReachabilityReports supplies this device's verdicts on the advertisers it is routing
+// through.
+//
+// The control plane cannot learn this by asking. It can reach an advertiser's host and still
+// know nothing about whether traffic sent through it arrives, so the devices behind it are
+// the only source — and their reports are what reorder the candidates every other device is
+// handed. A device that decided locally and never said so would keep the next device being
+// sent to the same dead gateway.
+//
+// Behind an interface for the reason the relay credentials are: what produces these is the
+// reconciler, on its own timer, and the session must be able to drop without the device
+// forgetting what it has observed (Invariant 15).
+type ReachabilityReports interface {
+	// Pending takes the reports waiting to be sent. Taking, not copying: what comes back
+	// is this client's to deliver.
+	Pending() []*meshpv1.ReachabilityReport
+
+	// Requeue hands back what could not be sent.
+	Requeue(reports []*meshpv1.ReachabilityReport)
+}
+
 // Options configures a Client.
 type Options struct {
 	ControlURL   string
@@ -121,6 +147,10 @@ type Options struct {
 	// Revoked is told when the control plane ends this membership. Nil is fine: the
 	// membership is over either way.
 	Revoked Revoker
+
+	// Reachability is asked for advertiser verdicts to send on. Nil on a build with no
+	// data plane, which has nothing to observe and so nothing to say.
+	Reachability ReachabilityReports
 
 	// CanFilter is whether this host can enforce a packet filter.
 	//
@@ -235,6 +265,33 @@ func (c *Client) maybeRequestRelayToken(outbound chan<- *meshpv1.ClientMessage) 
 		Payload: &meshpv1.ClientMessage_RelayTokenRequest{RelayTokenRequest: &meshpv1.RelayTokenRequest{}},
 	}:
 	default:
+	}
+}
+
+// sendReachabilityReports passes on what this device has observed about its advertisers.
+//
+// Sent on the heartbeat and again as soon as state has been applied. The second matters more
+// than it looks: applying state is what runs a reconcile, which is what produces a verdict,
+// so waiting for the next tick would sit on the news for up to 25 seconds — and a device
+// that has just failed over is exactly the device the control plane wants to hear from.
+//
+// A full queue stops the run and hands the rest back. The writer is already behind, and a
+// report that waits is better than one that is lost: these are produced when something is
+// already wrong.
+func (c *Client) sendReachabilityReports(outbound chan<- *meshpv1.ClientMessage) {
+	if c.opts.Reachability == nil {
+		return
+	}
+	reports := c.opts.Reachability.Pending()
+	for i, report := range reports {
+		select {
+		case outbound <- &meshpv1.ClientMessage{
+			Payload: &meshpv1.ClientMessage_ReachabilityReport{ReachabilityReport: report},
+		}:
+		default:
+			c.opts.Reachability.Requeue(reports[i:])
+			return
+		}
 	}
 }
 
@@ -429,6 +486,11 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				// notice on a timer rather than only when state changes. The heartbeat is
 				// already the agent's "still here" tick and needs no goroutine of its own.
 				c.maybeRequestRelayToken(outbound)
+
+				// And the reconciler runs on its own timer, so a verdict can be produced
+				// with no state delta anywhere near it. Without this, a device on a quiet
+				// network would hold the news of its own failover indefinitely.
+				c.sendReachabilityReports(outbound)
 			}
 		}
 	}()
@@ -470,6 +532,10 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 			// moment worth asking — waiting for the next heartbeat would leave every peer
 			// relay-less for up to 25 seconds after a join.
 			c.maybeRequestRelayToken(outbound)
+
+			// Applying state ran a reconcile, which is what produces a verdict, so this is
+			// the earliest moment there is anything to send.
+			c.sendReachabilityReports(outbound)
 
 		case *meshpv1.ServerMessage_RelayToken:
 			c.handleRelayToken(payload.RelayToken)

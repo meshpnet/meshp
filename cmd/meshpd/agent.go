@@ -20,6 +20,7 @@ import (
 	"github.com/meshpnet/meshp/internal/nftables"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/relaylink"
+	"github.com/meshpnet/meshp/internal/routeprobe"
 	"github.com/meshpnet/meshp/internal/sessionclient"
 	"github.com/meshpnet/meshp/internal/tunnel"
 	"github.com/meshpnet/meshp/internal/version"
@@ -92,7 +93,7 @@ func (a *agent) ensureLink() wglink.Link {
 // reason to refuse the session: the control channel is still worth having, the device is
 // still enrolled, and `meshp status` still has something true to report. What would be wrong
 // is claiming a tunnel exists.
-func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, log *slog.Logger) *tunnel.Reconciler {
+func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, chooser *routeprobe.Chooser, log *slog.Logger) *tunnel.Reconciler {
 	if a.ensureLink() == nil {
 		return nil
 	}
@@ -102,7 +103,7 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, log *
 		AddressV4:     m.AddressV4,
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
-	}, relay, a.filterOrNil(), log)
+	}, relay, a.filterOrNil(), log).WithChooser(chooser)
 }
 
 // ensureFilter opens the host's packet filter, once.
@@ -297,12 +298,23 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 	// Built before the reconciler, which needs it to give relayed peers an endpoint, and
 	// handed to the session, which is how the credential to use it arrives (ADR-0017).
 	relay := a.relayFor(m, log)
+
+	// One chooser for as long as this membership is supervised, shared by the two halves of
+	// the failover loop: the reconciler folds observations in and acts on the answer, and
+	// the session drains the verdicts out to the control plane.
+	//
+	// It sits outside the session deliberately. A control channel dropping and reconnecting
+	// must not reset the counters and hold times, because they are the whole mechanism — and
+	// a control-plane outage is precisely when a device has to be able to leave a dead
+	// gateway on its own (Invariant 15).
+	chooser := routeprobe.New(nil)
+
 	applier := &deviceApplier{
 		log:          log,
 		membershipID: m.MembershipID,
 		agent:        a,
 		relay:        relay,
-		reconciler:   a.reconcilerFor(m, relayOrNil(relay), log),
+		reconciler:   a.reconcilerFor(m, relayOrNil(relay), chooser, log),
 	}
 	client := sessionclient.New(sessionclient.Options{
 		ControlURL:   m.ControlURL,
@@ -314,6 +326,7 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 		Relay:        relayCredentials(relay),
 		CanFilter:    a.ensureFilter() != nil,
 		Revoked:      &membershipRevoker{agent: a, membershipID: m.MembershipID},
+		Reachability: chooser,
 		Log:          log,
 	})
 	a.running[m.MembershipID] = &sessionHandle{

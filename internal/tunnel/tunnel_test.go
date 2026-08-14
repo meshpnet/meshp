@@ -1544,3 +1544,111 @@ func TestTheHandshakeGraceIsHonoured(t *testing.T) {
 		t.Error("a peer that is not configured produced a verdict")
 	}
 }
+
+// The middle link of the failover loop: a reconcile pass has to leave the control plane
+// something to read. The chooser deciding locally is only half the point — the other half is
+// every other device being reordered away from the same dead gateway, and that needs the
+// verdict to leave this one.
+func TestAReconcilePassQueuesAVerdictForTheControlPlane(t *testing.T) {
+	clk := clock.NewFake()
+	link := newFakeLink()
+	chooser := routeprobe.New(clk)
+	r := New(link, membership(), nil, nil, nil).WithChooser(chooser)
+
+	state := stateWithRoutes(1,
+		[]*meshpv1.RouteGroupAssignment{twoCandidates("branch", bobKey, carolKey, "192.168.10.0/24")},
+		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
+
+	// The first pass configures the peers; there is nothing on the interface to read yet.
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if got := chooser.Pending(); len(got) != 0 {
+		t.Fatalf("queued %d verdicts about peers that were not on the interface yet", len(got))
+	}
+
+	// Both answering, so this pass is a healthy verdict about the first preference.
+	for i := range link.observed.Peers {
+		link.observed.Peers[i].HasHandshake = true
+		link.observed.Peers[i].HandshakeAge = time.Second
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	first := chooser.Pending()
+	if len(first) != 1 {
+		t.Fatalf("a reconcile pass queued %d verdicts, want one per group", len(first))
+	}
+	if !first[0].GetReachable() || first[0].GetAdvertiserId() != "adv-first" {
+		t.Errorf("verdict = %+v, want a healthy one about the first advertiser", first[0])
+	}
+
+	// Now the advertiser in use goes silent.
+	for i := range link.observed.Peers {
+		if string(link.observed.Peers[i].PublicKey) == bobKey {
+			link.observed.Peers[i].HandshakeAge = time.Hour
+		}
+	}
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := chooser.Pending()
+	if len(moved) != 1 {
+		t.Fatalf("the move queued %d verdicts", len(moved))
+	}
+	if moved[0].GetSwitchedFromAdvertiserId() != "adv-first" || moved[0].GetAdvertiserId() != "adv-second" {
+		t.Errorf("verdict = %+v, want the move reported with both ends", moved[0])
+	}
+	if moved[0].GetSwitchReason() == "" {
+		t.Error("the move was queued with no reason for anyone reading an audit log later")
+	}
+}
+
+// A device taken out of a group must not still be reporting on its advertisers: the server
+// would fold that into the advertiser's health on behalf of a device no longer behind it.
+//
+// Run twice against the same setup, keeping the group and then withdrawing it, because
+// "nothing was queued" is the answer a broken version of this test gives too.
+func TestAVerdictIsNotQueuedForAGroupTheDeviceHasLeft(t *testing.T) {
+	queuedAfterWithdrawing := func(t *testing.T, withdraw bool) int {
+		t.Helper()
+		link := newFakeLink()
+		chooser := routeprobe.New(clock.NewFake())
+		r := New(link, membership(), nil, nil, nil).WithChooser(chooser)
+
+		assigned := []*meshpv1.RouteGroupAssignment{
+			twoCandidates("branch", bobKey, carolKey, "192.168.10.0/24"),
+		}
+		peers := []*meshpv1.Peer{peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32")}
+
+		// The first pass puts the peers on the interface; the second observes them and
+		// queues a verdict that nothing has drained.
+		if _, err := r.Apply(context.Background(), stateWithRoutes(1, assigned, peers...)); err != nil {
+			t.Fatal(err)
+		}
+		for i := range link.observed.Peers {
+			link.observed.Peers[i].HasHandshake = true
+			link.observed.Peers[i].HandshakeAge = time.Second
+		}
+		if _, err := r.Apply(context.Background(), stateWithRoutes(2, assigned, peers...)); err != nil {
+			t.Fatal(err)
+		}
+
+		next := assigned
+		if withdraw {
+			next = nil
+		}
+		if _, err := r.Apply(context.Background(), stateWithRoutes(3, next, peers...)); err != nil {
+			t.Fatal(err)
+		}
+		return len(chooser.Pending())
+	}
+
+	if got := queuedAfterWithdrawing(t, false); got != 1 {
+		t.Fatalf("a device still in the group queued %d verdicts, want one", got)
+	}
+	if got := queuedAfterWithdrawing(t, true); got != 0 {
+		t.Errorf("queued %d verdicts about a group this device has left", got)
+	}
+}
