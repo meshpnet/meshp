@@ -24,6 +24,10 @@ type Change struct {
 	// Policy marks a change to the network's ACL policy, which names no peer because it
 	// changes what every device may do.
 	Policy bool
+
+	// Routes marks a change to a route group or its advertisers, which names no peer for
+	// the same reason.
+	Routes bool
 }
 
 // PeerUpserted records that a membership's peer state changed.
@@ -37,6 +41,13 @@ func PeerRemoved(publicKey string) Change {
 	key := publicKey
 	return Change{PeerPublicKey: &key}
 }
+
+// RoutesChanged records that a route group or one of its advertisers changed.
+//
+// Names nothing, like a policy change and for the same reason: who carries a prefix is
+// desired state for every device in the network, not only for the advertiser. Everyone
+// else has to be told where to send that traffic.
+func RoutesChanged() Change { return Change{Routes: true} }
 
 // PolicyChanged records that the network's ACL policy changed.
 //
@@ -85,6 +96,12 @@ func BumpVersion(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, cha
 // kind reports which sort of change this is, refusing anything ambiguous.
 func (c Change) kind() (string, error) {
 	switch {
+	case c.Policy && c.Routes:
+		return "", errors.New("a change is both a policy change and a route change; it must be one")
+	case c.Routes && (c.MembershipID != nil || c.PeerPublicKey != nil):
+		return "", errors.New("a route change also names a peer; it is about all of them")
+	case c.Routes:
+		return "routes", nil
 	case c.Policy && (c.MembershipID != nil || c.PeerPublicKey != nil):
 		return "", errors.New("a policy change also names a peer; it is about all of them")
 	case c.Policy:

@@ -9,7 +9,6 @@ import (
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/store"
-	dbgen "github.com/meshpnet/meshp/internal/store/gen"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
@@ -123,8 +122,31 @@ func (s *Server) handleListMemberships(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, r, err)
 		return
 	}
-	if rows == nil {
-		rows = []dbgen.ListMembershipsForNetworkRow{}
+
+	// Rendered field by field rather than handing back the database row. A generated row
+	// struct carries no JSON tags, so marshalling it directly publishes Go field names —
+	// MembershipID next to every other endpoint's membership_id — and makes the shape of
+	// this API a consequence of how a query happened to be written.
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		device := map[string]any{
+			"membership_id":        row.MembershipID,
+			"device_id":            row.DeviceID,
+			"device_name":          row.DeviceName,
+			"state":                row.State,
+			"joined_at":            row.JoinedAt,
+			"wireguard_public_key": row.WireguardPublicKey,
+		}
+		if row.AddressV4 != nil {
+			device["address_v4"] = row.AddressV4.String()
+		}
+		if row.AddressV6 != nil {
+			device["address_v6"] = row.AddressV6.String()
+		}
+		if row.RevokedAt != nil {
+			device["revoked_at"] = row.RevokedAt
+		}
+		out = append(out, device)
 	}
-	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]any{"devices": rows})
+	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]any{"devices": out})
 }
