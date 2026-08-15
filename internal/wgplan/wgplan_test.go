@@ -1181,3 +1181,30 @@ func TestASteadyRelayedPeerIsLeftAlone(t *testing.T) {
 		t.Errorf("a steady relayed peer produced work:\n%s", plan)
 	}
 }
+
+// A default route overlaps every other peer's address, which is what it is for. WireGuard
+// resolves it by longest match, so a peer's own /32 still wins — refusing this would make a
+// full tunnel impossible in exactly the configuration everyone writes.
+func TestACatchAllDoesNotCollideWithSpecificRoutes(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{
+		{PublicKey: Key("peer-a"), AllowedIPs: prefixes(t, "100.90.0.2/32")},
+		{PublicKey: Key("peer-b"), AllowedIPs: prefixes(t, "0.0.0.0/0", "::/0")},
+	}
+	if err := iface.Validate(); err != nil {
+		t.Errorf("a full tunnel alongside a host route was refused: %v", err)
+	}
+}
+
+// Two of them is a different matter: which one wins is undefined, and a device would send
+// everything to whichever peer the kernel happened to prefer.
+func TestTwoCatchAllsAreRefused(t *testing.T) {
+	iface := base(t)
+	iface.Peers = []Peer{
+		{PublicKey: Key("peer-a"), AllowedIPs: prefixes(t, "0.0.0.0/0")},
+		{PublicKey: Key("peer-b"), AllowedIPs: prefixes(t, "0.0.0.0/0")},
+	}
+	if err := iface.Validate(); err == nil {
+		t.Error("two peers both claiming every destination were accepted")
+	}
+}
