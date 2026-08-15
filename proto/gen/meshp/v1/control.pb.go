@@ -1216,7 +1216,14 @@ type TunnelConfig struct {
 	ExcludedPrefixes []string `protobuf:"bytes,2,rep,name=excluded_prefixes,json=excludedPrefixes,proto3" json:"excluded_prefixes,omitempty"`
 	// Fail closed: while a default route is claimed and the tunnel is down, the
 	// agent blocks non-tunnel egress (ADR-0011).
-	FailClosed    bool `protobuf:"varint,3,opt,name=fail_closed,json=failClosed,proto3" json:"fail_closed,omitempty"`
+	//
+	// Optional so that absent and false are different answers. ADR-0011 makes the
+	// default for an egress group closed, and a plain bool cannot say "nobody has
+	// chosen" — it would make every control plane that has never heard of this
+	// field ask every device to fail open, which is the one direction that must
+	// never happen by omission. Unset means closed; only an explicit false opens
+	// it, and that is an administrator's decision to make deliberately.
+	FailClosed    *bool `protobuf:"varint,3,opt,name=fail_closed,json=failClosed,proto3,oneof" json:"fail_closed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1266,8 +1273,8 @@ func (x *TunnelConfig) GetExcludedPrefixes() []string {
 }
 
 func (x *TunnelConfig) GetFailClosed() bool {
-	if x != nil {
-		return x.FailClosed
+	if x != nil && x.FailClosed != nil {
+		return *x.FailClosed
 	}
 	return false
 }
@@ -3279,12 +3286,13 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"\brelay_id\x18\x06 \x01(\tR\arelayId\x12\x1f\n" +
 	"\vdevice_name\x18\a \x01(\tR\n" +
 	"deviceName\x12\x12\n" +
-	"\x04tags\x18\b \x03(\tR\x04tags\"n\n" +
+	"\x04tags\x18\b \x03(\tR\x04tags\"\x83\x01\n" +
 	"\fTunnelConfig\x12\x10\n" +
 	"\x03mtu\x18\x01 \x01(\rR\x03mtu\x12+\n" +
-	"\x11excluded_prefixes\x18\x02 \x03(\tR\x10excludedPrefixes\x12\x1f\n" +
-	"\vfail_closed\x18\x03 \x01(\bR\n" +
-	"failClosed\"\xef\x01\n" +
+	"\x11excluded_prefixes\x18\x02 \x03(\tR\x10excludedPrefixes\x12$\n" +
+	"\vfail_closed\x18\x03 \x01(\bH\x00R\n" +
+	"failClosed\x88\x01\x01B\x0e\n" +
+	"\f_fail_closed\"\xef\x01\n" +
 	"\tDnsConfig\x12 \n" +
 	"\vnameservers\x18\x01 \x03(\tR\vnameservers\x12%\n" +
 	"\x0esearch_domains\x18\x02 \x03(\tR\rsearchDomains\x121\n" +
@@ -3583,6 +3591,7 @@ func file_meshp_v1_control_proto_init() {
 		(*ServerMessage_HeartbeatAck)(nil),
 		(*ServerMessage_RelayToken)(nil),
 	}
+	file_meshp_v1_control_proto_msgTypes[9].OneofWrappers = []any{}
 	file_meshp_v1_control_proto_msgTypes[18].OneofWrappers = []any{
 		(*SignalEnvelope_Offer)(nil),
 		(*SignalEnvelope_Answer)(nil),

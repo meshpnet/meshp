@@ -334,9 +334,14 @@ func (b *StateBuilder) tunnelConfig() *meshpv1.TunnelConfig {
 
 	return &meshpv1.TunnelConfig{
 		Mtu: mtu,
-		// No default route is claimed yet, so there is nothing to fail closed around. This
-		// turns on with route groups (ADR-0011).
-		FailClosed: false,
+		// Left unset, which the agent reads as closed (ADR-0011). Sending an explicit false
+		// would be this control plane asking every device to leak if its tunnel drops, and
+		// nothing here has been told to want that — an administrator opting out is a
+		// decision that needs somewhere to be recorded first, and there is nowhere yet.
+		//
+		// Unset rather than an explicit true for the same reason: what is stored is what an
+		// operator chose, and nobody has chosen anything.
+		FailClosed: nil,
 	}
 }
 

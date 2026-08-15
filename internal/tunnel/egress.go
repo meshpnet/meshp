@@ -25,14 +25,23 @@ import (
 // Nothing here is best effort. If the carve-out cannot be computed the group is unhonoured
 // and no lock is installed, because a device that locks itself away from its control plane
 // is off the network for a reason nobody watching can see.
-func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, relays, excluded []string) []string {
+func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, failClosed bool, relays, excluded []string) []string {
 	if !want {
 		r.releaseEgress(ctx)
 		return nil
 	}
-	if r.egress == nil || r.filter == nil {
+	if r.egress == nil {
 		r.log.Error("this device is meant to send everything through the tunnel and cannot",
-			"hint", "a full tunnel needs policy routing and a packet filter; this host has one or neither")
+			"hint", "a full tunnel needs policy routing, which this host does not have")
+		return []string{"egress"}
+	}
+	if failClosed && r.filter == nil {
+		// Refused rather than downgraded. An administrator asking for fail-closed is asking
+		// for the property that traffic never leaves outside the tunnel, and a device that
+		// claimed the route while quietly declining to enforce it would report the property
+		// and not have it — which is the dishonesty ADR-0011 is written against.
+		r.log.Error("this network asks devices to fail closed and this host cannot",
+			"hint", "fail-closed egress needs a packet filter, and this host has none")
 		return []string{"egress"}
 	}
 
@@ -54,10 +63,12 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, r
 		return []string{"egress"}
 	}
 
-	if err := r.filter.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes); err != nil {
-		r.log.Error("cannot refuse egress outside the tunnel; not claiming a default route",
-			"error", logx.SafeError(err))
-		return []string{"egress"}
+	if failClosed {
+		if err := r.filter.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes); err != nil {
+			r.log.Error("cannot refuse egress outside the tunnel; not claiming a default route",
+				"error", logx.SafeError(err))
+			return []string{"egress"}
+		}
 	}
 	if err := r.egress.Claim(iface); err != nil {
 		// The lock is on and the route is not, which is the safe half of a half-done claim:
@@ -71,8 +82,15 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, r
 
 	if !r.claimed {
 		r.log.Info("this device now sends everything through the tunnel",
-			"interface", iface,
+			"interface", iface, "fail_closed", failClosed,
 			"kept_direct", len(carve.Prefixes), "endpoints_kept", len(carve.Endpoints))
+		if !failClosed {
+			// Said plainly, because it is the difference between the product this claims to
+			// be and a route that happens to point somewhere. Whoever turned it off should
+			// be able to find out from the log that they did.
+			r.log.Warn("egress is not failing closed; traffic will leave in the clear if the tunnel drops",
+				"reason", "this network's policy says fail_closed is false")
+		}
 	}
 	r.claimed = true
 	return nil
@@ -105,6 +123,19 @@ func (r *Reconciler) releaseEgress(ctx context.Context) {
 
 	r.claimed = false
 	r.log.Info("no longer sending everything through the tunnel")
+}
+
+// failClosedFor reads the network's fail-closed policy.
+//
+// Absent means closed. ADR-0011 makes that the default for an egress group, and the field
+// is optional precisely so this can tell "nobody has chosen" from "somebody chose to fail
+// open" — a control plane that has never heard of the field would otherwise be asking every
+// device to leak, which is the one direction that must never happen by omission.
+func failClosedFor(tunnel *meshpv1.TunnelConfig) bool {
+	if tunnel == nil || tunnel.FailClosed == nil {
+		return true
+	}
+	return *tunnel.FailClosed
 }
 
 // wantsEgress reports whether any assigned group asks for a default route, and what the

@@ -195,7 +195,14 @@ message TunnelConfig {
 
   // Fail closed: while a default route is claimed and the tunnel is down, the
   // agent blocks non-tunnel egress (ADR-0011).
-  bool fail_closed = 3;
+  //
+  // Optional so that absent and false are different answers. ADR-0011 makes the
+  // default for an egress group closed, and a plain bool cannot say "nobody has
+  // chosen" — it would make every control plane that has never heard of this
+  // field ask every device to fail open, which is the one direction that must
+  // never happen by omission. Unset means closed; only an explicit false opens
+  // it, and that is an administrator's decision to make deliberately.
+  optional bool fail_closed = 3;
 }
 
 message DnsConfig {
