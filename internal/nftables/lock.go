@@ -39,6 +39,16 @@ type LockSpec struct {
 	// and often its default gateway. What belongs in here is decided elsewhere; this only
 	// renders it.
 	Excluded []netip.Prefix
+
+	// PreventDNSLeaks refuses plaintext DNS that is not going through the tunnel.
+	//
+	// The lock already refuses everything it does not name, so this is not about the wider
+	// internet — it is about the hole the carve-out has to leave. The local network is
+	// permitted so the device keeps its printer and its gateway, and the local network is
+	// also where the resolver lives. A tunnel that is up while queries go to the router
+	// discloses every name the user looks up to whoever runs that network, which is most of
+	// what they are doing and exactly what they turned the tunnel on to avoid.
+	PreventDNSLeaks bool
 }
 
 // RenderLock turns a lock specification into a ruleset that refuses everything else.
@@ -101,6 +111,20 @@ func RenderLock(spec LockSpec) (string, error) {
 			LockTableName, family, addr.String(), ep.Port())
 		fmt.Fprintf(&b, "add rule inet %s output %s daddr %s tcp dport %d accept\n",
 			LockTableName, family, addr.String(), ep.Port())
+	}
+
+	// Before the carve-out, and that order is the whole of this rule. Refusing DNS after
+	// the local network has been permitted would refuse nothing: the resolver is on the
+	// local network.
+	//
+	// Plaintext only, which is what ADR-0011 asks for. DNS over TLS on 853 does not
+	// disclose the query to the network it crosses, and DNS over HTTPS is indistinguishable
+	// from any other HTTPS — blocking 443 would take the device off the internet to close a
+	// hole that this rule cannot see anyway. mDNS on 5353 is left alone too: it never leaves
+	// the link, and refusing it costs the printer discovery the carve-out exists to keep.
+	if spec.PreventDNSLeaks {
+		fmt.Fprintf(&b, "add rule inet %s output udp dport 53 reject\n", LockTableName)
+		fmt.Fprintf(&b, "add rule inet %s output tcp dport 53 reject\n", LockTableName)
 	}
 
 	// The local network and anything else carved out.

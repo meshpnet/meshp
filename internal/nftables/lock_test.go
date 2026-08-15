@@ -135,3 +135,67 @@ func TestTheSameSpecRendersTheSameScript(t *testing.T) {
 		t.Error("the same lock rendered differently depending on the order it was given in")
 	}
 }
+
+// The hole this closes is the one the carve-out has to leave. The local network is
+// permitted so the device keeps its printer and its gateway, and the resolver lives on the
+// local network — so a tunnel that is up while queries go to the router discloses every
+// name the user looks up to whoever runs that network.
+func TestPreventingDNSLeaksRefusesPlaintextDNS(t *testing.T) {
+	spec := aLock()
+	spec.PreventDNSLeaks = true
+	script := renderLock(t, spec)
+
+	for _, want := range []string{"udp dport 53 reject", "tcp dport 53 reject"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// And it has to come first, because refusing DNS after the local network has been permitted
+// refuses nothing at all: the resolver is on the local network.
+func TestTheDNSRefusalComesBeforeTheCarveout(t *testing.T) {
+	spec := aLock()
+	spec.PreventDNSLeaks = true
+	script := renderLock(t, spec)
+
+	dns := strings.Index(script, "udp dport 53 reject")
+	lan := strings.Index(script, "ip daddr 192.168.1.0/24 accept")
+	if dns < 0 || lan < 0 {
+		t.Fatalf("expected both rules:\n%s", script)
+	}
+	if dns > lan {
+		t.Errorf("the local network is permitted before DNS is refused, so DNS to the "+
+			"router is still allowed:\n%s", script)
+	}
+}
+
+// The tunnel first, or a device that prevented leaks would refuse its own resolver — the
+// one it is meant to be using.
+func TestDNSThroughTheTunnelIsStillAllowed(t *testing.T) {
+	spec := aLock()
+	spec.PreventDNSLeaks = true
+	script := renderLock(t, spec)
+
+	tunnel := strings.Index(script, `output oifname "meshp0" accept`)
+	dns := strings.Index(script, "udp dport 53 reject")
+	if tunnel < 0 || dns < 0 {
+		t.Fatalf("expected both rules:\n%s", script)
+	}
+	if tunnel > dns {
+		t.Error("DNS is refused before the tunnel is permitted, so the device cannot resolve at all")
+	}
+	if lo := strings.Index(script, "output oif lo accept"); lo > dns {
+		t.Error("DNS is refused before loopback, which breaks a local stub resolver")
+	}
+}
+
+// Off by default, because it is a policy the network states rather than something a device
+// decides for itself.
+func TestDNSIsNotRefusedUnlessAsked(t *testing.T) {
+	script := renderLock(t, aLock())
+
+	if strings.Contains(script, "dport 53") {
+		t.Errorf("DNS was refused without the network asking:\n%s", script)
+	}
+}

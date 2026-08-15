@@ -841,6 +841,7 @@ type fakeFilter struct {
 	lockErr   error
 	endpoints [][]netip.AddrPort
 	excluded  [][]netip.Prefix
+	dnsLocked []bool
 
 	// order, when set, is shared with the egress fake. Separate slices per fake record what
 	// each of them did and cannot show which happened first, and "the lock before the route"
@@ -849,13 +850,14 @@ type fakeFilter struct {
 	order *[]string
 }
 
-func (f *fakeFilter) ApplyLock(_ context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error {
+func (f *fakeFilter) ApplyLock(_ context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error {
 	if f.lockErr != nil {
 		return f.lockErr
 	}
 	f.locks = append(f.locks, iface)
 	f.endpoints = append(f.endpoints, endpoints)
 	f.excluded = append(f.excluded, excluded)
+	f.dnsLocked = append(f.dnsLocked, preventDNSLeaks)
 	if f.order != nil {
 		if iface == "" {
 			*f.order = append(*f.order, "unlock")
