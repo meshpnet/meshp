@@ -1,6 +1,6 @@
 # ADR-0009: Apache 2.0 core; the commercial layer is API-separated, not a fork
 
-- **Status:** accepted
+- **Status:** accepted, amended 2026-08-15 (see "Operated, not distributed")
 - **Date:** 2026-08-10
 
 ## Context
@@ -61,6 +61,48 @@ The costs: anyone may run our core as a service, and some will. Some will resell
 it. We accept that and compete on operating it. Apache also means we cannot later
 relicense contributed code without permission, so if dual-licensing ever matters
 we would need a CLA from that point forward, not retroactively.
+
+## Operated, not distributed (amendment, 2026-08-15)
+
+The original decision said what the commercial layer *is* and left open how it
+reaches anyone. It is now settled: **the commercial layer is operated, never
+distributed.** It runs in meshp Cloud and nowhere else. There is no on-premise
+build, no licence key, no customer-installable agency tier.
+
+So the only multi-tenancy anyone else can run is the one they build themselves on
+the open API, which they are free to do — and a self-hosted meshp is a complete
+single-tenant deployment with the real web UI, not a trial of one.
+
+This was decided against a specific temptation. The market has no self-hostable
+multi-tenant mesh in it, which reads like an opening, and taking it would mean
+shipping the closed layer as installable software. That trade is bad at this
+size: it buys one differentiator and costs an entire business function — licence
+issuing, an air-gapped activation story, a version support matrix, upgrade
+support for deployments nobody here can see, and debugging someone else's
+infrastructure by correspondence. One person cannot run that and build this. The
+differentiator is not one we could service anyway.
+
+What it costs is worth naming rather than discovering later. It forfeits the
+sovereignty deal: an MSP whose own customer is a hospital or a bank that requires
+the control plane inside their datacentre cannot be served, and with CERT-In in
+the picture that is not a fringe case in India. It also means competing on
+execution rather than on a difference in kind, since the comparable hosted
+products are cloud-only too.
+
+**The decision is deliberately reversible, in one direction.** An on-premise
+offering can be added later; one that has shipped cannot be withdrawn. It stays
+cheap to add only while the boundary above holds — the commercial layer calling
+the open control plane over its HTTP API, never linked, never forked. Keep that
+and on-premise is a packaging problem. Break it, by growing tenancy into the
+control plane because that is easier for the hosted product, and this stops being
+a decision that can be revisited. `make standalone-check` is what guards it.
+
+One consequence follows and is easy to miss. With no component to sell a
+self-hoster, the open build is not the bottom rung of a product ladder — there is
+no rung above it short of migrating to the hosted service entirely. It is there
+to be genuinely good and to be trusted, and that is the whole of its commercial
+job. Deciding how much to invest in it on any other basis will get the answer
+wrong.
 
 ## Alternatives considered
 
