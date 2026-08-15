@@ -13,6 +13,24 @@
 // plane's and nothing detects it — the version numbers agree while the contents do not.
 // That is much worse than a missed update, because everything downstream, including the
 // convergence metric, then reports health.
+//
+// # Adding a field to StateDelta
+//
+// Every field this Set carries has to be handled in four places, and missing one is silent:
+//
+//  1. the fold in Apply, where absent means unchanged rather than cleared;
+//  2. the clear in the snapshot path, since a snapshot is the whole truth and a field left
+//     over from the previous state makes it a lie;
+//  3. Clone, or two Sets share a pointer and Invariant 22 is gone;
+//  4. Equal, or a test that folds and compares passes without ever looking at the field.
+//
+// This is not hypothetical. `relays` was added to the proto and to everything downstream of
+// it, and not to the fold — so the agent dropped every relay the control plane sent, and the
+// entire relay feature was dead on main while its own tests passed. Nothing caught it,
+// because each piece was tested against a Set built by hand rather than against one this
+// package produced.
+//
+// The mistake generalises past this package, and ADR-0018 records the shape of it.
 package peerset
 
 import (
