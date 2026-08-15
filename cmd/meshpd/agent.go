@@ -103,7 +103,20 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 		AddressV4:     m.AddressV4,
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
-	}, relay, a.filterOrNil(), log).WithChooser(chooser)
+		ControlURL:    m.ControlURL,
+	}, relay, a.filterOrNil(), log).WithChooser(chooser).WithEgress(routerOrNil())
+}
+
+// routerOrNil converts a possibly-absent router into the interface.
+//
+// Explicit for the same reason relayOrNil and filterOrNil are: a nil *wglink.Router assigned
+// straight to an interface is a non-nil interface holding a nil pointer, so every downstream
+// nil check would pass and the reconciler would believe this host can claim a default route.
+func routerOrNil() tunnel.Egress {
+	if r := wglink.NewRouter(); r != nil {
+		return r
+	}
+	return nil
 }
 
 // reclaimEgressLock removes a fail-closed lock left behind by a previous life.
@@ -123,6 +136,18 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 // Reported only when one was actually found, because "removed a lock" and "there was
 // nothing to remove" are different events and only the first explains an outage.
 func (a *agent) reclaimEgressLock() {
+	// The routing first, for the same reason a release does it first: rules pointing at a
+	// table whose tunnel is gone send traffic nowhere, and they outlive this process exactly
+	// as the lock does.
+	if held, err := wglink.EgressHeld(); err == nil && held {
+		a.log.Warn("found a default route claimed by a previous run",
+			"cause", "meshpd exited or was killed while sending everything through the tunnel")
+		if err := wglink.NewRouter().Release(); err != nil {
+			a.log.Error("could not release it; this device may have no working routing",
+				"error", err)
+		}
+	}
+
 	filter := a.ensureFilter()
 	if filter == nil || !nftables.LockHeld(a.ctx) {
 		return
@@ -131,7 +156,7 @@ func (a *agent) reclaimEgressLock() {
 	a.log.Warn("found a fail-closed lock from a previous run; this device had no egress",
 		"table", nftables.LockTableName,
 		"cause", "meshpd exited or was killed while a default route was claimed")
-	if err := filter.ApplyLock(a.ctx, nftables.LockSpec{}); err != nil {
+	if err := filter.ApplyLock(a.ctx, "", nil, nil); err != nil {
 		// The worst outcome this project has: a machine with no network and no obvious
 		// cause. Say what it is and how to undo it by hand, because whoever reads this is
 		// at a console on a host that cannot reach anything.

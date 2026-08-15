@@ -74,6 +74,13 @@ type Membership struct {
 	// that has never come up says; the port the device settles on is reported back so it
 	// can be kept for next time.
 	ListenPort int
+
+	// ControlURL is where this membership's control plane lives.
+	//
+	// Needed only to claim a default route, and not optional there: it is the address that
+	// must stay reachable outside the tunnel, or the device locks itself away from the one
+	// channel that could tell it to stop (ADR-0011).
+	ControlURL string
 }
 
 // Reconciler applies desired state to a real interface.
@@ -104,6 +111,15 @@ type Reconciler struct {
 	// before there was a chooser.
 	chooser *routeprobe.Chooser
 
+	// egress claims the default route for a full tunnel, or is nil where this platform
+	// cannot. Kept beside the filter because the two are applied together and in an order
+	// that matters.
+	egress Egress
+
+	// claimed is whether this reconciler currently holds a default route, so releasing
+	// happens once rather than on every pass through a state that does not want one.
+	claimed bool
+
 	// lastAdvertised is the same idea for forwarding, and matters more: reloading the NAT
 	// table flushes its conntrack-independent counters and, on some kernels, disturbs
 	// in-flight masqueraded flows. An unchanged assignment is left alone.
@@ -130,6 +146,27 @@ type Filter interface {
 	// list means stop: a device that has been withdrawn must not go on being a gateway
 	// nobody knows about.
 	ApplyForward(ctx context.Context, iface string, groups []*meshpv1.AdvertisedRoutes_Group) error
+
+	// ApplyLock makes the host refuse egress that does not go through the tunnel. An empty
+	// interface name removes it, which is the only way it comes off: these rules are system
+	// state and outlive the process on purpose (ADR-0011).
+	ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error
+}
+
+// Egress claims and releases a full tunnel's routing.
+//
+// Separate from Filter because they are different halves of the same guarantee and fail
+// differently: the filter refuses traffic that would leave the wrong way, and this decides
+// which way is the right one. Nil where the platform cannot do it, in which case a device
+// asked for a default route reports the group unhonoured rather than half-claiming it.
+type Egress interface {
+	// Claim sends everything except the tunnel's own packets through the tunnel. Which
+	// packets are the tunnel's own, and how they are recognised, belongs to the
+	// implementation — this package has no business knowing about firewall marks.
+	Claim(iface string) error
+
+	// Release gives the routing back.
+	Release() error
 }
 
 // New returns a Reconciler for one membership. relay and filter may be nil.
@@ -141,6 +178,15 @@ func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.L
 		link: link, membership: m, relay: relay, filter: filter,
 		log: log, kind: wglink.KindUnknown,
 	}
+}
+
+// WithEgress gives the reconciler the ability to claim a default route.
+//
+// Nil is meaningful and is the ordinary case: most devices are not full-tunnel, and a host
+// that cannot claim one reports the group unhonoured rather than half-claiming it.
+func (r *Reconciler) WithEgress(e Egress) *Reconciler {
+	r.egress = e
+	return r
 }
 
 // WithChooser gives the reconciler local failover.
@@ -284,6 +330,14 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 			"interface", want.Name, "groups", len(unhonoured))
 		unapplied = append(unapplied, "route-groups")
 	}
+	// After the interface exists and before the filter, because claiming a default route
+	// installs its own lock and the two must not fight over the order they load in.
+	wantEgress, excluded := wantsEgress(state)
+	if failed := r.applyEgress(ctx, want.Name, wantEgress,
+		relayEndpointsOf(state.Relays()), excluded); failed != nil {
+		unapplied = append(unapplied, failed...)
+	}
+
 	if failed := r.applyForwarding(ctx, want.Name, state.Advertised()); failed != nil {
 		unapplied = append(unapplied, failed...)
 	}

@@ -833,6 +833,68 @@ type fakeFilter struct {
 	iface     string
 	failErr   error
 	fwdErr    error
+
+	// locks records every lock applied, by the interface it named. An empty name is a
+	// removal, so the sequence shows the order the lock went on and came off — which is
+	// the property that matters most about it.
+	locks     []string
+	lockErr   error
+	endpoints [][]netip.AddrPort
+	excluded  [][]netip.Prefix
+
+	// order, when set, is shared with the egress fake. Separate slices per fake record what
+	// each of them did and cannot show which happened first, and "the lock before the route"
+	// is the whole property under test — a mutation that swapped them survived until this
+	// existed.
+	order *[]string
+}
+
+func (f *fakeFilter) ApplyLock(_ context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error {
+	if f.lockErr != nil {
+		return f.lockErr
+	}
+	f.locks = append(f.locks, iface)
+	f.endpoints = append(f.endpoints, endpoints)
+	f.excluded = append(f.excluded, excluded)
+	if f.order != nil {
+		if iface == "" {
+			*f.order = append(*f.order, "unlock")
+		} else {
+			*f.order = append(*f.order, "lock "+iface)
+		}
+	}
+	return nil
+}
+
+// fakeEgress records claims and releases in order, which is what the ordering assertions
+// read: a claim that happened before its lock is the bug the whole feature is built around.
+type fakeEgress struct {
+	events   []string
+	claimErr error
+	relErr   error
+	order    *[]string
+}
+
+func (e *fakeEgress) Claim(iface string) error {
+	if e.claimErr != nil {
+		return e.claimErr
+	}
+	e.events = append(e.events, "claim "+iface)
+	if e.order != nil {
+		*e.order = append(*e.order, "claim "+iface)
+	}
+	return nil
+}
+
+func (e *fakeEgress) Release() error {
+	if e.relErr != nil {
+		return e.relErr
+	}
+	e.events = append(e.events, "release")
+	if e.order != nil {
+		*e.order = append(*e.order, "release")
+	}
+	return nil
 }
 
 func (f *fakeFilter) ApplyForward(_ context.Context, _ string, groups []*meshpv1.AdvertisedRoutes_Group) error {
@@ -1105,11 +1167,10 @@ func TestACarriedPrefixReachesTheCarrierAndTheRoutingTable(t *testing.T) {
 	}
 }
 
-// Claiming a default route needs the excluded prefixes that keep the tunnel's own endpoint
-// and the physical gateway out of it, and the fail-closed handling that blocks egress while
-// the tunnel is down (ADR-0011). Installing 0.0.0.0/0 without them would send this device's
-// own path to its control plane and its relay into a tunnel that depends on them.
-func TestAnEgressGroupIsRefusedUntilItIsSafe(t *testing.T) {
+// A peer carrying a default route needs it in its allowed IPs, because WireGuard will not
+// send a packet to a peer whose allowed IPs do not cover the destination. The system route
+// is a separate question, answered in wgplan and in the egress table.
+func TestAnEgressGroupPutsTheDefaultInAllowedIPs(t *testing.T) {
 	state := stateWithRoutes(1,
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0")},
 		peer(bobKey, "100.90.0.2/32"))
@@ -1118,26 +1179,34 @@ func TestAnEgressGroupIsRefusedUntilItIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an egress group made the whole description fail: %v", err)
 	}
-	if len(unhonoured) != 1 || unhonoured[0] != "exit" {
-		t.Fatalf("unhonoured = %v, want [exit]", unhonoured)
+	if len(unhonoured) != 0 {
+		t.Fatalf("unhonoured = %v, want none", unhonoured)
 	}
-	if got := allowedIPsOf(iface, bobKey); slicesContain(got, "0.0.0.0/0") {
-		t.Fatalf("a default route was claimed anyway: %v", got)
+	got := allowedIPsOf(iface, bobKey)
+	for _, want := range []string{"0.0.0.0/0", "::/0"} {
+		if !slicesContain(got, want) {
+			t.Errorf("%s is not in the exit peer's allowed IPs: %v", want, got)
+		}
 	}
+}
 
-	// And it is reported, so the device does not look converged while carrying nothing.
+// And no system route in the main table for it. A default route there would capture the
+// outer packets carrying this very tunnel and route them into it — the tunnel never comes
+// up, and the kill switch is already installed by then.
+func TestNoMainTableRouteIsInstalledForADefaultRoute(t *testing.T) {
 	link := newFakeLink()
 	r := New(link, membership(), nil, nil, nil)
-	reported, err := r.Apply(context.Background(), state)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
+	state := stateWithRoutes(1,
+		[]*meshpv1.RouteGroupAssignment{assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0")},
+		peer(bobKey, "100.90.0.2/32"))
+
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
 	}
-	if len(reported) != 1 || reported[0] != "route-groups" {
-		t.Errorf("unapplied = %v, want [route-groups]", reported)
-	}
-	// The peers still converged; one unusable group must not cost the rest.
-	if link.count(wgplan.SetPeer) == 0 {
-		t.Error("the peers were abandoned because a group could not be carried")
+	for _, op := range link.applied {
+		if op.Kind == wgplan.AddRoute && op.Prefix.Bits() == 0 {
+			t.Errorf("a default route was installed in the main table: %v", op)
+		}
 	}
 }
 
