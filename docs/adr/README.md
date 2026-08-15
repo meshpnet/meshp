@@ -26,6 +26,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0015](0015-data-plane-kernel-first.md) | Kernel WireGuard where it exists, userspace where it does not, and say which |
 | [0016](0016-relay-transport.md) | One relay port, multiplexed, with the agent carrying relayed packets |
 | [0017](0017-relay-credentials-over-the-control-channel.md) | An agent asks for its relay credential; the server does not push it |
+| [0018](0018-mechanisms-must-be-reachable.md) | A mechanism is not done until something running reaches it |
 
 ## Format
 
