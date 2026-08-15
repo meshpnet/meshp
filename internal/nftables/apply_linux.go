@@ -69,3 +69,20 @@ func Apply(ctx context.Context, script string) error {
 	}
 	return nil
 }
+
+// LockHeld reports whether a fail-closed lock is currently installed.
+//
+// Asked rather than assumed so that removing one can be reported as the event it is. An
+// agent that quietly ran a removal on every start would leave no trace of the case that
+// matters — a machine whose egress was being refused because a previous run died holding
+// the line — and that is the single line an operator needs in the log to understand why
+// their network was down and then was not.
+func LockHeld(ctx context.Context) bool {
+	path, err := exec.LookPath("nft")
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, path, "list", "table", "inet", LockTableName).Run() == nil
+}

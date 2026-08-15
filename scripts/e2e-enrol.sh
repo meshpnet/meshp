@@ -48,6 +48,10 @@ cleanup() {
   [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2>/dev/null || true
   [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null || true
   [ -n "$CONTROL_PID" ] && kill "$CONTROL_PID" 2>/dev/null || true
+  # Never leave an egress lock behind on a host that ran this, however the run ended. The
+  # table this creates is empty and harmless, but leaving one named meshp_lock would make
+  # the next run's reclamation assertion pass before the daemon had done anything.
+  command -v nft >/dev/null 2>&1 && nft delete table inet meshp_lock 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -123,6 +127,22 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "${CURL_CA[@]}" "${BASE}/readyz" >/dev/null 2>&1 || fail "control plane never became ready"
 
+# A fail-closed lock left behind by a previous life, so that starting the daemon has
+# something to reclaim (ADR-0011). This is the only thing standing between a `kill -9` and a
+# machine somebody has to physically recover, so it is asserted against the real binary
+# rather than only in a unit test.
+#
+# The table is created empty, with no chain and no policy. What is under test is whether
+# meshpd finds and removes a table it owns, and an empty one exercises exactly that — while
+# a real locking chain here would be installed in this host's root namespace and would take
+# the CI runner's own network away, including the connection this job is reporting over. The
+# rules themselves are proved against a real kernel in internal/nftables, inside a namespace.
+reclaimable=0
+if command -v nft >/dev/null 2>&1 && nft add table inet meshp_lock 2>/dev/null; then
+  reclaimable=1
+  echo "left a stale egress lock behind for the daemon to find"
+fi
+
 echo "starting meshpd with no state at all"
 # Deliberately before enrolment. An agent that gives up when it has nothing to do cannot
 # be joined without restarting a service, which is a paper cut people script around.
@@ -138,6 +158,40 @@ done
 grep -q 'not enrolled' "$WORK/status-before.out" \
   || fail "an unenrolled daemon did not say so: $(cat "$WORK/status-before.out")"
 echo "  socket answers: $(head -1 "$WORK/status-before.out")"
+
+# And the stale lock is gone. Asserted on a daemon that is not enrolled, which is the case
+# that matters most: a device whose membership was revoked, or whose state was wiped, still
+# has to get its network back. Nothing in desired state can rescue it, because it has none.
+if [ "$reclaimable" = "1" ]; then
+  if nft list table inet meshp_lock >/dev/null 2>&1; then
+    echo "--- agent log ---" >&2; head -20 "$AGENT_LOG" >&2
+    nft delete table inet meshp_lock 2>/dev/null || true
+    fail "the daemon started and left a previous run's egress lock in place"
+  fi
+  # And said so, because a machine that had no egress and then did needs one line in the log
+  # explaining it. Removing it silently is how the next person spends a day on it.
+  grep -q 'fail-closed lock from a previous run' "$AGENT_LOG" \
+    || { head -20 "$AGENT_LOG" >&2; fail "the lock was removed without a word about it"; }
+  echo "  the daemon reclaimed it and said so"
+
+  # And it happens before the state file is read, which is the whole of why the ordering in
+  # run() is what it is. Reading state can fail — a truncated write, a disk that filled, a
+  # file somebody edited — and that failure exits the daemon. A device whose egress is being
+  # refused would then stay that way for as long as its state file stayed broken: a machine
+  # bricked by malformed JSON.
+  nft add table inet meshp_lock 2>/dev/null || true
+  BROKEN="$WORK/broken"
+  mkdir -p "$BROKEN"
+  printf 'this is not json' >"$BROKEN/state.json"
+  ./bin/meshpd --state-dir "$BROKEN" --socket "$WORK/broken.sock" \
+    >"$WORK/broken.log" 2>&1 || true
+  if nft list table inet meshp_lock >/dev/null 2>&1; then
+    echo "--- daemon log ---" >&2; cat "$WORK/broken.log" >&2
+    nft delete table inet meshp_lock 2>/dev/null || true
+    fail "a daemon that could not read its state left the egress lock in place"
+  fi
+  echo "  and reclaims it even when the state file is unreadable"
+fi
 
 echo "the socket is owner-only"
 # A privilege boundary: anything that can reach this socket can enrol the device and,
