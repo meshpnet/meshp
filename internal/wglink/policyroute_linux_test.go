@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // The routing mechanism from ADR-0019, against a real kernel.
@@ -86,64 +89,91 @@ func setupPolicyRouteNS(t *testing.T) {
 // Re-executing this test binary under `ip netns exec` is the only way to get these netlink
 // calls into another namespace: rules are installed by whichever namespace the calling
 // thread is in, and Go offers no supported way to move a live goroutine between them.
-func claimInNS(t *testing.T) { inNS(t, "claim") }
-
-// releaseInNS undoes it, inside the same namespace and by the same route.
-func releaseInNS(t *testing.T) { inNS(t, "release") }
-
-func inNS(t *testing.T, action string) {
+// inNamespace runs fn with this thread inside the namespace.
+//
+// Entering it directly rather than re-executing the test binary under `ip netns exec`. A
+// re-exec needs a second Test function that does nothing in an ordinary run, and CI refuses
+// any skip in the data-plane log on the grounds that a skipped data-plane test reports
+// success without testing anything. That guard is right, so the helper had to go.
+//
+// The thread is locked for the duration because a namespace is a property of a thread, not
+// of a process: an unlocked goroutine could be rescheduled onto a thread that is still in
+// the original namespace, and the netlink calls would quietly land in the wrong place.
+//
+// If the return fails the thread stays locked and is never unlocked, so it dies with this
+// goroutine instead of going back into the pool still inside the namespace. A poisoned
+// worker thread would make unrelated tests fail later, somewhere else, for no visible reason.
+func inNamespace(t *testing.T, ns string, fn func() error) {
 	t.Helper()
-	// The binary's real path, resolved here rather than as /proc/self/exe inside the
-	// shell below — by then /proc/self is the shell, not this test.
-	self, err := os.Executable()
+	runtime.LockOSThread()
+
+	original, err := os.Open("/proc/self/ns/net")
 	if err != nil {
-		t.Fatalf("finding this test binary: %v", err)
+		runtime.UnlockOSThread()
+		t.Fatalf("opening this namespace: %v", err)
 	}
-	// Through a shell, because `ip` parses anything beginning with a dash as its own
-	// option and would reject -test.run before ever starting the binary.
-	cmd := exec.Command("ip", "netns", "exec", prns, "sh", "-c",
-		"exec "+self+" -test.run TestPolicyRouteHelper")
-	cmd.Env = append(os.Environ(), helperEnv+"="+action)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("%s inside the namespace: %v\n%s", action, err, out)
+	defer func() { _ = original.Close() }()
+
+	target, err := os.Open("/var/run/netns/" + ns)
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("opening namespace %s: %v", ns, err)
+	}
+	defer func() { _ = target.Close() }()
+
+	if err := unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("entering namespace %s: %v", ns, err)
+	}
+
+	fnErr := fn()
+
+	if err := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); err != nil {
+		t.Fatalf("could not return from namespace %s: %v", ns, err)
+	}
+	runtime.UnlockOSThread()
+
+	if fnErr != nil {
+		t.Fatalf("inside namespace %s: %v", ns, fnErr)
 	}
 }
 
-// helperEnv marks the re-executed run, so the helper below does nothing during an ordinary
-// `go test` and only acts when it is the one deliberately started inside a namespace.
-const helperEnv = "MESHP_POLICYROUTE_HELPER"
-
-// TestPolicyRouteHelper is the half that runs inside the namespace. It is started by name
-// from the test below and skips otherwise.
-func TestPolicyRouteHelper(t *testing.T) {
-	switch os.Getenv(helperEnv) {
-	case "claim":
+func claimInNS(t *testing.T) {
+	t.Helper()
+	inNamespace(t, prns, func() error {
 		if err := ClaimDefaultRoute(prTun, EgressMark); err != nil {
-			t.Fatalf("ClaimDefaultRoute: %v", err)
+			return err
 		}
 		// Twice, because the reconciler is a loop: a second claim must add nothing rather
 		// than accumulate a rule per pass.
 		if err := ClaimDefaultRoute(prTun, EgressMark); err != nil {
-			t.Fatalf("ClaimDefaultRoute, second time: %v", err)
+			return fmt.Errorf("second claim: %w", err)
 		}
-		if held, err := DefaultRouteClaimed(EgressMark); err != nil || !held {
-			t.Fatalf("DefaultRouteClaimed = %v, %v after claiming", held, err)
+		held, err := DefaultRouteClaimed(EgressMark)
+		if err != nil || !held {
+			return fmt.Errorf("DefaultRouteClaimed = %v, %v after claiming", held, err)
 		}
-	case "release":
+		return nil
+	})
+}
+
+func releaseInNS(t *testing.T) {
+	t.Helper()
+	inNamespace(t, prns, func() error {
 		if err := ReleaseDefaultRoute(EgressMark); err != nil {
-			t.Fatalf("ReleaseDefaultRoute: %v", err)
+			return err
 		}
 		// And again, because the caller that needs this most is a daemon starting up with
 		// no idea what its previous life did.
 		if err := ReleaseDefaultRoute(EgressMark); err != nil {
-			t.Fatalf("ReleaseDefaultRoute, second time: %v", err)
+			return fmt.Errorf("second release: %w", err)
 		}
-		if held, err := DefaultRouteClaimed(EgressMark); err != nil || held {
-			t.Fatalf("DefaultRouteClaimed = %v, %v after releasing", held, err)
+		held, err := DefaultRouteClaimed(EgressMark)
+		if err != nil || held {
+			return fmt.Errorf("DefaultRouteClaimed = %v, %v after releasing", held, err)
 		}
-	default:
-		t.Skip("driven from the policy-routing tests")
-	}
+		return nil
+	})
 }
 
 // The three cases, and getting any of them wrong is a broken device.
