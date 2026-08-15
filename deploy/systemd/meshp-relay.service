@@ -1,0 +1,41 @@
+# The relay.
+#
+# Unprivileged and deliberately dull: it forwards opaque frames between devices that cannot
+# reach each other directly (ADR-0002) and can decrypt none of them. It holds one public key
+# to verify the credentials the control plane issues (ADR-0017), and no other secret.
+
+[Unit]
+Description=meshp relay
+Documentation=https://github.com/meshpnet/meshp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# exec rather than notify: nothing here implements sd_notify, and a notify unit waits for a
+# readiness message that would never arrive. exec is the honest answer — systemd considers
+# the service started once the binary is running, which is what it actually knows.
+Type=exec
+ExecStart=/usr/local/bin/meshp-relay
+Restart=always
+RestartSec=2s
+
+User=meshp
+Group=meshp
+EnvironmentFile=/etc/meshp/relay.env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

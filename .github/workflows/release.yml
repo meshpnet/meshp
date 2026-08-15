@@ -1,0 +1,152 @@
+name: release
+
+# Two triggers on purpose.
+#
+# A tag publishes. A pull request builds exactly the same artifacts and throws them away,
+# which is the only way anyone finds out that release packaging still works before the day
+# they need it. A workflow that runs only on tags is discovered to be broken at the worst
+# possible moment, by someone who has already announced a release — and it is the same
+# mistake ADR-0018 is about, in a place where the "mechanism nothing reaches" is a job.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/install.sh"
+      - "deploy/systemd/**"
+      - ".go-version"
+      - "Makefile"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Tags carry the version the binaries are stamped with, and a shallow clone that
+          # omitted them would stamp every build "dev".
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      - name: build every published platform
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          case "$version" in
+            v*) ;;
+            *) version="0.0.0-$(git rev-parse --short HEAD)" ;;
+          esac
+          commit="$(git rev-parse HEAD)"
+          mkdir -p dist
+
+          # The agent and the CLI for every platform a person runs; the server binaries for
+          # Linux only, because nobody is asked to run a control plane on a laptop.
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+
+            binaries="meshp meshpd"
+            [ "$os" = "linux" ] && binaries="meshp meshpd meshp-control meshp-relay"
+
+            stage="dist/meshp_${version}_${os}_${arch}"
+            mkdir -p "$stage"
+            for cmd in $binaries; do
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+                -ldflags "-s -w -X github.com/meshpnet/meshp/internal/version.version=${version} -X github.com/meshpnet/meshp/internal/version.commit=${commit}" \
+                -o "${stage}/${cmd}${ext}" "./cmd/${cmd}"
+            done
+
+            # What a person needs beside the binaries to actually run them. A tarball of
+            # bare executables leaves everyone writing their own unit file, which is the
+            # step this whole slice exists to remove.
+            cp LICENSE NOTICE README.md "$stage/"
+            [ "$os" = "linux" ] && cp -r deploy/systemd "$stage/"
+
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -qr "$(basename "$stage").zip" "$(basename "$stage")")
+            else
+              tar -C dist -czf "${stage}.tar.gz" "$(basename "$stage")"
+            fi
+            rm -rf "$stage"
+          done
+
+          # One file, so a verifier needs one download and one command.
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          ls -la dist
+
+      - name: the archives contain what they claim to
+        run: |
+          set -euo pipefail
+          # Unpacked and inspected rather than trusted. An archive that is missing a binary,
+          # or carries one built for the wrong platform, is indistinguishable from a good one
+          # until somebody downloads it.
+          tmp="$(mktemp -d)"
+          tar -C "$tmp" -xzf dist/meshp_*_linux_amd64.tar.gz
+          dir="$(find "$tmp" -maxdepth 1 -type d -name 'meshp_*')"
+
+          for cmd in meshp meshpd meshp-control meshp-relay; do
+            test -x "$dir/$cmd" || { echo "$cmd is missing from the linux archive"; exit 1; }
+          done
+          test -f "$dir/systemd/meshpd.service" || { echo "the systemd units are missing"; exit 1; }
+          test -f "$dir/LICENSE" && test -f "$dir/NOTICE" \
+            || { echo "the licence and notice are missing"; exit 1; }
+
+          file "$dir/meshpd" | grep -q "ELF 64-bit LSB.*x86-64" \
+            || { file "$dir/meshpd"; echo "the linux/amd64 archive holds the wrong binary"; exit 1; }
+
+          # And it reports the version it was stamped with, which is the one thing a person
+          # checks first when a bug report names a release.
+          "$dir/meshp" --version
+          echo "archives verified"
+
+      - name: checksums verify
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      # The install script, run rather than reviewed. It is the first thing anyone touches
+      # and the only piece of this repository that a stranger executes as root, so "it looks
+      # right" is not enough — this builds a release, serves it, installs from it, and then
+      # corrupts it and requires the install to be refused.
+      - name: the install path works, and refuses a tampered archive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3 curl
+          sudo -E env "PATH=$PATH" ./scripts/install-test.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  publish:
+    name: publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag

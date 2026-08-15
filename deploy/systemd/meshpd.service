@@ -1,0 +1,51 @@
+# The agent, on a device that joins a network.
+#
+# Runs as root because the whole job is privileged: creating a WireGuard interface,
+# writing routing rules, loading nftables. There is no useful smaller set — a
+# CAP_NET_ADMIN-only build was considered and dropped, because reclaiming a lock left by a
+# previous life (ADR-0011) needs the same access as installing one, and a daemon that could
+# install but not remove is the failure mode that ADR is written against.
+
+[Unit]
+Description=meshp agent
+Documentation=https://github.com/meshpnet/meshp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# exec rather than notify: nothing here implements sd_notify, and a notify unit waits for a
+# readiness message that would never arrive. exec is the honest answer — systemd considers
+# the service started once the binary is running, which is what it actually knows.
+Type=exec
+ExecStart=/usr/local/bin/meshpd --state-dir /var/lib/meshp --socket /run/meshp/meshpd.sock
+Restart=always
+RestartSec=2s
+
+# The state directory holds this device's identity and its per-membership WireGuard keys
+# (Invariant 19), so it is owner-only. systemd creates both with these modes, which means a
+# fresh install does not depend on the daemon getting them right on first run.
+StateDirectory=meshp
+StateDirectoryMode=0700
+RuntimeDirectory=meshp
+RuntimeDirectoryMode=0755
+
+# Hardening that does not get in the way of what this has to do. NET_ADMIN for interfaces
+# and routing, NET_RAW for the packet filter. Everything else is dropped, which is most of
+# what a root process would otherwise carry.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# Not PrivateNetwork, obviously, and not ProtectKernelModules: loading the wireguard module
+# is exactly what a first start may have to do.
+
+[Install]
+WantedBy=multi-user.target
