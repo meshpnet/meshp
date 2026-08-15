@@ -147,3 +147,82 @@ func TestTheCarveoutReachesTheLock(t *testing.T) {
 		t.Error("the lock was given no excluded prefixes, so link-local traffic is refused")
 	}
 }
+
+// Absent means closed. A control plane that has never heard of this field must not be
+// asking every device to leak, so omission has to fall the safe way.
+func TestFailClosedDefaultsToClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tunnel *meshpv1.TunnelConfig
+		want   bool
+	}{
+		{"no tunnel config at all", nil, true},
+		{"a config that says nothing", &meshpv1.TunnelConfig{Mtu: 1420}, true},
+		{"an explicit yes", &meshpv1.TunnelConfig{
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_ENFORCED}, true},
+		{"an explicit no", &meshpv1.TunnelConfig{
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED}, false},
+		{"the retired bool, which is never read", &meshpv1.TunnelConfig{FailClosed: true}, true},
+	} {
+		if got := failClosedFor(tc.tunnel); got != tc.want {
+			t.Errorf("%s: failClosedFor = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The lock is what makes a full tunnel honest, so a network that asks for it and a host
+// that cannot enforce it must not quietly become a route with no protection.
+func TestAHostThatCannotFailClosedRefusesTheClaim(t *testing.T) {
+	router := &fakeEgress{}
+	m := membership()
+	m.ControlURL = "https://198.51.100.10:8443"
+	r := New(newFakeLink(), m, nil, nil, nil) // no filter
+	r.egress = router
+
+	unapplied, err := r.Apply(context.Background(), egressState(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slicesContain(unapplied, "egress") {
+		t.Errorf("unapplied = %v, want egress reported", unapplied)
+	}
+	if len(router.events) != 0 {
+		t.Errorf("a route was claimed with no way to fail closed: %v", router.events)
+	}
+}
+
+// And with the policy explicitly opted out, the same host may claim: what it cannot do is
+// no longer being asked of it.
+func TestAnExplicitOptOutClaimsWithoutALock(t *testing.T) {
+	router := &fakeEgress{}
+	filter := &fakeFilter{}
+	m := membership()
+	m.ControlURL = "https://198.51.100.10:8443"
+	r := New(newFakeLink(), m, nil, filter, nil)
+	r.egress = router
+
+	// Built through a real delta rather than reached into, so the opt-out travels the way
+	// it would from a control plane that meant it.
+	state := peerset.New()
+	state.Apply(&meshpv1.StateDelta{
+		FromVersion: 0, ToVersion: 1,
+		UpsertPeers: []*meshpv1.Peer{peer(bobKey, "100.90.0.2/32")},
+		Tunnel: &meshpv1.TunnelConfig{
+			Mtu:              1420,
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED,
+		},
+		RouteGroups: []*meshpv1.RouteGroupAssignment{
+			assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0"),
+		},
+	})
+
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if len(router.events) == 0 {
+		t.Fatal("no route was claimed under an explicit opt-out")
+	}
+	if len(filter.locks) != 0 {
+		t.Errorf("a lock was installed for a network that opted out: %v", filter.locks)
+	}
+}

@@ -193,9 +193,27 @@ message TunnelConfig {
   // loop, so the server computes it and the agent does not improvise.
   repeated string excluded_prefixes = 2;
 
-  // Fail closed: while a default route is claimed and the tunnel is down, the
-  // agent blocks non-tunnel egress (ADR-0011).
-  bool fail_closed = 3;
+  // Superseded by fail_closed_policy. Left in place and never read: it is a
+  // plain bool, so it cannot tell "nobody has chosen" from "somebody chose to
+  // fail open", and deployed agents may already be looking at it. Retiring it
+  // would break them for no gain, since nothing ever set it.
+  bool fail_closed = 3 [deprecated = true];
+
+  // Whether a device claiming a default route must refuse egress outside the
+  // tunnel (ADR-0011).
+  //
+  // Three states rather than a bool, because the absence of a decision is not
+  // the same as a decision to fail open. A control plane that has never heard
+  // of this field sends UNSPECIFIED, and the agent reads that as enforced —
+  // ADR-0011 makes closed the default for an egress group, and leaking by
+  // omission is the one direction this must never take. Only an explicit
+  // DISABLED opens it, which is an administrator's decision to make on purpose.
+  enum FailClosed {
+    FAIL_CLOSED_UNSPECIFIED = 0;
+    FAIL_CLOSED_ENFORCED = 1;
+    FAIL_CLOSED_DISABLED = 2;
+  }
+  FailClosed fail_closed_policy = 4;
 }
 
 message DnsConfig {
