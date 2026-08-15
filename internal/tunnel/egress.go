@@ -127,15 +127,13 @@ func (r *Reconciler) releaseEgress(ctx context.Context) {
 
 // failClosedFor reads the network's fail-closed policy.
 //
-// Absent means closed. ADR-0011 makes that the default for an egress group, and the field
-// is optional precisely so this can tell "nobody has chosen" from "somebody chose to fail
-// open" — a control plane that has never heard of the field would otherwise be asking every
-// device to leak, which is the one direction that must never happen by omission.
+// Unspecified means enforced. ADR-0011 makes closed the default for an egress group, and the
+// policy is three-state precisely so this can tell "nobody has chosen" from "somebody chose
+// to fail open" — a control plane that has never heard of the field would otherwise be
+// asking every device to leak, which is the one direction that must never happen by
+// omission.
 func failClosedFor(tunnel *meshpv1.TunnelConfig) bool {
-	if tunnel == nil || tunnel.FailClosed == nil {
-		return true
-	}
-	return *tunnel.FailClosed
+	return tunnel.GetFailClosedPolicy() != meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED
 }
 
 // wantsEgress reports whether any assigned group asks for a default route, and what the

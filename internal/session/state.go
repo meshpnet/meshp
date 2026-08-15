@@ -341,7 +341,7 @@ func (b *StateBuilder) tunnelConfig() *meshpv1.TunnelConfig {
 		//
 		// Unset rather than an explicit true for the same reason: what is stored is what an
 		// operator chose, and nobody has chosen anything.
-		FailClosed: nil,
+		FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_UNSPECIFIED,
 	}
 }
 

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/meshpnet/meshp/internal/peerset"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
@@ -160,8 +158,11 @@ func TestFailClosedDefaultsToClosed(t *testing.T) {
 	}{
 		{"no tunnel config at all", nil, true},
 		{"a config that says nothing", &meshpv1.TunnelConfig{Mtu: 1420}, true},
-		{"an explicit yes", &meshpv1.TunnelConfig{FailClosed: proto.Bool(true)}, true},
-		{"an explicit no", &meshpv1.TunnelConfig{FailClosed: proto.Bool(false)}, false},
+		{"an explicit yes", &meshpv1.TunnelConfig{
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_ENFORCED}, true},
+		{"an explicit no", &meshpv1.TunnelConfig{
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED}, false},
+		{"the retired bool, which is never read", &meshpv1.TunnelConfig{FailClosed: true}, true},
 	} {
 		if got := failClosedFor(tc.tunnel); got != tc.want {
 			t.Errorf("%s: failClosedFor = %v, want %v", tc.name, got, tc.want)
@@ -206,7 +207,10 @@ func TestAnExplicitOptOutClaimsWithoutALock(t *testing.T) {
 	state.Apply(&meshpv1.StateDelta{
 		FromVersion: 0, ToVersion: 1,
 		UpsertPeers: []*meshpv1.Peer{peer(bobKey, "100.90.0.2/32")},
-		Tunnel:      &meshpv1.TunnelConfig{Mtu: 1420, FailClosed: proto.Bool(false)},
+		Tunnel: &meshpv1.TunnelConfig{
+			Mtu:              1420,
+			FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED,
+		},
 		RouteGroups: []*meshpv1.RouteGroupAssignment{
 			assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0"),
 		},

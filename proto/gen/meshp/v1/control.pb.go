@@ -33,6 +33,64 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Whether a device claiming a default route must refuse egress outside the
+// tunnel (ADR-0011).
+//
+// Three states rather than a bool, because the absence of a decision is not
+// the same as a decision to fail open. A control plane that has never heard
+// of this field sends UNSPECIFIED, and the agent reads that as enforced —
+// ADR-0011 makes closed the default for an egress group, and leaking by
+// omission is the one direction this must never take. Only an explicit
+// DISABLED opens it, which is an administrator's decision to make on purpose.
+type TunnelConfig_FailClosed int32
+
+const (
+	TunnelConfig_FAIL_CLOSED_UNSPECIFIED TunnelConfig_FailClosed = 0
+	TunnelConfig_FAIL_CLOSED_ENFORCED    TunnelConfig_FailClosed = 1
+	TunnelConfig_FAIL_CLOSED_DISABLED    TunnelConfig_FailClosed = 2
+)
+
+// Enum value maps for TunnelConfig_FailClosed.
+var (
+	TunnelConfig_FailClosed_name = map[int32]string{
+		0: "FAIL_CLOSED_UNSPECIFIED",
+		1: "FAIL_CLOSED_ENFORCED",
+		2: "FAIL_CLOSED_DISABLED",
+	}
+	TunnelConfig_FailClosed_value = map[string]int32{
+		"FAIL_CLOSED_UNSPECIFIED": 0,
+		"FAIL_CLOSED_ENFORCED":    1,
+		"FAIL_CLOSED_DISABLED":    2,
+	}
+)
+
+func (x TunnelConfig_FailClosed) Enum() *TunnelConfig_FailClosed {
+	p := new(TunnelConfig_FailClosed)
+	*p = x
+	return p
+}
+
+func (x TunnelConfig_FailClosed) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TunnelConfig_FailClosed) Descriptor() protoreflect.EnumDescriptor {
+	return file_meshp_v1_control_proto_enumTypes[0].Descriptor()
+}
+
+func (TunnelConfig_FailClosed) Type() protoreflect.EnumType {
+	return &file_meshp_v1_control_proto_enumTypes[0]
+}
+
+func (x TunnelConfig_FailClosed) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TunnelConfig_FailClosed.Descriptor instead.
+func (TunnelConfig_FailClosed) EnumDescriptor() ([]byte, []int) {
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{9, 0}
+}
+
 type RouteGroupAssignment_Mode int32
 
 const (
@@ -66,11 +124,11 @@ func (x RouteGroupAssignment_Mode) String() string {
 }
 
 func (RouteGroupAssignment_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_meshp_v1_control_proto_enumTypes[0].Descriptor()
+	return file_meshp_v1_control_proto_enumTypes[1].Descriptor()
 }
 
 func (RouteGroupAssignment_Mode) Type() protoreflect.EnumType {
-	return &file_meshp_v1_control_proto_enumTypes[0]
+	return &file_meshp_v1_control_proto_enumTypes[1]
 }
 
 func (x RouteGroupAssignment_Mode) Number() protoreflect.EnumNumber {
@@ -124,11 +182,11 @@ func (x RouteCandidate_Health) String() string {
 }
 
 func (RouteCandidate_Health) Descriptor() protoreflect.EnumDescriptor {
-	return file_meshp_v1_control_proto_enumTypes[1].Descriptor()
+	return file_meshp_v1_control_proto_enumTypes[2].Descriptor()
 }
 
 func (RouteCandidate_Health) Type() protoreflect.EnumType {
-	return &file_meshp_v1_control_proto_enumTypes[1]
+	return &file_meshp_v1_control_proto_enumTypes[2]
 }
 
 func (x RouteCandidate_Health) Number() protoreflect.EnumNumber {
@@ -179,11 +237,11 @@ func (x IceCandidate_Kind) String() string {
 }
 
 func (IceCandidate_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_meshp_v1_control_proto_enumTypes[2].Descriptor()
+	return file_meshp_v1_control_proto_enumTypes[3].Descriptor()
 }
 
 func (IceCandidate_Kind) Type() protoreflect.EnumType {
-	return &file_meshp_v1_control_proto_enumTypes[2]
+	return &file_meshp_v1_control_proto_enumTypes[3]
 }
 
 func (x IceCandidate_Kind) Number() protoreflect.EnumNumber {
@@ -231,11 +289,11 @@ func (x PathReport_PeerPath_Kind) String() string {
 }
 
 func (PathReport_PeerPath_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_meshp_v1_control_proto_enumTypes[3].Descriptor()
+	return file_meshp_v1_control_proto_enumTypes[4].Descriptor()
 }
 
 func (PathReport_PeerPath_Kind) Type() protoreflect.EnumType {
-	return &file_meshp_v1_control_proto_enumTypes[3]
+	return &file_meshp_v1_control_proto_enumTypes[4]
 }
 
 func (x PathReport_PeerPath_Kind) Number() protoreflect.EnumNumber {
@@ -1214,18 +1272,16 @@ type TunnelConfig struct {
 	// link-local, DHCP and mDNS. Getting this list wrong produces a routing
 	// loop, so the server computes it and the agent does not improvise.
 	ExcludedPrefixes []string `protobuf:"bytes,2,rep,name=excluded_prefixes,json=excludedPrefixes,proto3" json:"excluded_prefixes,omitempty"`
-	// Fail closed: while a default route is claimed and the tunnel is down, the
-	// agent blocks non-tunnel egress (ADR-0011).
+	// Superseded by fail_closed_policy. Left in place and never read: it is a
+	// plain bool, so it cannot tell "nobody has chosen" from "somebody chose to
+	// fail open", and deployed agents may already be looking at it. Retiring it
+	// would break them for no gain, since nothing ever set it.
 	//
-	// Optional so that absent and false are different answers. ADR-0011 makes the
-	// default for an egress group closed, and a plain bool cannot say "nobody has
-	// chosen" — it would make every control plane that has never heard of this
-	// field ask every device to fail open, which is the one direction that must
-	// never happen by omission. Unset means closed; only an explicit false opens
-	// it, and that is an administrator's decision to make deliberately.
-	FailClosed    *bool `protobuf:"varint,3,opt,name=fail_closed,json=failClosed,proto3,oneof" json:"fail_closed,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Deprecated: Marked as deprecated in meshp/v1/control.proto.
+	FailClosed       bool                    `protobuf:"varint,3,opt,name=fail_closed,json=failClosed,proto3" json:"fail_closed,omitempty"`
+	FailClosedPolicy TunnelConfig_FailClosed `protobuf:"varint,4,opt,name=fail_closed_policy,json=failClosedPolicy,proto3,enum=meshp.v1.TunnelConfig_FailClosed" json:"fail_closed_policy,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *TunnelConfig) Reset() {
@@ -1272,11 +1328,19 @@ func (x *TunnelConfig) GetExcludedPrefixes() []string {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in meshp/v1/control.proto.
 func (x *TunnelConfig) GetFailClosed() bool {
-	if x != nil && x.FailClosed != nil {
-		return *x.FailClosed
+	if x != nil {
+		return x.FailClosed
 	}
 	return false
+}
+
+func (x *TunnelConfig) GetFailClosedPolicy() TunnelConfig_FailClosed {
+	if x != nil {
+		return x.FailClosedPolicy
+	}
+	return TunnelConfig_FAIL_CLOSED_UNSPECIFIED
 }
 
 type DnsConfig struct {
@@ -3286,13 +3350,18 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"\brelay_id\x18\x06 \x01(\tR\arelayId\x12\x1f\n" +
 	"\vdevice_name\x18\a \x01(\tR\n" +
 	"deviceName\x12\x12\n" +
-	"\x04tags\x18\b \x03(\tR\x04tags\"\x83\x01\n" +
+	"\x04tags\x18\b \x03(\tR\x04tags\"\xa2\x02\n" +
 	"\fTunnelConfig\x12\x10\n" +
 	"\x03mtu\x18\x01 \x01(\rR\x03mtu\x12+\n" +
-	"\x11excluded_prefixes\x18\x02 \x03(\tR\x10excludedPrefixes\x12$\n" +
-	"\vfail_closed\x18\x03 \x01(\bH\x00R\n" +
-	"failClosed\x88\x01\x01B\x0e\n" +
-	"\f_fail_closed\"\xef\x01\n" +
+	"\x11excluded_prefixes\x18\x02 \x03(\tR\x10excludedPrefixes\x12#\n" +
+	"\vfail_closed\x18\x03 \x01(\bB\x02\x18\x01R\n" +
+	"failClosed\x12O\n" +
+	"\x12fail_closed_policy\x18\x04 \x01(\x0e2!.meshp.v1.TunnelConfig.FailClosedR\x10failClosedPolicy\"]\n" +
+	"\n" +
+	"FailClosed\x12\x1b\n" +
+	"\x17FAIL_CLOSED_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14FAIL_CLOSED_ENFORCED\x10\x01\x12\x18\n" +
+	"\x14FAIL_CLOSED_DISABLED\x10\x02\"\xef\x01\n" +
 	"\tDnsConfig\x12 \n" +
 	"\vnameservers\x18\x01 \x03(\tR\vnameservers\x12%\n" +
 	"\x0esearch_domains\x18\x02 \x03(\tR\rsearchDomains\x121\n" +
@@ -3473,100 +3542,102 @@ func file_meshp_v1_control_proto_rawDescGZIP() []byte {
 	return file_meshp_v1_control_proto_rawDescData
 }
 
-var file_meshp_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_meshp_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_meshp_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_meshp_v1_control_proto_goTypes = []any{
-	(RouteGroupAssignment_Mode)(0), // 0: meshp.v1.RouteGroupAssignment.Mode
-	(RouteCandidate_Health)(0),     // 1: meshp.v1.RouteCandidate.Health
-	(IceCandidate_Kind)(0),         // 2: meshp.v1.IceCandidate.Kind
-	(PathReport_PeerPath_Kind)(0),  // 3: meshp.v1.PathReport.PeerPath.Kind
-	(*ClientMessage)(nil),          // 4: meshp.v1.ClientMessage
-	(*ServerMessage)(nil),          // 5: meshp.v1.ServerMessage
-	(*ClientHello)(nil),            // 6: meshp.v1.ClientHello
-	(*AgentCapabilities)(nil),      // 7: meshp.v1.AgentCapabilities
-	(*ServerHello)(nil),            // 8: meshp.v1.ServerHello
-	(*StateDelta)(nil),             // 9: meshp.v1.StateDelta
-	(*AdvertisedRoutes)(nil),       // 10: meshp.v1.AdvertisedRoutes
-	(*StateAck)(nil),               // 11: meshp.v1.StateAck
-	(*Peer)(nil),                   // 12: meshp.v1.Peer
-	(*TunnelConfig)(nil),           // 13: meshp.v1.TunnelConfig
-	(*DnsConfig)(nil),              // 14: meshp.v1.DnsConfig
-	(*PacketFilter)(nil),           // 15: meshp.v1.PacketFilter
-	(*RelayTokenRequest)(nil),      // 16: meshp.v1.RelayTokenRequest
-	(*RelayToken)(nil),             // 17: meshp.v1.RelayToken
-	(*RelayConfig)(nil),            // 18: meshp.v1.RelayConfig
-	(*RouteGroupAssignment)(nil),   // 19: meshp.v1.RouteGroupAssignment
-	(*RouteCandidate)(nil),         // 20: meshp.v1.RouteCandidate
-	(*LocalFailoverPolicy)(nil),    // 21: meshp.v1.LocalFailoverPolicy
-	(*SignalEnvelope)(nil),         // 22: meshp.v1.SignalEnvelope
-	(*IceOffer)(nil),               // 23: meshp.v1.IceOffer
-	(*IceAnswer)(nil),              // 24: meshp.v1.IceAnswer
-	(*IceCandidates)(nil),          // 25: meshp.v1.IceCandidates
-	(*IceCandidate)(nil),           // 26: meshp.v1.IceCandidate
-	(*PathGiveUp)(nil),             // 27: meshp.v1.PathGiveUp
-	(*PathReport)(nil),             // 28: meshp.v1.PathReport
-	(*ReachabilityReport)(nil),     // 29: meshp.v1.ReachabilityReport
-	(*Heartbeat)(nil),              // 30: meshp.v1.Heartbeat
-	(*HeartbeatAck)(nil),           // 31: meshp.v1.HeartbeatAck
-	(*Command)(nil),                // 32: meshp.v1.Command
-	(*Revoke)(nil),                 // 33: meshp.v1.Revoke
-	(*Reconnect)(nil),              // 34: meshp.v1.Reconnect
-	(*CollectDiagnostics)(nil),     // 35: meshp.v1.CollectDiagnostics
-	(*AdvertisedRoutes_Group)(nil), // 36: meshp.v1.AdvertisedRoutes.Group
-	(*DnsConfig_Route)(nil),        // 37: meshp.v1.DnsConfig.Route
-	(*PacketFilter_Rule)(nil),      // 38: meshp.v1.PacketFilter.Rule
-	(*RelayConfig_Relay)(nil),      // 39: meshp.v1.RelayConfig.Relay
-	(*PathReport_PeerPath)(nil),    // 40: meshp.v1.PathReport.PeerPath
+	(TunnelConfig_FailClosed)(0),   // 0: meshp.v1.TunnelConfig.FailClosed
+	(RouteGroupAssignment_Mode)(0), // 1: meshp.v1.RouteGroupAssignment.Mode
+	(RouteCandidate_Health)(0),     // 2: meshp.v1.RouteCandidate.Health
+	(IceCandidate_Kind)(0),         // 3: meshp.v1.IceCandidate.Kind
+	(PathReport_PeerPath_Kind)(0),  // 4: meshp.v1.PathReport.PeerPath.Kind
+	(*ClientMessage)(nil),          // 5: meshp.v1.ClientMessage
+	(*ServerMessage)(nil),          // 6: meshp.v1.ServerMessage
+	(*ClientHello)(nil),            // 7: meshp.v1.ClientHello
+	(*AgentCapabilities)(nil),      // 8: meshp.v1.AgentCapabilities
+	(*ServerHello)(nil),            // 9: meshp.v1.ServerHello
+	(*StateDelta)(nil),             // 10: meshp.v1.StateDelta
+	(*AdvertisedRoutes)(nil),       // 11: meshp.v1.AdvertisedRoutes
+	(*StateAck)(nil),               // 12: meshp.v1.StateAck
+	(*Peer)(nil),                   // 13: meshp.v1.Peer
+	(*TunnelConfig)(nil),           // 14: meshp.v1.TunnelConfig
+	(*DnsConfig)(nil),              // 15: meshp.v1.DnsConfig
+	(*PacketFilter)(nil),           // 16: meshp.v1.PacketFilter
+	(*RelayTokenRequest)(nil),      // 17: meshp.v1.RelayTokenRequest
+	(*RelayToken)(nil),             // 18: meshp.v1.RelayToken
+	(*RelayConfig)(nil),            // 19: meshp.v1.RelayConfig
+	(*RouteGroupAssignment)(nil),   // 20: meshp.v1.RouteGroupAssignment
+	(*RouteCandidate)(nil),         // 21: meshp.v1.RouteCandidate
+	(*LocalFailoverPolicy)(nil),    // 22: meshp.v1.LocalFailoverPolicy
+	(*SignalEnvelope)(nil),         // 23: meshp.v1.SignalEnvelope
+	(*IceOffer)(nil),               // 24: meshp.v1.IceOffer
+	(*IceAnswer)(nil),              // 25: meshp.v1.IceAnswer
+	(*IceCandidates)(nil),          // 26: meshp.v1.IceCandidates
+	(*IceCandidate)(nil),           // 27: meshp.v1.IceCandidate
+	(*PathGiveUp)(nil),             // 28: meshp.v1.PathGiveUp
+	(*PathReport)(nil),             // 29: meshp.v1.PathReport
+	(*ReachabilityReport)(nil),     // 30: meshp.v1.ReachabilityReport
+	(*Heartbeat)(nil),              // 31: meshp.v1.Heartbeat
+	(*HeartbeatAck)(nil),           // 32: meshp.v1.HeartbeatAck
+	(*Command)(nil),                // 33: meshp.v1.Command
+	(*Revoke)(nil),                 // 34: meshp.v1.Revoke
+	(*Reconnect)(nil),              // 35: meshp.v1.Reconnect
+	(*CollectDiagnostics)(nil),     // 36: meshp.v1.CollectDiagnostics
+	(*AdvertisedRoutes_Group)(nil), // 37: meshp.v1.AdvertisedRoutes.Group
+	(*DnsConfig_Route)(nil),        // 38: meshp.v1.DnsConfig.Route
+	(*PacketFilter_Rule)(nil),      // 39: meshp.v1.PacketFilter.Rule
+	(*RelayConfig_Relay)(nil),      // 40: meshp.v1.RelayConfig.Relay
+	(*PathReport_PeerPath)(nil),    // 41: meshp.v1.PathReport.PeerPath
 }
 var file_meshp_v1_control_proto_depIdxs = []int32{
-	6,  // 0: meshp.v1.ClientMessage.hello:type_name -> meshp.v1.ClientHello
-	11, // 1: meshp.v1.ClientMessage.state_ack:type_name -> meshp.v1.StateAck
-	22, // 2: meshp.v1.ClientMessage.signal:type_name -> meshp.v1.SignalEnvelope
-	28, // 3: meshp.v1.ClientMessage.path_report:type_name -> meshp.v1.PathReport
-	29, // 4: meshp.v1.ClientMessage.reachability_report:type_name -> meshp.v1.ReachabilityReport
-	30, // 5: meshp.v1.ClientMessage.heartbeat:type_name -> meshp.v1.Heartbeat
-	16, // 6: meshp.v1.ClientMessage.relay_token_request:type_name -> meshp.v1.RelayTokenRequest
-	8,  // 7: meshp.v1.ServerMessage.hello:type_name -> meshp.v1.ServerHello
-	9,  // 8: meshp.v1.ServerMessage.state_delta:type_name -> meshp.v1.StateDelta
-	22, // 9: meshp.v1.ServerMessage.signal:type_name -> meshp.v1.SignalEnvelope
-	32, // 10: meshp.v1.ServerMessage.command:type_name -> meshp.v1.Command
-	31, // 11: meshp.v1.ServerMessage.heartbeat_ack:type_name -> meshp.v1.HeartbeatAck
-	17, // 12: meshp.v1.ServerMessage.relay_token:type_name -> meshp.v1.RelayToken
-	7,  // 13: meshp.v1.ClientHello.capabilities:type_name -> meshp.v1.AgentCapabilities
-	12, // 14: meshp.v1.StateDelta.upsert_peers:type_name -> meshp.v1.Peer
-	14, // 15: meshp.v1.StateDelta.dns:type_name -> meshp.v1.DnsConfig
-	15, // 16: meshp.v1.StateDelta.filter:type_name -> meshp.v1.PacketFilter
-	19, // 17: meshp.v1.StateDelta.route_groups:type_name -> meshp.v1.RouteGroupAssignment
-	18, // 18: meshp.v1.StateDelta.relays:type_name -> meshp.v1.RelayConfig
-	13, // 19: meshp.v1.StateDelta.tunnel:type_name -> meshp.v1.TunnelConfig
-	10, // 20: meshp.v1.StateDelta.advertised:type_name -> meshp.v1.AdvertisedRoutes
-	36, // 21: meshp.v1.AdvertisedRoutes.groups:type_name -> meshp.v1.AdvertisedRoutes.Group
-	37, // 22: meshp.v1.DnsConfig.routes:type_name -> meshp.v1.DnsConfig.Route
-	38, // 23: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
-	38, // 24: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
-	39, // 25: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
-	0,  // 26: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
-	20, // 27: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
-	21, // 28: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
-	1,  // 29: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
-	23, // 30: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
-	24, // 31: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
-	25, // 32: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
-	27, // 33: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
-	26, // 34: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
-	26, // 35: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
-	26, // 36: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
-	2,  // 37: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
-	40, // 38: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
-	33, // 39: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
-	34, // 40: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
-	35, // 41: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
-	3,  // 42: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
-	43, // [43:43] is the sub-list for method output_type
-	43, // [43:43] is the sub-list for method input_type
-	43, // [43:43] is the sub-list for extension type_name
-	43, // [43:43] is the sub-list for extension extendee
-	0,  // [0:43] is the sub-list for field type_name
+	7,  // 0: meshp.v1.ClientMessage.hello:type_name -> meshp.v1.ClientHello
+	12, // 1: meshp.v1.ClientMessage.state_ack:type_name -> meshp.v1.StateAck
+	23, // 2: meshp.v1.ClientMessage.signal:type_name -> meshp.v1.SignalEnvelope
+	29, // 3: meshp.v1.ClientMessage.path_report:type_name -> meshp.v1.PathReport
+	30, // 4: meshp.v1.ClientMessage.reachability_report:type_name -> meshp.v1.ReachabilityReport
+	31, // 5: meshp.v1.ClientMessage.heartbeat:type_name -> meshp.v1.Heartbeat
+	17, // 6: meshp.v1.ClientMessage.relay_token_request:type_name -> meshp.v1.RelayTokenRequest
+	9,  // 7: meshp.v1.ServerMessage.hello:type_name -> meshp.v1.ServerHello
+	10, // 8: meshp.v1.ServerMessage.state_delta:type_name -> meshp.v1.StateDelta
+	23, // 9: meshp.v1.ServerMessage.signal:type_name -> meshp.v1.SignalEnvelope
+	33, // 10: meshp.v1.ServerMessage.command:type_name -> meshp.v1.Command
+	32, // 11: meshp.v1.ServerMessage.heartbeat_ack:type_name -> meshp.v1.HeartbeatAck
+	18, // 12: meshp.v1.ServerMessage.relay_token:type_name -> meshp.v1.RelayToken
+	8,  // 13: meshp.v1.ClientHello.capabilities:type_name -> meshp.v1.AgentCapabilities
+	13, // 14: meshp.v1.StateDelta.upsert_peers:type_name -> meshp.v1.Peer
+	15, // 15: meshp.v1.StateDelta.dns:type_name -> meshp.v1.DnsConfig
+	16, // 16: meshp.v1.StateDelta.filter:type_name -> meshp.v1.PacketFilter
+	20, // 17: meshp.v1.StateDelta.route_groups:type_name -> meshp.v1.RouteGroupAssignment
+	19, // 18: meshp.v1.StateDelta.relays:type_name -> meshp.v1.RelayConfig
+	14, // 19: meshp.v1.StateDelta.tunnel:type_name -> meshp.v1.TunnelConfig
+	11, // 20: meshp.v1.StateDelta.advertised:type_name -> meshp.v1.AdvertisedRoutes
+	37, // 21: meshp.v1.AdvertisedRoutes.groups:type_name -> meshp.v1.AdvertisedRoutes.Group
+	0,  // 22: meshp.v1.TunnelConfig.fail_closed_policy:type_name -> meshp.v1.TunnelConfig.FailClosed
+	38, // 23: meshp.v1.DnsConfig.routes:type_name -> meshp.v1.DnsConfig.Route
+	39, // 24: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
+	39, // 25: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
+	40, // 26: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
+	1,  // 27: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
+	21, // 28: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
+	22, // 29: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
+	2,  // 30: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
+	24, // 31: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
+	25, // 32: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
+	26, // 33: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
+	28, // 34: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
+	27, // 35: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
+	27, // 36: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
+	27, // 37: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
+	3,  // 38: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
+	41, // 39: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
+	34, // 40: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
+	35, // 41: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
+	36, // 42: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
+	4,  // 43: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
+	44, // [44:44] is the sub-list for method output_type
+	44, // [44:44] is the sub-list for method input_type
+	44, // [44:44] is the sub-list for extension type_name
+	44, // [44:44] is the sub-list for extension extendee
+	0,  // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_meshp_v1_control_proto_init() }
@@ -3591,7 +3662,6 @@ func file_meshp_v1_control_proto_init() {
 		(*ServerMessage_HeartbeatAck)(nil),
 		(*ServerMessage_RelayToken)(nil),
 	}
-	file_meshp_v1_control_proto_msgTypes[9].OneofWrappers = []any{}
 	file_meshp_v1_control_proto_msgTypes[18].OneofWrappers = []any{
 		(*SignalEnvelope_Offer)(nil),
 		(*SignalEnvelope_Answer)(nil),
@@ -3608,7 +3678,7 @@ func file_meshp_v1_control_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_meshp_v1_control_proto_rawDesc), len(file_meshp_v1_control_proto_rawDesc)),
-			NumEnums:      4,
+			NumEnums:      5,
 			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   0,
