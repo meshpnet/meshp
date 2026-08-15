@@ -50,17 +50,15 @@ func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroup
 		}
 
 		if defaultRoute {
-			// Refused rather than half-done. Claiming a default route needs the excluded
-			// prefixes that keep the tunnel's own endpoint, the physical gateway and the LAN
-			// out of it, and the fail-closed behaviour that blocks egress while the tunnel is
-			// down (ADR-0011). None of that exists yet, and installing 0.0.0.0/0 without it
-			// would send this device's own path to its control plane and its relay into a
-			// tunnel that depends on them — taking the host off the network with no way back.
-			log.Error("not claiming a default route for an egress group",
-				"group", logx.Safe(name),
-				"reason", "internet egress needs excluded prefixes and fail-closed handling (ADR-0011)")
-			unhonoured = append(unhonoured, name)
-			continue
+			// Both halves, because WireGuard needs one and the routing table must not get
+			// the other. A peer carrying a default route needs 0.0.0.0/0 and ::/0 in its
+			// allowed IPs or the kernel will not send it anything outside the mesh — but
+			// wgplan deliberately derives no system route from a zero-length prefix, since a
+			// default route in the main table would capture the outer packets carrying this
+			// very tunnel. The system route lives in the egress table instead, installed
+			// with the rules that exempt the tunnel's own traffic (ADR-0019).
+			prefixes = append(prefixes,
+				netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0"))
 		}
 
 		// The chooser's answer, not the server's first preference. The server orders the

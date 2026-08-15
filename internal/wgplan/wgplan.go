@@ -424,9 +424,16 @@ func (i Interface) Validate() error {
 	// Overlaps that are not exact duplicates: one peer holding 10.0.0.0/24 and another
 	// holding 10.0.0.5/32 is the same silent theft, and comparing prefixes for equality
 	// alone would miss it.
+	// Between peers, never within one. A single peer holding both 0.0.0.0/0 and its own
+	// /32 is redundant and entirely legal — every full-tunnel WireGuard config written by
+	// hand looks like that — and there is no theft to detect, because both prefixes lead to
+	// the same place.
 	prefixes := sortedPrefixes(claimed)
 	for a := range prefixes {
 		for b := a + 1; b < len(prefixes); b++ {
+			if claimed[prefixes[a]] == claimed[prefixes[b]] {
+				continue
+			}
 			if prefixes[a].Overlaps(prefixes[b]) {
 				return fmt.Errorf("wgplan: interface %s peer %s has %s, which overlaps %s held by %s",
 					i.Name, claimed[prefixes[a]], prefixes[a], prefixes[b], claimed[prefixes[b]])
@@ -457,10 +464,22 @@ func Teardown(observed Observed) Plan {
 }
 
 // wantRoutes is every peer address that should be routed at the interface.
+//
+// A default route is deliberately not among them. A full tunnel needs 0.0.0.0/0 in a peer's
+// allowed IPs, because WireGuard will not send a packet to a peer whose allowed IPs do not
+// cover the destination — but the matching system route must not go into the main table,
+// where it would capture the outer packets carrying the tunnel and route them into it. That
+// route belongs in the egress table, installed with the rules that exempt the tunnel's own
+// traffic (ADR-0019).
 func wantRoutes(want Interface) []netip.Prefix {
 	out := make([]netip.Prefix, 0, len(want.Peers))
 	for _, peer := range want.Peers {
-		out = append(out, peer.AllowedIPs...)
+		for _, prefix := range peer.AllowedIPs {
+			if prefix.Bits() == 0 {
+				continue
+			}
+			out = append(out, prefix)
+		}
 	}
 	return out
 }
