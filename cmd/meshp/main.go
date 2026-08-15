@@ -102,6 +102,9 @@ func main() {
 	case "status":
 		runOrDie(cmdStatus, args[1:])
 		return
+	case "doctor":
+		runOrDie(cmdDoctor, args[1:])
+		return
 	}
 
 	if contains(bareVerbs, args[0]) {

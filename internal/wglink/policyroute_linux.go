@@ -46,19 +46,6 @@ import (
 // outer packets leave through.
 
 const (
-	// EgressMark is the firewall mark WireGuard puts on its own outer packets.
-	//
-	// The same number is used for the routing table, as wg-quick does: one value to
-	// recognise, one to remove, and no chance of the two drifting apart. It is high and
-	// arbitrary to stay clear of the marks other software picks, which conventionally live
-	// in the low bits.
-	EgressMark uint32 = 0x6d657368 // "mesh"
-
-	// EgressTable is the routing table holding the tunnel's default route.
-	EgressTable uint32 = 0x6d657368
-
-	// suppressPriority must be lower than markPriority: main's specific routes have to be
-	// consulted before anything is handed to the tunnel.
 	suppressPriority uint32 = 32764
 	markPriority     uint32 = 32765
 )
