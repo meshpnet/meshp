@@ -35,6 +35,20 @@ func (f *Filter) Apply(ctx context.Context, iface string, filter *meshpv1.Packet
 // Forwarding is enabled before the rules rather than after: rules that permit forwarding on
 // a host whose kernel will not forward are correct and do nothing, and the gap between the
 // two would be a window where a gateway looks configured and drops everything.
+// ApplyLock makes this device refuse egress that does not go through the tunnel, or stops
+// it refusing.
+//
+// A zero LockSpec removes the lock. That is the only way it comes off from here — the rules
+// are system state and outlive this process on purpose (ADR-0011), so nothing about the
+// agent exiting takes them away.
+func (f *Filter) ApplyLock(ctx context.Context, spec LockSpec) error {
+	script, err := RenderLock(spec)
+	if err != nil {
+		return err
+	}
+	return Apply(ctx, script)
+}
+
 func (f *Filter) ApplyForward(ctx context.Context, iface string, groups []*meshpv1.AdvertisedRoutes_Group) error {
 	if len(groups) > 0 {
 		if _, err := EnableForwarding(); err != nil {
