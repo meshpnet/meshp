@@ -434,6 +434,17 @@ func (i Interface) Validate() error {
 			if claimed[prefixes[a]] == claimed[prefixes[b]] {
 				continue
 			}
+			// A default route overlaps everything, and that is what it is for. WireGuard
+			// resolves it by longest match — a peer's own /32 still wins over another
+			// peer's 0.0.0.0/0 — so a catch-all alongside specific routes is the ordinary
+			// shape of a full tunnel rather than one peer stealing another's traffic.
+			//
+			// Two catch-alls are still refused below, because which of them wins is then
+			// genuinely undefined, and a device would send everything to whichever peer the
+			// kernel happened to prefer.
+			if prefixes[a].Bits() == 0 != (prefixes[b].Bits() == 0) {
+				continue
+			}
 			if prefixes[a].Overlaps(prefixes[b]) {
 				return fmt.Errorf("wgplan: interface %s peer %s has %s, which overlaps %s held by %s",
 					i.Name, claimed[prefixes[a]], prefixes[a], prefixes[b], claimed[prefixes[b]])

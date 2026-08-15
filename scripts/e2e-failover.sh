@@ -478,6 +478,102 @@ if [ "$told" != "1" ]; then
 fi
 sed -n 's/.*\(msg="a device moved between advertisers".*\)/  \1/p' "$CONTROL_LOG" | tail -1
 
+# ---------------------------------------------------------------------------
+# Fail-closed egress
+#
+# The test ADR-0011 asks for by name: kill the agent mid-session and assert both that
+# traffic is still blocked and that a subsequent start restores connectivity. It is the one
+# claim that cannot be checked by reading the code, because what is under test is what
+# survives the process — the rules are system state on purpose, and that is exactly what
+# makes a crash able to leave a machine with no network.
+#
+# BEYOND is an address on the host that is deliberately outside everything the carve-out
+# keeps: not the control plane, not the relay, not the local network. So it is reachable
+# while nothing is claimed, refused the moment the lock goes on, and reachable again once
+# the lock comes off — which makes the lock, rather than the tunnel or the topology, the
+# thing each assertion is about.
+echo "sending everything through the tunnel"
+BEYOND="172.30.0.1"
+ip addr add "${BEYOND}/32" dev "$BRIDGE" 2>/dev/null || true
+ip netns exec "$CLIENT_NS" ip route add "$BEYOND" via "$HOST_IP" 2>/dev/null || true
+
+reaches_beyond() {
+  ip netns exec "$CLIENT_NS" ping -c 1 -W 2 "$BEYOND" >/dev/null 2>&1
+}
+
+# Without this the rest proves nothing: an address that was never reachable is blocked by
+# the topology rather than by anything meshp did.
+reaches_beyond || fail "the client cannot reach ${BEYOND} before any claim; nothing to prove"
+echo "  ${BEYOND} is reachable outside the tunnel to begin with"
+
+api -X POST -d '{"slug":"full-tunnel","name":"Full tunnel","kind":"egress"}' \
+  "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups" >"$WORK/egress.out" \
+  || { cat "$WORK/egress.out" >&2; fail "creating the egress group failed"; }
+api -X POST -d "{\"membership_id\":\"${ADV2_MEMBERSHIP}\",\"priority\":1}" \
+  "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups/full-tunnel/advertisers" >"$WORK/egadv.out" \
+  || { cat "$WORK/egadv.out" >&2; fail "advertising the egress group failed"; }
+
+locked=0
+for _ in $(seq 1 30); do
+  if ip netns exec "$CLIENT_NS" nft list table inet meshp_lock >/dev/null 2>&1; then locked=1; break; fi
+  sleep 1
+done
+if [ "$locked" != "1" ]; then
+  echo "--- client agent log ---" >&2
+  grep -iE "egress|tunnel|claim" "$WORK/${CLIENT_NS}.log" | tail -20 >&2 || true
+  fail "the client never installed a fail-closed lock for an egress group"
+fi
+echo "  the client claimed a default route and locked itself closed"
+
+if reaches_beyond; then
+  fail "traffic still left outside the tunnel with the lock on"
+fi
+echo "  and traffic outside the tunnel is refused"
+
+# The claim in the kernel, not merely a lock that exists. Matched on the mark rather than
+# the table number, because that is what identifies the rule as meshp's and it does not
+# depend on how iproute2 chooses to render a table id.
+ip netns exec "$CLIENT_NS" ip rule show | grep -q "fwmark 0x6d657368" \
+  || { ip netns exec "$CLIENT_NS" ip rule show >&2; fail "no policy routing rule for the claim"; }
+echo "  with policy routing exempting the tunnel's own traffic"
+
+# The assertion this section exists for. A kill -9 leaves the process no chance to tidy up,
+# which is the case ADR-0011 was written around: agent crash and agent kill are two of the
+# main things the feature has to survive.
+echo "killing the agent outright"
+pkill -9 -f "${CLIENT_NS}.sock" || true
+sleep 2
+ip netns exec "$CLIENT_NS" nft list table inet meshp_lock >/dev/null 2>&1 \
+  || fail "the lock died with the agent, so a crash leaks the user's traffic"
+if reaches_beyond; then
+  fail "traffic leaked the moment the agent was killed, which is the whole failure ADR-0011 exists to prevent"
+fi
+echo "  the lock outlived the agent and traffic is still refused"
+
+# And a machine is not left that way for ever. Withdrawing first, so what is measured is the
+# daemon giving the network back rather than it immediately claiming again.
+api -X DELETE \
+  "${BASE}/api/v1/networks/${NETWORK_ID}/route-groups/full-tunnel/advertisers/${ADV2_MEMBERSHIP}" \
+  >/dev/null || fail "withdrawing the egress advertiser failed"
+
+ip netns exec "$CLIENT_NS" ./bin/meshpd --reconcile-interval 2s \
+  --state-dir "$WORK/${CLIENT_NS}-state" --socket "$WORK/${CLIENT_NS}.sock" \
+  --log-level debug >>"$WORK/${CLIENT_NS}.log" 2>&1 &
+
+restored=0
+for _ in $(seq 1 30); do
+  if reaches_beyond; then restored=1; break; fi
+  sleep 1
+done
+if [ "$restored" != "1" ]; then
+  echo "--- client agent log ---" >&2; tail -25 "$WORK/${CLIENT_NS}.log" >&2
+  fail "restarting the agent did not give the network back"
+fi
+grep -q "fail-closed lock from a previous run" "$WORK/${CLIENT_NS}.log" \
+  || fail "the lock was removed without the daemon saying it found one"
+echo "  restarting the agent reclaimed the lock and gave the network back"
+
 echo
 echo "three agents, three namespaces, a real handshake, a verdict that reached the control"
-echo "plane, and a failover the client worked out for itself"
+echo "plane, a failover the client worked out for itself, and a fail-closed tunnel that"
+echo "survived its agent being killed"
