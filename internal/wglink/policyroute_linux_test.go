@@ -151,7 +151,7 @@ func claimInNS(t *testing.T) {
 		}
 		held, err := DefaultRouteClaimed(EgressMark)
 		if err != nil || !held {
-			return fmt.Errorf("DefaultRouteClaimed = %v, %v after claiming", held, err)
+			return fmt.Errorf("DefaultRouteClaimed = %v after claiming: %w", held, err)
 		}
 		return nil
 	})
@@ -170,7 +170,7 @@ func releaseInNS(t *testing.T) {
 		}
 		held, err := DefaultRouteClaimed(EgressMark)
 		if err != nil || held {
-			return fmt.Errorf("DefaultRouteClaimed = %v, %v after releasing", held, err)
+			return fmt.Errorf("DefaultRouteClaimed = %v after releasing: %w", held, err)
 		}
 		return nil
 	})
