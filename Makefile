@@ -312,3 +312,16 @@ dev-down: ## Tear down the dev stack and its volumes
 protect: ## Apply branch and tag protection: make protect REPO=meshp
 	@test -n "$(REPO)" || { echo "usage: make protect REPO=meshp [ENFORCEMENT=active|disabled]"; exit 2; }
 	@./scripts/protect-repo.sh "$(REPO)" $(or $(ENFORCEMENT),active)
+
+.PHONY: install-check
+install-check: ## Run install.sh end to end against a locally built release, in a container
+	@# The install script is the only thing here a stranger runs as root, and reviewing it
+	@# is not the same as running it. This builds a release, serves it, installs from it,
+	@# and then corrupts it and requires the install to be refused.
+	docker run --rm \
+	  -v "$(CURDIR)":/src -w /src \
+	  -v "$$(go env GOMODCACHE)":/go/pkg/mod \
+	  golang:$(GO_IMAGE_VERSION) sh -c \
+	  'apt-get update -qq >/dev/null 2>&1 && \
+	   apt-get install -y -qq python3 curl >/dev/null 2>&1 && \
+	   ./scripts/install-test.sh'

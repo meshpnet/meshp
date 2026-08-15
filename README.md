@@ -38,9 +38,15 @@ ignoring it.
 The control plane serves TLS, from a certificate you supply or one it obtains from
 Let's Encrypt, and agents refuse a plaintext control URL to anything but loopback.
 
-What does not, and matters: direct paths, DNS and internet egress are all
-unimplemented, and the data plane is Linux-only — elsewhere a device enrols, holds an
-address, and reports honestly that it has no tunnel and cannot filter.
+Full-tunnel egress works on Linux, and fails closed (ADR-0011). A device sending
+everything through the tunnel refuses traffic that would leave any other way, so a dropped
+tunnel cannot quietly put a real address back on the wire — and those rules are firewall
+state, so they survive the agent being killed. `meshp doctor` explains that to whoever
+finds the machine, without needing a network to do it.
+
+What does not, and matters: direct paths and DNS are unimplemented, and the data plane is
+Linux-only — elsewhere a device enrols, holds an address, and reports honestly that it has
+no tunnel and cannot filter.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
@@ -89,9 +95,34 @@ If you need something that works this afternoon, use one of the other three. We
 mean that. The two rows in bold are where we are years behind, and no amount of
 architecture makes up for it yet.
 
-## Quick start
+## Install
 
-Requires Go 1.25+, Docker and Node 20+.
+On a device that is joining a network, there is no need to build anything:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/meshpnet/meshp/main/scripts/install.sh
+less install.sh && sudo sh install.sh
+```
+
+It checks the download against the release's checksums, installs `meshp` and `meshpd`,
+and installs the agent's systemd unit without starting it — joining a network needs a
+token, so it stops before making that decision for you.
+
+```bash
+sudo systemctl enable --now meshpd
+sudo meshp join <token>
+```
+
+If anything ever refuses to connect on a device running meshp, `meshp doctor` says what is
+being blocked and why, and works on a machine with no internet access at all.
+
+The control plane and the relay are deliberately not installed by that script: they need a
+database, a certificate, and decisions about who may reach them. Their unit files ship in
+the same archive, under `systemd/`.
+
+## Building it yourself
+
+Requires Go 1.26+, Docker and Node 20+.
 
 ```bash
 git clone https://github.com/meshpnet/meshp.git
