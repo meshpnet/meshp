@@ -83,6 +83,14 @@ func main() {
 
 func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string, reconcileEvery time.Duration) error {
 	agent := newAgent(ctx, log, stateDir, reconcileEvery)
+
+	// Before the state is read, not after. Reading it can fail — a truncated write, a disk
+	// that filled, a file somebody edited — and that failure returns from here and exits.
+	// A device whose egress is being refused by rules a dead predecessor left behind would
+	// then stay that way for as long as the state file stayed broken, which is a machine
+	// bricked by a corrupt JSON file (ADR-0011, Invariant 20).
+	agent.reclaimEgressLock()
+
 	if err := agent.load(); err != nil {
 		return err
 	}

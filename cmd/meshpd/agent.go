@@ -106,6 +106,43 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 	}, relay, a.filterOrNil(), log).WithChooser(chooser)
 }
 
+// reclaimEgressLock removes a fail-closed lock left behind by a previous life.
+//
+// This is the half of ADR-0011 that makes the other half safe to have. The rules survive
+// this process on purpose — that is the point of them, since agent crash and agent kill are
+// two of the cases the feature exists to cover — which means the only thing standing between
+// a `kill -9` and a machine somebody has to physically recover is a daemon that finds them
+// again and takes them off (Invariant 20).
+//
+// Unconditional, and deliberately so. At this moment there is no tunnel and no route claimed
+// through one, so a lock here is not protecting traffic; it is only denying it. Whatever
+// this run decides to be, it reinstalls the lock before it claims a route, which is the
+// order ADR-0011 requires anyway. The window between the two is a device that is not
+// tunnelled — which is exactly what it was while the daemon was dead.
+//
+// Reported only when one was actually found, because "removed a lock" and "there was
+// nothing to remove" are different events and only the first explains an outage.
+func (a *agent) reclaimEgressLock() {
+	filter := a.ensureFilter()
+	if filter == nil || !nftables.LockHeld(a.ctx) {
+		return
+	}
+
+	a.log.Warn("found a fail-closed lock from a previous run; this device had no egress",
+		"table", nftables.LockTableName,
+		"cause", "meshpd exited or was killed while a default route was claimed")
+	if err := filter.ApplyLock(a.ctx, nftables.LockSpec{}); err != nil {
+		// The worst outcome this project has: a machine with no network and no obvious
+		// cause. Say what it is and how to undo it by hand, because whoever reads this is
+		// at a console on a host that cannot reach anything.
+		a.log.Error("could not remove it; this device still has no egress",
+			"error", err,
+			"fix", "run: nft delete table inet "+nftables.LockTableName)
+		return
+	}
+	a.log.Info("removed it; egress is restored")
+}
+
 // ensureFilter opens the host's packet filter, once.
 //
 // Probed rather than assumed: a container can have nft installed and no permission to use

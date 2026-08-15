@@ -113,6 +113,12 @@ func TestTheLockCanBeTakenOff(t *testing.T) {
 	if !lockLoaded(t) {
 		t.Fatal("the lock is not loaded, so removing it proves nothing")
 	}
+	// What the agent asks at startup to decide whether it has something to reclaim, and
+	// whether to say so. A LockHeld that disagreed with the kernel would either leave a
+	// machine locked out or report an outage that never happened.
+	if !LockHeld(context.Background()) {
+		t.Error("LockHeld reports nothing while a lock is installed")
+	}
 
 	off, err := RenderLock(LockSpec{})
 	if err != nil {
@@ -123,6 +129,9 @@ func TestTheLockCanBeTakenOff(t *testing.T) {
 	}
 	if lockLoaded(t) {
 		t.Error("the lock survived its own removal")
+	}
+	if LockHeld(context.Background()) {
+		t.Error("LockHeld still reports a lock after it was removed")
 	}
 
 	// And removing one that is not there has to work, because the caller that needs it most

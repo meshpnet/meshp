@@ -14,3 +14,7 @@ func Available(context.Context) bool { return false }
 
 // Apply is unsupported off Linux.
 func Apply(context.Context, string) error { return ErrUnsupported }
+
+// LockHeld is false everywhere but Linux, where there is nothing that could have installed
+// one to begin with.
+func LockHeld(context.Context) bool { return false }
