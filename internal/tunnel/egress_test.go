@@ -226,3 +226,51 @@ func TestAnExplicitOptOutClaimsWithoutALock(t *testing.T) {
 		t.Errorf("a lock was installed for a network that opted out: %v", filter.locks)
 	}
 }
+
+// The flag has to reach the lock, or the rule is rendered correctly and never asked for.
+// This is the edge ADR-0018 asks for: a value that travels from desired state, through the
+// reconciler, to the thing that acts on it.
+func TestPreventLeaksReachesTheLock(t *testing.T) {
+	router := &fakeEgress{}
+	filter := &fakeFilter{}
+	m := membership()
+	m.ControlURL = "https://198.51.100.10:8443"
+	r := New(newFakeLink(), m, nil, filter, nil)
+	r.egress = router
+
+	state := peerset.New()
+	state.Apply(&meshpv1.StateDelta{
+		FromVersion: 0, ToVersion: 1,
+		UpsertPeers: []*meshpv1.Peer{peer(bobKey, "100.90.0.2/32")},
+		Tunnel:      &meshpv1.TunnelConfig{Mtu: 1420},
+		Dns:         &meshpv1.DnsConfig{PreventLeaks: true},
+		RouteGroups: []*meshpv1.RouteGroupAssignment{
+			assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0"),
+		},
+	})
+
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.dnsLocked) == 0 {
+		t.Fatal("no lock was installed")
+	}
+	if !filter.dnsLocked[0] {
+		t.Error("the network asked for leak prevention and the lock was not told")
+	}
+}
+
+// And a network that has not asked does not get it.
+func TestLeakPreventionIsNotAssumed(t *testing.T) {
+	r, filter, _, _ := withEgress(t)
+
+	if _, err := r.Apply(context.Background(), egressState(1)); err != nil {
+		t.Fatal(err)
+	}
+	if len(filter.dnsLocked) == 0 {
+		t.Fatal("no lock was installed")
+	}
+	if filter.dnsLocked[0] {
+		t.Error("DNS was refused for a network that never asked for it")
+	}
+}

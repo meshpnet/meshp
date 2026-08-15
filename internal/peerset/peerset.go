@@ -52,6 +52,7 @@ type Set struct {
 	tunnel  *meshpv1.TunnelConfig
 	relays  *meshpv1.RelayConfig
 	filter  *meshpv1.PacketFilter
+	dns     *meshpv1.DnsConfig
 
 	// routeGroups is keyed by id, because a delta names groups to upsert and groups to
 	// withdraw rather than replacing the set.
@@ -94,6 +95,9 @@ func (s *Set) Tunnel() *meshpv1.TunnelConfig { return s.tunnel }
 // a policy, so everything is permitted, while an empty filter with default_deny set means
 // a policy exists and permits nothing.
 func (s *Set) Filter() *meshpv1.PacketFilter { return s.filter }
+
+// DNS is the resolver configuration last received, or nil when this network sends none.
+func (s *Set) DNS() *meshpv1.DnsConfig { return s.dns }
 
 // RouteGroups are the carried prefixes this device has been assigned, ordered by id.
 //
@@ -165,6 +169,11 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 		// routing a prefix its network no longer asks it to.
 		s.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment)
 		s.advertised = nil
+		// And the resolver configuration, for the filter's reason rather than the relays':
+		// prevent_leaks decides whether this device refuses DNS outside the tunnel, so an
+		// agent that kept the last one it saw would go on blocking queries its network has
+		// stopped asking it to block, or worse, stop blocking ones it should.
+		s.dns = nil
 	}
 
 	// Removals first. Within one delta a key that is both removed and upserted is a
@@ -186,6 +195,9 @@ func (s *Set) Apply(delta *meshpv1.StateDelta) {
 	}
 	if delta.GetFilter() != nil {
 		s.filter = proto.CloneOf(delta.GetFilter())
+	}
+	if delta.GetDns() != nil {
+		s.dns = proto.CloneOf(delta.GetDns())
 	}
 
 	// Withdrawals first, so a group both withdrawn and reassigned in one delta ends up
@@ -222,6 +234,9 @@ func (s *Set) Clone() *Set {
 	}
 	if s.filter != nil {
 		out.filter = proto.CloneOf(s.filter)
+	}
+	if s.dns != nil {
+		out.dns = proto.CloneOf(s.dns)
 	}
 	out.routeGroups = make(map[string]*meshpv1.RouteGroupAssignment, len(s.routeGroups))
 	for id, group := range s.routeGroups {
@@ -287,6 +302,9 @@ func (s *Set) Equal(other *Set) bool {
 		return false
 	}
 	if !proto.Equal(s.tunnel, other.tunnel) || !proto.Equal(s.relays, other.relays) {
+		return false
+	}
+	if !proto.Equal(s.dns, other.dns) {
 		return false
 	}
 	if !proto.Equal(s.filter, other.filter) {

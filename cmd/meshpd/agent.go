@@ -156,7 +156,7 @@ func (a *agent) reclaimEgressLock() {
 	a.log.Warn("found a fail-closed lock from a previous run; this device had no egress",
 		"table", nftables.LockTableName,
 		"cause", "meshpd exited or was killed while a default route was claimed")
-	if err := filter.ApplyLock(a.ctx, "", nil, nil); err != nil {
+	if err := filter.ApplyLock(a.ctx, "", nil, nil, false); err != nil {
 		// The worst outcome this project has: a machine with no network and no obvious
 		// cause. Say what it is and how to undo it by hand, because whoever reads this is
 		// at a console on a host that cannot reach anything.

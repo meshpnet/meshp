@@ -25,7 +25,7 @@ import (
 // Nothing here is best effort. If the carve-out cannot be computed the group is unhonoured
 // and no lock is installed, because a device that locks itself away from its control plane
 // is off the network for a reason nobody watching can see.
-func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, failClosed bool, relays, excluded []string) []string {
+func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, failClosed, preventDNSLeaks bool, relays, excluded []string) []string {
 	if !want {
 		r.releaseEgress(ctx)
 		return nil
@@ -64,7 +64,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 	}
 
 	if failClosed {
-		if err := r.filter.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes); err != nil {
+		if err := r.filter.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes, preventDNSLeaks); err != nil {
 			r.log.Error("cannot refuse egress outside the tunnel; not claiming a default route",
 				"error", logx.SafeError(err))
 			return []string{"egress"}
@@ -82,7 +82,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 
 	if !r.claimed {
 		r.log.Info("this device now sends everything through the tunnel",
-			"interface", iface, "fail_closed", failClosed,
+			"interface", iface, "fail_closed", failClosed, "dns_leaks_prevented", preventDNSLeaks,
 			"kept_direct", len(carve.Prefixes), "endpoints_kept", len(carve.Endpoints))
 		if !failClosed {
 			// Said plainly, because it is the difference between the product this claims to
@@ -110,7 +110,7 @@ func (r *Reconciler) releaseEgress(ctx context.Context) {
 	// nothing else failed first. Leaving a lock behind because a route would not release is
 	// how a device ends up refusing everything with no explanation.
 	if r.filter != nil {
-		if err := r.filter.ApplyLock(ctx, "", nil, nil); err != nil && failed == nil {
+		if err := r.filter.ApplyLock(ctx, "", nil, nil, false); err != nil && failed == nil {
 			failed = err
 		}
 	}
@@ -154,6 +154,7 @@ func wantsEgress(state routeGroupSource) (bool, []string) {
 type routeGroupSource interface {
 	RouteGroups() []*meshpv1.RouteGroupAssignment
 	Tunnel() *meshpv1.TunnelConfig
+	DNS() *meshpv1.DnsConfig
 }
 
 // relayEndpointsOf lists the relay addresses a claim must keep reachable.

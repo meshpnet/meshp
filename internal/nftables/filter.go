@@ -37,8 +37,11 @@ func (f *Filter) Apply(ctx context.Context, iface string, filter *meshpv1.Packet
 // An empty interface name removes the lock. That is the only way it comes off from here —
 // the rules are system state and outlive this process on purpose (ADR-0011), so nothing
 // about the agent exiting takes them away.
-func (f *Filter) ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error {
-	script, err := RenderLock(LockSpec{Interface: iface, Endpoints: endpoints, Excluded: excluded})
+func (f *Filter) ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error {
+	script, err := RenderLock(LockSpec{
+		Interface: iface, Endpoints: endpoints, Excluded: excluded,
+		PreventDNSLeaks: preventDNSLeaks,
+	})
 	if err != nil {
 		return err
 	}
