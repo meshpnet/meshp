@@ -87,8 +87,8 @@ func (p FailoverPolicy) Validate() error {
 	// dropping every connection through it on each pass. Refused rather than corrected,
 	// because silently swapping an operator's numbers is worse than telling them.
 	if p.FailThreshold > 0 && p.RecoverThreshold > 0 && p.RecoverThreshold < p.FailThreshold {
-		return fmt.Errorf(
-			"store: recover_threshold %d is below fail_threshold %d, so a device would return "+
+		return invalid(
+			"recover_threshold %d is below fail_threshold %d, so a device would return "+
 				"to a failing advertiser faster than it left it", p.RecoverThreshold, p.FailThreshold)
 	}
 	// Bounded because these are counts of probe rounds, and a threshold in the thousands is
@@ -96,38 +96,38 @@ func (p FailoverPolicy) Validate() error {
 	// policy it is.
 	const maxThreshold = 1000
 	if p.FailThreshold > maxThreshold || p.RecoverThreshold > maxThreshold {
-		return fmt.Errorf("store: probe thresholds must be at most %d", maxThreshold)
+		return invalid("probe thresholds must be at most %d", maxThreshold)
 	}
 	// A day. Long enough for any real hysteresis, short enough that a typed-in millisecond
 	// value does not park a device on a fallback for a decade.
 	const maxHold = 24 * 60 * 60
 	if p.MinHoldSeconds > maxHold {
-		return fmt.Errorf("store: min_hold_seconds must be at most %d", maxHold)
+		return invalid("min_hold_seconds must be at most %d", maxHold)
 	}
 
 	if len(p.ProbeTargets) > MaxProbeTargets {
-		return fmt.Errorf("store: at most %d probe targets; every device carrying this group "+
+		return invalid("at most %d probe targets; every device carrying this group "+
 			"dials all of them on every round", MaxProbeTargets)
 	}
 	// Parsed here rather than trusted, because the agent parses them too and a target it
 	// cannot read is one it silently drops — which lowers the number of targets a quorum is
 	// measured against without anything saying so.
 	if _, err := pathprobe.ParseTargets(p.ProbeTargets); err != nil {
-		return fmt.Errorf("store: a probe target must be a literal address and port, "+
-			"because resolving a name needs the DNS that fails with the gateway: %w", err)
+		return invalid("a probe target must be a literal address and port, "+
+			"because resolving a name needs the DNS that fails with the gateway: %s", err)
 	}
 	// A quorum nothing can satisfy fails every advertiser, forever, and a device that has
 	// run out of candidates stays on the last one while reporting it dead. The agent clamps
 	// rather than obeying, so this is the only place a person can be told.
 	if p.ProbeQuorum > uint32(len(p.ProbeTargets)) {
-		return fmt.Errorf("store: probe_quorum %d cannot be met by %d targets",
+		return invalid("probe_quorum %d cannot be met by %d targets",
 			p.ProbeQuorum, len(p.ProbeTargets))
 	}
 	// An interval below a second is a device dialling every target continuously; a day is
 	// long enough that the probe has stopped being one.
 	const minInterval, maxInterval = 1000, 24 * 60 * 60 * 1000
 	if p.ProbeIntervalMS != 0 && (p.ProbeIntervalMS < minInterval || p.ProbeIntervalMS > maxInterval) {
-		return fmt.Errorf("store: probe_interval_ms must be between %d and %d, or zero for every pass",
+		return invalid("probe_interval_ms must be between %d and %d, or zero for every pass",
 			minInterval, maxInterval)
 	}
 	return nil

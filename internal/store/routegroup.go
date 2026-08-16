@@ -165,7 +165,7 @@ func (s *Store) Advertise(ctx context.Context, req AdvertiseRequest) error {
 	switch req.AdminState {
 	case "enabled", "draining", "disabled":
 	default:
-		return fmt.Errorf("store: admin state %q is not enabled, draining or disabled", req.AdminState)
+		return invalid("admin state %q is not enabled, draining or disabled", req.AdminState)
 	}
 
 	return s.InTx(ctx, func(q *dbgen.Queries) error {
@@ -402,8 +402,8 @@ func routeGroupFrom(row dbgen.CreateRouteGroupRow, prefixes []netip.Prefix) (Rou
 
 func validateSlug(what, slug string) error {
 	if !slugPattern.MatchString(slug) {
-		return fmt.Errorf(
-			"store: %q is not a usable %s name; use lowercase letters, digits and hyphens", slug, what)
+		return invalid(
+			"%q is not a usable %s name; use lowercase letters, digits and hyphens", slug, what)
 	}
 	return nil
 }
@@ -418,22 +418,22 @@ func validateKind(kind string, prefixes []netip.Prefix) error {
 	switch kind {
 	case KindEgress:
 		if len(prefixes) != 0 {
-			return errors.New(
-				"store: an egress group carries the default route and takes no prefixes of its own")
+			return invalid(
+				"an egress group carries the default route and takes no prefixes of its own")
 		}
 	case KindSubnet, KindService:
 		if len(prefixes) == 0 {
-			return fmt.Errorf("store: a %s group needs at least one prefix to carry", kind)
+			return invalid("a %s group needs at least one prefix to carry", kind)
 		}
 		for _, p := range prefixes {
 			if p.Bits() == 0 {
-				return fmt.Errorf(
-					"store: %s is the default route; advertise it as an egress group rather than a %s one",
+				return invalid(
+					"%s is the default route; advertise it as an egress group rather than a %s one",
 					p, kind)
 			}
 		}
 	default:
-		return fmt.Errorf("store: %q is not one of egress, subnet, service", kind)
+		return invalid("%q is not one of egress, subnet, service", kind)
 	}
 	return nil
 }

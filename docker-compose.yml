@@ -40,8 +40,24 @@ services:
       MESHP_ADMIN_TOKEN: ${MESHP_ADMIN_TOKEN:-}
       MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
       MESHP_LOG_FORMAT: ${MESHP_LOG_FORMAT:-text}
-      MESHP_DEFAULT_ULA_PREFIX: ${MESHP_DEFAULT_ULA_PREFIX:-fd7c:6d65:7368::/48}
-      MESHP_DEFAULT_V4_PREFIX: ${MESHP_DEFAULT_V4_PREFIX:-100.90.0.0/16}
+
+      # No default address prefixes here. Two used to be set and nothing read them, so an
+      # operator could change where their devices are addressed and watch it do nothing.
+      # Pools belong to a network and are given when it is created, because two networks on
+      # one control plane are meant to be able to use different ones.
+
+      # Relaying, which is what makes this stack able to carry a packet. Nothing discovers
+      # direct paths yet, so a deployment with no relay gives agents peers they cannot
+      # reach (ADR-0002) — and this file's contract is that `docker compose up` gives a
+      # working control plane and relay with no further steps.
+      #
+      # The default keypair below is published in this repository and is therefore worth
+      # nothing: anyone can mint relay capabilities against it. It is here so the stack
+      # works out of the box, in the same spirit as the dev secret key above, and both
+      # must be replaced before anything real. `meshp-control --generate-relay-key`
+      # prints a fresh pair.
+      MESHP_RELAYS: ${MESHP_RELAYS:-local=relay:3478}
+      MESHP_RELAY_SIGNING_KEY: ${MESHP_RELAY_SIGNING_KEY:-OS4iBtA9dZDL4Y9nIT5NY8YejmveFfhJ/M4JpiT+GUk=}
     ports:
       - "8080:8080"
     healthcheck:
@@ -59,10 +75,12 @@ services:
       control:
         condition: service_started
     environment:
-      MESHP_CONTROL_URL: http://control:8080
-      MESHP_RELAY_LISTEN_ADDR: ":3478"
+      # The public half of the pair the control plane signs with. A relay verifies
+      # capabilities it cannot mint, so this one being public costs nothing on its own —
+      # the private half above is what must not be (ADR-0017).
+      MESHP_RELAY_ISSUER_KEY: ${MESHP_RELAY_ISSUER_KEY:-wjmzw3Eo36tjSd+v8qd7RgGNWQaFvAkJs917vmhmtaY=}
+      MESHP_RELAY_LISTEN: ${MESHP_RELAY_LISTEN:-:3478}
       MESHP_RELAY_ADMIN_ADDR: ":9090"
-      MESHP_RELAY_ADVERTISED_HOST: ${MESHP_RELAY_ADVERTISED_HOST:-localhost}
       MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
     ports:
       - "3478:3478/udp"
