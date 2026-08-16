@@ -32,6 +32,10 @@ type Server struct {
 	zones *Zones
 	log   *slog.Logger
 
+	// bindPair is a field so the retry below can be proved by a test rather than argued
+	// for. Nothing outside this package sets it.
+	bindPair func(netip.AddrPort) (*net.UDPConn, *net.TCPListener, error)
+
 	mu   sync.Mutex
 	addr netip.AddrPort
 	udp  *net.UDPConn
@@ -43,7 +47,7 @@ func NewServer(zones *Zones, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Server{zones: zones, log: log}
+	return &Server{zones: zones, log: log, bindPair: bindPair}
 }
 
 // ErrNotLoopback means somebody asked this to listen where it must not.
@@ -57,28 +61,33 @@ var ErrNotLoopback = errors.New("dns: the resolver listens on loopback only")
 // that line ran before the sockets existed — so `meshp status` could truthfully report no
 // resolver on a device that was about to have one, and the end-to-end assertion guarding
 // this feature failed on a slower machine. Binding is fast and can fail; serving is neither.
-//
-// Both protocols, because DNS is both: a truncated UDP answer tells the client to retry over
-// TCP, and a client that cannot is stuck with whatever fitted in 512 bytes.
 func (s *Server) Bind(addr netip.AddrPort) error {
 	if !addr.Addr().IsLoopback() {
 		return ErrNotLoopback
 	}
 
-	udp, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(addr))
-	if err != nil {
-		return err
+	// Retried only when the kernel is the one choosing. A caller that named a port wants
+	// that port, and asking again for a port somebody else holds would fail the same way
+	// ten times and call it diligence.
+	attempts := 1
+	if addr.Port() == 0 {
+		attempts = bindAttempts
 	}
-	// The port is read back from the socket rather than from what was asked for, because
-	// a caller may ask for zero and let the kernel choose — and the chosen port is what
-	// has to be handed to the system resolver.
-	bound := udp.LocalAddr().(*net.UDPAddr).AddrPort()
 
-	tcp, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(bound))
+	var udp *net.UDPConn
+	var tcp *net.TCPListener
+	var err error
+	for range attempts {
+		udp, tcp, err = s.bindPair(addr)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		_ = udp.Close()
 		return err
 	}
+
+	bound := tcp.Addr().(*net.TCPAddr).AddrPort()
 
 	s.mu.Lock()
 	s.udp, s.tcp, s.addr = udp, tcp, bound
@@ -86,6 +95,46 @@ func (s *Server) Bind(addr netip.AddrPort) error {
 
 	s.log.Info("resolver listening", "addr", bound.String())
 	return nil
+}
+
+// bindAttempts bounds the search for a port that is free in both protocols.
+//
+// There is no call that reserves one. Asking for port zero has the kernel choose for the
+// protocol being bound, knowing nothing about the other, so the second bind can fail on the
+// number the first just succeeded with — and did: a CI run lost its resolver to `listen tcp
+// 127.0.0.1:41230: bind: address already in use` after UDP had been given 41230. Retrying is
+// the mechanism rather than a workaround, because a fresh draw is the only way to ask again.
+//
+// Ten because each attempt is two syscalls against a range of some 28,000 ports, so ten
+// consecutive collisions means the machine is out of ports and a resolver is not its problem.
+const bindAttempts = 10
+
+// bindPair takes the same port in both protocols, or neither.
+//
+// TCP chooses and UDP matches, which is the way round that makes a collision rare: every
+// outbound connection on the machine holds a TCP ephemeral port, while UDP's range is nearly
+// empty. Asking the crowded side to pick a port it knows is free, then asking the quiet side
+// for that number, is far likelier to succeed than the reverse — which is what this used to
+// do.
+//
+// Both protocols, because DNS is both: a truncated UDP answer tells the client to retry over
+// TCP, and a client that cannot is stuck with whatever fitted in 512 bytes.
+func bindPair(addr netip.AddrPort) (*net.UDPConn, *net.TCPListener, error) {
+	tcp, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(addr))
+	if err != nil {
+		return nil, nil, err
+	}
+	// Read back from the socket rather than from what was asked for, because a caller may
+	// ask for zero and let the kernel choose — and the chosen port is both what UDP must
+	// now match and what gets handed to the system resolver.
+	bound := tcp.Addr().(*net.TCPAddr).AddrPort()
+
+	udp, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(bound))
+	if err != nil {
+		_ = tcp.Close()
+		return nil, nil, err
+	}
+	return udp, tcp, nil
 }
 
 // Serve answers queries until ctx is done, then gives the sockets back.

@@ -316,6 +316,126 @@ func TestBindReturnsHavingBound(t *testing.T) {
 	cancel()
 }
 
+// The bug this retry exists for, reproduced from the outside.
+//
+// A port free in one protocol is not free in the other, so asking the kernel for any port
+// gets a number that the second bind can lose. CI hit it for real — `listen tcp
+// 127.0.0.1:41230: bind: address already in use` — and a device came up with no resolver
+// because of a coincidence in the ephemeral range. Losing names to that is not acceptable
+// when another draw costs two syscalls.
+func TestAPortTakenInOneProtocolCostsAnotherDrawNotTheResolver(t *testing.T) {
+	s := NewServer(twoCustomers(t), nil)
+	real := s.bindPair
+
+	collisions := 0
+	s.bindPair = func(addr netip.AddrPort) (*net.UDPConn, *net.TCPListener, error) {
+		if collisions < 3 {
+			collisions++
+			return nil, nil, errors.New("bind: address already in use")
+		}
+		return real(addr)
+	}
+
+	if err := s.Bind(netip.MustParseAddrPort("127.0.0.1:0")); err != nil {
+		t.Fatalf("three unlucky draws lost the resolver: %v", err)
+	}
+	if collisions != 3 {
+		t.Fatalf("collisions = %d, want 3 — the failures were not actually delivered", collisions)
+	}
+	if !s.Addr().IsValid() || s.Addr().Port() == 0 {
+		t.Fatal("Bind reported success without an address")
+	}
+
+	// And the socket that eventually took is a real one, in both protocols, on the port
+	// Bind reported — which is the whole point of binding them as a pair.
+	udp, err := net.Dial("udp", s.Addr().String())
+	if err != nil {
+		t.Fatalf("nothing is listening on UDP where Bind said: %v", err)
+	}
+	_ = udp.Close()
+	tcp, err := net.Dial("tcp", s.Addr().String())
+	if err != nil {
+		t.Fatalf("nothing is listening on TCP where Bind said: %v", err)
+	}
+	_ = tcp.Close()
+}
+
+// Retrying stops rather than going on forever, so a host that will not let this process bind
+// at all reports that instead of hanging.
+func TestBindGivesUp(t *testing.T) {
+	s := NewServer(twoCustomers(t), nil)
+	attempts := 0
+	wont := errors.New("operation not permitted")
+	s.bindPair = func(netip.AddrPort) (*net.UDPConn, *net.TCPListener, error) {
+		attempts++
+		return nil, nil, wont
+	}
+
+	err := s.Bind(netip.MustParseAddrPort("127.0.0.1:0"))
+	if !errors.Is(err, wont) {
+		t.Fatalf("err = %v, want the failure that actually happened", err)
+	}
+	if attempts != bindAttempts {
+		t.Errorf("attempts = %d, want %d", attempts, bindAttempts)
+	}
+	if s.Addr().IsValid() {
+		t.Error("a server that never bound reports an address")
+	}
+}
+
+// A named port is asked for once. Retrying there would be ten identical failures dressed up
+// as effort: the caller wants that port, and a fresh draw is not on offer.
+func TestANamedPortIsAskedForOnce(t *testing.T) {
+	// A real listener, so the port is genuinely taken rather than faked taken.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	taken := busy.Addr().(*net.TCPAddr).AddrPort()
+
+	s := NewServer(twoCustomers(t), nil)
+	real := s.bindPair
+	attempts := 0
+	s.bindPair = func(addr netip.AddrPort) (*net.UDPConn, *net.TCPListener, error) {
+		attempts++
+		return real(addr)
+	}
+
+	if err := s.Bind(taken); err == nil {
+		t.Fatal("Bind claimed a port another listener holds")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 — a named port was retried", attempts)
+	}
+}
+
+// Neither socket is left behind when the other cannot be had. A leaked listener would hold a
+// port for the life of the daemon and be invisible, since nothing has a handle on it.
+func TestAHalfBoundPairIsClosed(t *testing.T) {
+	busyUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busyUDP.Close() }()
+	port := busyUDP.LocalAddr().(*net.UDPAddr).AddrPort()
+
+	// TCP on that number is free, so bindPair takes it and then cannot have the UDP half.
+	udp, tcp, err := bindPair(port)
+	if err == nil {
+		_ = udp.Close()
+		_ = tcp.Close()
+		t.Fatal("bindPair succeeded on a port already held for UDP")
+	}
+
+	// If the TCP half had been leaked, this could not take the same port.
+	again, err := net.Listen("tcp", port.String())
+	if err != nil {
+		t.Fatalf("the TCP half was left behind: %v", err)
+	}
+	_ = again.Close()
+}
+
 // Serve on a server that never bound returns rather than blocking, so a caller that ignored
 // a Bind failure does not wait forever on a resolver it does not have.
 func TestServeWithoutBindReturns(t *testing.T) {
