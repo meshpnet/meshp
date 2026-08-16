@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/meshpnet/meshp/internal/logx"
 )
 
 // refusal is the body an API refusal carries.
@@ -105,5 +109,46 @@ func TestAnUnreviewedErrorIsStillOpaque(t *testing.T) {
 		`{"slug":"orphan","kind":"subnet","prefixes":["192.168.1.0/24"]}`)
 	if got.status == http.StatusBadRequest && strings.Contains(got.Message, "route_groups") {
 		t.Errorf("a database error reached the caller: %q", got.Message)
+	}
+}
+
+// A refusal names what the caller sent, so what the caller sent is bounded and sanitised
+// before it is logged.
+//
+// This is the difference between this branch and the sentinel table beside it: those errors
+// have fixed text written here, while an InvalidError quotes a slug, a kind or a probe
+// target straight back.
+//
+// The assertion is on truncation rather than on a forged log line, and finding that out was
+// the useful part. A first attempt asserted that a newline in a slug could not start a new
+// record — and it passed with the fix removed, because slog's text handler quotes control
+// characters and every construction site uses %q anyway. Escaping here is defence in depth
+// against a handler that is less careful, and a test that cannot tell the two versions apart
+// is worse than none.
+//
+// Length is the half that is neither. slog does not bound a value at all, so without this a
+// caller can put as much as they like into the log on every failed request, which is a cheap
+// way to fill somebody's disk or their log bill.
+func TestARefusalBoundsWhatTheCallerSent(t *testing.T) {
+	var buf bytes.Buffer
+	h := newHarnessWithLog(t, slog.New(slog.NewTextHandler(&buf, nil)))
+
+	huge := strings.Repeat("A", 4096)
+	got := h.refuse(http.MethodPost, h.netPath("/route-groups"),
+		`{"slug":"`+huge+`","kind":"subnet","prefixes":["192.168.1.0/24"]}`)
+	if got.status != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", got.status)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "request refused") {
+		t.Fatalf("the refusal was not logged at all:\n%s", logged)
+	}
+	if !strings.Contains(logged, "(truncated)") {
+		t.Errorf("a %d-byte slug reached the log whole, so any caller can write as much as "+
+			"they like on every failed request", len(huge))
+	}
+	if strings.Contains(logged, strings.Repeat("A", logx.MaxValueBytes*2)) {
+		t.Error("the log line carries more of the caller's input than logx bounds it to")
 	}
 }
