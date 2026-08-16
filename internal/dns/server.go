@@ -49,11 +49,18 @@ func NewServer(zones *Zones, log *slog.Logger) *Server {
 // ErrNotLoopback means somebody asked this to listen where it must not.
 var ErrNotLoopback = errors.New("dns: the resolver listens on loopback only")
 
-// Listen binds UDP and TCP and serves until ctx is done.
+// Bind takes the sockets and returns, so a caller knows whether it has a resolver before it
+// carries on.
 //
-// Both, because DNS is both: a truncated UDP answer tells the client to retry over TCP, and
-// a client that cannot is stuck with whatever fitted in 512 bytes.
-func (s *Server) Listen(ctx context.Context, addr netip.AddrPort) error {
+// Separate from serving, and that separation is load-bearing rather than tidiness. When the
+// two were one call the daemon had to start it in a goroutine, which meant everything after
+// that line ran before the sockets existed — so `meshp status` could truthfully report no
+// resolver on a device that was about to have one, and the end-to-end assertion guarding
+// this feature failed on a slower machine. Binding is fast and can fail; serving is neither.
+//
+// Both protocols, because DNS is both: a truncated UDP answer tells the client to retry over
+// TCP, and a client that cannot is stuck with whatever fitted in 512 bytes.
+func (s *Server) Bind(addr netip.AddrPort) error {
 	if !addr.Addr().IsLoopback() {
 		return ErrNotLoopback
 	}
@@ -78,6 +85,20 @@ func (s *Server) Listen(ctx context.Context, addr netip.AddrPort) error {
 	s.mu.Unlock()
 
 	s.log.Info("resolver listening", "addr", bound.String())
+	return nil
+}
+
+// Serve answers queries until ctx is done, then gives the sockets back.
+//
+// Returns immediately when nothing is bound, so a caller that ignored a Bind failure does
+// not block forever on a resolver it does not have.
+func (s *Server) Serve(ctx context.Context) {
+	s.mu.Lock()
+	udp, tcp := s.udp, s.tcp
+	s.mu.Unlock()
+	if udp == nil || tcp == nil {
+		return
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -92,7 +113,6 @@ func (s *Server) Listen(ctx context.Context, addr netip.AddrPort) error {
 	s.mu.Lock()
 	s.udp, s.tcp, s.addr = nil, nil, netip.AddrPort{}
 	s.mu.Unlock()
-	return nil
 }
 
 // Addr is where the resolver is listening, or the zero value when it is not.

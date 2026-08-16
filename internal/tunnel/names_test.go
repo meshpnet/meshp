@@ -177,18 +177,13 @@ func TestANameResolvesEndToEnd(t *testing.T) {
 	}
 
 	server := dns.NewServer(zones, nil)
+	if err := server.Bind(netip.MustParseAddrPort("127.0.0.1:0")); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- server.Listen(ctx, netip.MustParseAddrPort("127.0.0.1:0")) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for server.Addr().Port() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the resolver never bound")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	done := make(chan struct{})
+	go func() { defer close(done); server.Serve(ctx) }()
 
 	got := resolve(t, server.Addr(), "fileserver.acme.internal")
 	if got != "100.90.0.2" {

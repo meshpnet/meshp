@@ -18,25 +18,23 @@ func serve(t *testing.T, z *Zones) netip.AddrPort {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	done := make(chan error, 1)
-	go func() { done <- s.Listen(ctx, netip.MustParseAddrPort("127.0.0.1:0")) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for s.Addr().Port() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the resolver never bound")
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Bound before this returns, so there is nothing to poll for — which is the property
+	// the split exists to give callers.
+	if err := s.Bind(netip.MustParseAddrPort("127.0.0.1:0")); err != nil {
+		t.Fatal(err)
 	}
 	addr := s.Addr()
+	if addr.Port() == 0 {
+		t.Fatal("Bind returned without an address")
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx) }()
 
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("Listen: %v", err)
-			}
+		case <-done:
 		case <-time.After(5 * time.Second):
 			t.Error("the resolver did not stop when its context was cancelled")
 		}
@@ -267,23 +265,67 @@ func TestAMalformedQueryGetsFormErr(t *testing.T) {
 func TestItRefusesToListenOffLoopback(t *testing.T) {
 	s := NewServer(twoCustomers(t), nil)
 
-	// A context that ends, and a result read with a deadline. Listen blocks until its
-	// context is done, so a version of this that passed context.Background() would hang
-	// rather than fail if the guard were removed — which is exactly what happened when a
-	// mutation removed it. A test that hangs on the bug it is checking for is worse than
-	// no test: it stalls the suite instead of naming the problem.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Bind returns rather than blocking, so this is a plain assertion now. It used to need
+	// a goroutine and a deadline, because a version of it that called the old combined
+	// Listen with context.Background() would hang rather than fail when the guard was
+	// removed — a test that stalls the suite on the bug it checks for is worse than none.
+	// Splitting bind from serve removed the hazard rather than working around it.
+	if err := s.Bind(netip.MustParseAddrPort("0.0.0.0:0")); !errors.Is(err, ErrNotLoopback) {
+		t.Errorf("err = %v, want ErrNotLoopback", err)
+	}
+	if s.Addr().IsValid() {
+		t.Error("a refused address was bound anyway")
+	}
+}
+
+// Bind returns having bound, which is the whole reason it is not part of Serve.
+//
+// The contract a caller depends on: once this returns without an error, Addr is real and
+// the sockets exist, so everything after that line can rely on there being a resolver.
+// When binding lived inside Serve the daemon had to start it in a goroutine, and everything
+// after that line ran before the sockets existed — `meshp status` reported no resolver on a
+// device that was about to have one, and the end-to-end guard for this feature failed on a
+// machine slower than the one it was written on.
+//
+// This cannot catch a caller that puts Bind in a goroutine anyway; the end-to-end script is
+// what notices that, and only when it loses the race. What this does is make the correct
+// wiring possible and keep it that way.
+func TestBindReturnsHavingBound(t *testing.T) {
+	s := NewServer(twoCustomers(t), nil)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() { done <- s.Listen(ctx, netip.MustParseAddrPort("0.0.0.0:0")) }()
+	if s.Addr().IsValid() {
+		t.Fatal("a server reports an address before anything bound")
+	}
+	if err := s.Bind(netip.MustParseAddrPort("127.0.0.1:0")); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Addr().IsValid() || s.Addr().Port() == 0 {
+		t.Fatal("Bind returned before the socket existed")
+	}
+
+	// And the socket really is accepting, not merely recorded.
+	conn, err := net.Dial("udp", s.Addr().String())
+	if err != nil {
+		t.Fatalf("nothing is listening where Bind said: %v", err)
+	}
+	_ = conn.Close()
+
+	go s.Serve(ctx)
+	cancel()
+}
+
+// Serve on a server that never bound returns rather than blocking, so a caller that ignored
+// a Bind failure does not wait forever on a resolver it does not have.
+func TestServeWithoutBindReturns(t *testing.T) {
+	s := NewServer(twoCustomers(t), nil)
+	done := make(chan struct{})
+	go func() { defer close(done); s.Serve(context.Background()) }()
 
 	select {
-	case err := <-done:
-		if !errors.Is(err, ErrNotLoopback) {
-			t.Errorf("err = %v, want ErrNotLoopback", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Listen did not refuse a non-loopback address; it bound and started serving")
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve blocked on a server with no sockets")
 	}
 }
