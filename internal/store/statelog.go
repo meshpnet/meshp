@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -28,6 +29,10 @@ type Change struct {
 	// Routes marks a change to a route group or its advertisers, which names no peer for
 	// the same reason.
 	Routes bool
+
+	// Tunnel marks a change to the network's tunnel configuration — today, whether devices
+	// claiming a default route must fail closed. It names no peer for the same reason again.
+	Tunnel bool
 }
 
 // PeerUpserted records that a membership's peer state changed.
@@ -55,6 +60,15 @@ func RoutesChanged() Change { return Change{Routes: true} }
 // membership: a policy edit in a 500-device network would otherwise write 500 rows and
 // produce 500-entry deltas describing peers that did not change.
 func PolicyChanged() Change { return Change{Policy: true} }
+
+// TunnelChanged records that the network's tunnel configuration changed.
+//
+// A delta carries TunnelConfig whether or not this row is there, so it is tempting to think
+// the row is redundant. It is not: without something in the log, the builder sees no changes
+// in the window and returns a delta carrying a version number and nothing else. Every agent
+// would acknowledge the new version, the convergence metric would call them current, and
+// every one of them would still be enforcing the old answer.
+func TunnelChanged() Change { return Change{Tunnel: true} }
 
 // BumpVersion advances a network's state version and records what changed, together.
 //
@@ -94,25 +108,37 @@ func BumpVersion(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, cha
 }
 
 // kind reports which sort of change this is, refusing anything ambiguous.
+//
+// Written as a count rather than a chain of pairwise exclusions. Each new kind would
+// otherwise add a comparison against every existing one, and the entry that is easy to
+// forget is the one that makes two kinds mutually exclusive — which fails by writing a row
+// whose kind is only half of what the caller meant, silently. Here anything that is more
+// than one thing is refused by construction.
 func (c Change) kind() (string, error) {
-	switch {
-	case c.Policy && c.Routes:
-		return "", errors.New("a change is both a policy change and a route change; it must be one")
-	case c.Routes && (c.MembershipID != nil || c.PeerPublicKey != nil):
-		return "", errors.New("a route change also names a peer; it is about all of them")
-	case c.Routes:
-		return "routes", nil
-	case c.Policy && (c.MembershipID != nil || c.PeerPublicKey != nil):
-		return "", errors.New("a policy change also names a peer; it is about all of them")
-	case c.Policy:
-		return "policy", nil
-	case c.MembershipID != nil && c.PeerPublicKey != nil:
-		return "", errors.New("a change names both a membership and a key; it must be one or the other")
-	case c.MembershipID != nil:
-		return "peer_upsert", nil
-	case c.PeerPublicKey != nil:
-		return "peer_remove", nil
+	var kinds []string
+	if c.Policy {
+		kinds = append(kinds, "policy")
+	}
+	if c.Routes {
+		kinds = append(kinds, "routes")
+	}
+	if c.Tunnel {
+		kinds = append(kinds, "tunnel")
+	}
+	if c.MembershipID != nil {
+		kinds = append(kinds, "peer_upsert")
+	}
+	if c.PeerPublicKey != nil {
+		kinds = append(kinds, "peer_remove")
+	}
+
+	switch len(kinds) {
+	case 1:
+		return kinds[0], nil
+	case 0:
+		return "", errors.New("a change describes nothing; it must name a peer or say what else moved")
 	default:
-		return "", errors.New("a change names neither a membership nor a key")
+		return "", fmt.Errorf("a change is %s at once; it must be exactly one",
+			strings.Join(kinds, " and "))
 	}
 }

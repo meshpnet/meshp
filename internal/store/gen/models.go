@@ -178,6 +178,8 @@ type Network struct {
 	DeletedAt      *time.Time
 	// Deltas can be computed from this version onward; below it, agents are sent a snapshot.
 	OldestDeltaVersion int64
+	// False means devices claiming a default route in this network may let traffic leave outside the tunnel if it drops. True is the default and is sent as unspecified, because the column defaulting to true is not the same as an administrator choosing it.
+	EgressFailClosed bool
 }
 
 type Organization struct {

@@ -27,7 +27,13 @@ SELECT
     d.name            AS device_name,
     d.revoked_at      AS device_revoked_at,
     n.state_version,
-    n.organization_id
+    n.organization_id,
+    -- Selected here rather than fetched when a delta needs it, because a delta
+    -- always needs it: TunnelConfig rides on every one. Reading it from a row the
+    -- session already has means there is no second query that could be skipped on
+    -- the path where routes did not change — which is how a device still carrying
+    -- a default route would be told to stop failing closed.
+    n.egress_fail_closed
 FROM device_network_memberships m
 JOIN devices d  ON d.id = m.device_id
 JOIN networks n ON n.id = m.network_id
@@ -48,6 +54,7 @@ type GetMembershipForSessionRow struct {
 	DeviceRevokedAt   *time.Time
 	StateVersion      int64
 	OrganizationID    uuid.UUID
+	EgressFailClosed  bool
 }
 
 // Everything needed to authenticate a control-channel session, in one round trip.
@@ -73,6 +80,7 @@ func (q *Queries) GetMembershipForSession(ctx context.Context, id uuid.UUID) (Ge
 		&i.DeviceRevokedAt,
 		&i.StateVersion,
 		&i.OrganizationID,
+		&i.EgressFailClosed,
 	)
 	return i, err
 }

@@ -13,6 +13,41 @@ SELECT * FROM networks
 WHERE organization_id = $1 AND deleted_at IS NULL
 ORDER BY name;
 
+-- name: SetNetworkEgressFailClosed :one
+-- Records whether devices in this network must refuse egress outside the tunnel
+-- while they claim a default route (ADR-0011).
+--
+-- Returns whether this actually changed anything, so the caller can decide
+-- whether the network needs telling. Writing the same value again and bumping the
+-- version regardless would send every agent in the network a delta describing a
+-- change that did not happen, which is churn that looks exactly like a real
+-- reconfiguration in the logs.
+--
+-- Written as a CTE because RETURNING sees the row after the write, so an UPDATE
+-- alone cannot say what the value used to be. The old row is read and locked
+-- first, which also settles two administrators flipping this at once: the second
+-- waits, re-reads, and reports honestly that it changed nothing.
+--
+-- No row comes back for a network that does not exist or has been deleted, which
+-- is how the caller tells that apart from a no-op write.
+WITH locked AS (
+    SELECT before.id, before.egress_fail_closed
+    FROM networks before
+    WHERE before.id = $1 AND before.deleted_at IS NULL
+    FOR UPDATE
+), updated AS (
+    UPDATE networks after
+    SET egress_fail_closed = sqlc.arg(egress_fail_closed)::boolean,
+        updated_at = now()
+    FROM locked
+    WHERE after.id = locked.id
+    RETURNING after.egress_fail_closed
+)
+SELECT
+    updated.egress_fail_closed,
+    (updated.egress_fail_closed IS DISTINCT FROM locked.egress_fail_closed)::boolean AS changed
+FROM updated, locked;
+
 -- name: BumpNetworkStateVersion :one
 -- Called exactly once per mutation that changes what any agent should do.
 -- Returns the new version so the caller can hand it to the delta computation.

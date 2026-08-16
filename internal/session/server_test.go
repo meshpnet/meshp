@@ -175,8 +175,14 @@ type device struct {
 	addressV4    string
 }
 
-// enrolDevice puts a device in the network the way `meshp join` does.
+// enrolDevice puts a device in the fixture's network the way `meshp join` does.
 func (f *fixture) enrolDevice(name string) device {
+	f.t.Helper()
+	return f.enrolDeviceIn(f.netID, name)
+}
+
+// enrolDeviceIn puts a device in a named network, for the tests that need more than one.
+func (f *fixture) enrolDeviceIn(networkID uuid.UUID, name string) device {
 	f.t.Helper()
 
 	tok, err := enroll.NewToken()
@@ -184,7 +190,7 @@ func (f *fixture) enrolDevice(name string) device {
 		f.t.Fatal(err)
 	}
 	if _, err := f.store.Queries().CreateEnrollmentToken(f.ctx, dbgen.CreateEnrollmentTokenParams{
-		NetworkID: f.netID, OrganizationID: f.orgID, TokenHash: tok.Hash,
+		NetworkID: networkID, OrganizationID: f.orgID, TokenHash: tok.Hash,
 		PreassignedTags: []string{}, MaxUses: 1, ExpiresAt: f.clk.Now().Add(time.Hour),
 	}); err != nil {
 		f.t.Fatal(err)
