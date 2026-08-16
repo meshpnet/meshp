@@ -230,6 +230,20 @@ var knownFailures = []struct {
 
 // respondError maps an error to a response, logging what it does not recognise.
 func (s *Server) respondError(w http.ResponseWriter, r *http.Request, err error) {
+	// A refusal caused by what the caller sent, whose text was written to be shown to them.
+	// Checked before the table because there is no sentinel to match: the review that lets
+	// this text out travels on the error itself. Without this branch an administrator who
+	// creates an egress group with prefixes, or a failover policy that would oscillate, gets
+	// "the request could not be completed" and has to go and read the server's log to find
+	// the explanation that was already written for them.
+	var invalid *store.InvalidError
+	if errors.As(err, &invalid) {
+		s.log.Info("request refused",
+			"path", logx.Safe(r.URL.Path), "code", "invalid", "error", err)
+		httpx.Error(w, s.log, http.StatusBadRequest, "invalid", invalid.Message)
+		return
+	}
+
 	for _, known := range knownFailures {
 		if errors.Is(err, known.err) {
 			s.log.Info("request refused",
