@@ -1,6 +1,6 @@
 # ADR-0021: Names resolve on the device, from desired state
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-08-16
 
 ## Context
