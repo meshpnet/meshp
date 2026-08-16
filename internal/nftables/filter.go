@@ -65,3 +65,19 @@ func (f *Filter) ApplyForward(ctx context.Context, iface string, groups []*meshp
 	}
 	return Apply(ctx, script)
 }
+
+// ForwardObstacles names anything else on this host that drops forwarded packets.
+//
+// A thin wrapper on ForwardRefusals so the reconciler can hold one interface rather than
+// reaching into this package for the one call that is not an Apply.
+func (f *Filter) ForwardObstacles(ctx context.Context) ([]string, error) {
+	found, err := ForwardRefusals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(found))
+	for _, r := range found {
+		out = append(out, r.String())
+	}
+	return out, nil
+}

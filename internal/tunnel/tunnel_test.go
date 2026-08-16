@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -846,6 +847,16 @@ type fakeFilter struct {
 	// is the whole property under test — a mutation that swapped them survived until this
 	// existed.
 	order *[]string
+
+	// obstacles is what this host has in the way of forwarded packets, and obstacleErr is
+	// a host that could not be asked. Both default to the ordinary case: nothing in the
+	// way, asked successfully.
+	obstacles   []string
+	obstacleErr error
+}
+
+func (f *fakeFilter) ForwardObstacles(context.Context) ([]string, error) {
+	return f.obstacles, f.obstacleErr
 }
 
 func (f *fakeFilter) ApplyLock(_ context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error {
@@ -1355,6 +1366,90 @@ func TestAnAdvertiserIsMadeToForward(t *testing.T) {
 	}
 	if len(filter.forwarded) != 1 || len(filter.forwarded[0]) != 1 {
 		t.Fatalf("forwarding was configured %d times: %+v", len(filter.forwarded), filter.forwarded)
+	}
+}
+
+// An advertiser that cannot actually carry anything must not look healthy.
+//
+// This is the failure that prompted #89 and it has no other symptom: the ruleset meshp
+// renders is correct, the group is applied, `meshp status` says so, and nothing crosses.
+// Every base chain at a hook runs and a drop in any of them ends the packet, so another
+// table refusing forwarded traffic beats an accept meshp wrote in its own. Reporting the
+// component unapplied is what stops a route group failing over onto a gateway that is not
+// one.
+func TestAnAdvertiserBlockedBySomethingElseSaysSo(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{obstacles: []string{"ip filter FORWARD"}}
+	r := New(link, membership(), nil, filter, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(unapplied, "forwarding") {
+		t.Errorf("unapplied = %v; a device that carries nothing reported itself as carrying", unapplied)
+	}
+	// And it still installed the rules. The obstacle may be removed by an operator at any
+	// moment, and a device that had refused to configure itself would then need a reconcile
+	// nobody triggers.
+	if len(filter.forwarded) != 1 {
+		t.Errorf("forwarding was configured %d times; the rules should still go in", len(filter.forwarded))
+	}
+}
+
+// And a host with nothing in the way is not warned about anything.
+//
+// A warning that fires when the thing works is worse than no warning: it teaches whoever
+// reads the logs to skip this line, which is the line that matters on the day it is true.
+func TestAClearHostReportsNoObstacle(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{}
+	r := New(link, membership(), nil, filter, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(unapplied, "forwarding") {
+		t.Errorf("unapplied = %v on a host that refuses nothing", unapplied)
+	}
+}
+
+// A host that could not be asked is not a host that is broken.
+//
+// Not knowing is exactly the state this was in before it could ask, so it must not turn a
+// working advertiser into one that reports itself unapplied — a false alarm here fails a
+// route group over to somebody else for no reason.
+func TestAHostThatCannotBeAskedIsNotDeclaredBroken(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{obstacleErr: errors.New("nft: permission denied")}
+	r := New(link, membership(), nil, filter, nil)
+
+	unapplied, err := r.Apply(context.Background(),
+		stateAdvertising(1, advertising("192.168.10.0/24"), peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(unapplied, "forwarding") {
+		t.Errorf("unapplied = %v; not being able to check was read as a failure", unapplied)
+	}
+}
+
+// Nothing to carry, nothing to warn about. A laptop with a strict forward policy and no route
+// groups has no problem at all.
+func TestAHostThatCarriesNothingIsNotWarned(t *testing.T) {
+	link := newFakeLink()
+	filter := &fakeFilter{obstacles: []string{"ip filter FORWARD"}}
+	r := New(link, membership(), nil, filter, nil)
+
+	unapplied, err := r.Apply(context.Background(), stateAdvertising(1, nil, peer(bobKey, "100.90.0.2/32")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(unapplied, "forwarding") {
+		t.Errorf("unapplied = %v on a device that carries nothing", unapplied)
 	}
 }
 
