@@ -118,7 +118,8 @@ SELECT
     m.address_v6,
     m.tags,
     k.public_key    AS wireguard_public_key,
-    d.name          AS device_name
+    d.name          AS device_name,
+    m.dns_label
 FROM device_network_memberships m
 JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
 JOIN devices d        ON d.id = m.device_id
@@ -141,6 +142,7 @@ type ListPeersForMembershipRow struct {
 	Tags               []string
 	WireguardPublicKey string
 	DeviceName         string
+	DnsLabel           string
 }
 
 // The other devices this one may reach.
@@ -169,6 +171,7 @@ func (q *Queries) ListPeersForMembership(ctx context.Context, arg ListPeersForMe
 			&i.Tags,
 			&i.WireguardPublicKey,
 			&i.DeviceName,
+			&i.DnsLabel,
 		); err != nil {
 			return nil, err
 		}

@@ -103,6 +103,8 @@ type DeviceNetworkMembership struct {
 	JoinedAt      time.Time
 	LastSeenAt    *time.Time
 	RevokedAt     *time.Time
+	// The name this device answers to inside this network, as <dns_label>.<network slug>.<suffix>. Unique per network because that is the scope of the name. devices.name stays free text for display.
+	DnsLabel string
 }
 
 type DnsRecord struct {

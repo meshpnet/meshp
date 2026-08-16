@@ -11,9 +11,18 @@ WHERE identity_public_key = $1;
 
 -- name: CreateMembership :one
 INSERT INTO device_network_memberships (
-    device_id, network_id, interface_name, address_v4, address_v6, tags
-) VALUES ($1, $2, $3, $4, $5, $6)
+    device_id, network_id, interface_name, address_v4, address_v6, tags, dns_label
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
+
+-- name: TakenDNSLabels :many
+-- The labels already used in a network, among those a candidate might collide with.
+--
+-- Prefix-matched rather than fetching every label in the network: a network with ten
+-- thousand devices has ten thousand labels and one of them is being enrolled, so the
+-- interesting set is the handful that start with the same base.
+SELECT dns_label FROM device_network_memberships
+WHERE network_id = $1 AND dns_label LIKE sqlc.arg(prefix) || '%';
 
 -- name: CountMembershipsForDevice :one
 SELECT count(*) FROM device_network_memberships

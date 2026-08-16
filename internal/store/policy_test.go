@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -51,10 +52,10 @@ func seedNetwork(t *testing.T) (seeded, func() uuid.UUID) {
 		}
 		if err := s.pool.QueryRow(ctx,
 			`INSERT INTO device_network_memberships
-			   (device_id,network_id,interface_name,address_v4,tags)
-			 VALUES ($1,$2,'meshp0',$3,$4) RETURNING id`,
+			   (device_id,network_id,interface_name,address_v4,tags,dns_label)
+			 VALUES ($1,$2,'meshp0',$3,$4,$5) RETURNING id`,
 			deviceID, netID, netip.AddrFrom4([4]byte{100, 90, 0, byte(n)}).String(),
-			[]string{"laptop"}).Scan(&membershipID); err != nil {
+			[]string{"laptop"}, fmt.Sprintf("device-%d", n)).Scan(&membershipID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.pool.Exec(ctx,

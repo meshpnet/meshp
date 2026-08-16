@@ -1171,9 +1171,18 @@ type Peer struct {
 	// Relay to use until (or unless) a direct path is established. meshp is
 	// relay-first: connectivity never depends on hole punching succeeding
 	// (ADR-0002).
-	RelayId       string   `protobuf:"bytes,6,opt,name=relay_id,json=relayId,proto3" json:"relay_id,omitempty"`
-	DeviceName    string   `protobuf:"bytes,7,opt,name=device_name,json=deviceName,proto3" json:"device_name,omitempty"` // display only
-	Tags          []string `protobuf:"bytes,8,rep,name=tags,proto3" json:"tags,omitempty"`                               // display and ACL context only; never authoritative
+	RelayId    string   `protobuf:"bytes,6,opt,name=relay_id,json=relayId,proto3" json:"relay_id,omitempty"`
+	DeviceName string   `protobuf:"bytes,7,opt,name=device_name,json=deviceName,proto3" json:"device_name,omitempty"` // display only
+	Tags       []string `protobuf:"bytes,8,rep,name=tags,proto3" json:"tags,omitempty"`                               // display and ACL context only; never authoritative
+	// The name this peer answers to inside this network, as
+	// <dns_label>.<network>.<suffix> (ADR-0021). Unique within the network, which
+	// device_name is not and was never required to be.
+	//
+	// Separate from device_name rather than replacing it, so a person keeps
+	// "Dave's laptop (spare)" in a device list while DNS gets something it can
+	// carry. Empty from a control plane too old to send one, and a device that
+	// receives none simply has no resolvable name.
+	DnsLabel      string `protobuf:"bytes,9,opt,name=dns_label,json=dnsLabel,proto3" json:"dns_label,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1262,6 +1271,13 @@ func (x *Peer) GetTags() []string {
 		return x.Tags
 	}
 	return nil
+}
+
+func (x *Peer) GetDnsLabel() string {
+	if x != nil {
+		return x.DnsLabel
+	}
+	return ""
 }
 
 type TunnelConfig struct {
@@ -3338,7 +3354,7 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"\bStateAck\x12'\n" +
 	"\x0fapplied_version\x18\x01 \x01(\x04R\x0eappliedVersion\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x121\n" +
-	"\x14unapplied_components\x18\x03 \x03(\tR\x13unappliedComponents\"\x9b\x02\n" +
+	"\x14unapplied_components\x18\x03 \x03(\tR\x13unappliedComponents\"\xb8\x02\n" +
 	"\x04Peer\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1f\n" +
@@ -3350,7 +3366,8 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"\brelay_id\x18\x06 \x01(\tR\arelayId\x12\x1f\n" +
 	"\vdevice_name\x18\a \x01(\tR\n" +
 	"deviceName\x12\x12\n" +
-	"\x04tags\x18\b \x03(\tR\x04tags\"\xa2\x02\n" +
+	"\x04tags\x18\b \x03(\tR\x04tags\x12\x1b\n" +
+	"\tdns_label\x18\t \x01(\tR\bdnsLabel\"\xa2\x02\n" +
 	"\fTunnelConfig\x12\x10\n" +
 	"\x03mtu\x18\x01 \x01(\rR\x03mtu\x12+\n" +
 	"\x11excluded_prefixes\x18\x02 \x03(\tR\x10excludedPrefixes\x12#\n" +

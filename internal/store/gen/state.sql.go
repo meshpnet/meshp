@@ -58,7 +58,8 @@ SELECT
     m.address_v6,
     m.tags,
     k.public_key    AS wireguard_public_key,
-    d.name          AS device_name
+    d.name          AS device_name,
+    m.dns_label
 FROM device_network_memberships m
 JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
 JOIN devices d        ON d.id = m.device_id
@@ -74,6 +75,7 @@ type GetPeerForMembershipRow struct {
 	Tags               []string
 	WireguardPublicKey string
 	DeviceName         string
+	DnsLabel           string
 }
 
 // One peer's current state, for a delta that names it.
@@ -87,6 +89,7 @@ func (q *Queries) GetPeerForMembership(ctx context.Context, id uuid.UUID) (GetPe
 		&i.Tags,
 		&i.WireguardPublicKey,
 		&i.DeviceName,
+		&i.DnsLabel,
 	)
 	return i, err
 }

@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/meshpnet/meshp/internal/clock"
+	"github.com/meshpnet/meshp/internal/dns"
 	"github.com/meshpnet/meshp/internal/ipam"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/store"
@@ -213,6 +215,11 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (RedeemResult, 
 		}
 		v4, v6 := chosen.v4(), chosen.v6()
 
+		label, err := freeLabel(ctx, q, tok.NetworkID, device.Name, device.ID)
+		if err != nil {
+			return err
+		}
+
 		membership, err := q.CreateMembership(ctx, dbgen.CreateMembershipParams{
 			DeviceID:      device.ID,
 			NetworkID:     tok.NetworkID,
@@ -220,9 +227,18 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (RedeemResult, 
 			AddressV4:     v4,
 			AddressV6:     v6,
 			Tags:          tok.PreassignedTags,
+			DnsLabel:      label,
 		})
 		if err != nil {
 			if store.IsUniqueViolation(err) {
+				// Two constraints on this table can be violated here and they mean
+				// opposite things. A device already in the network is the caller's
+				// answer; a label taken between choosing it and inserting it is a race
+				// this lost, and the caller should be told to try again rather than told
+				// they are already enrolled.
+				if store.ConstraintName(err) == "device_network_memberships_dns_label_key" {
+					return fmt.Errorf("enroll: the name %q was taken while enrolling; try again", label)
+				}
 				return ErrAlreadyInNetwork
 			}
 			return fmt.Errorf("enroll: creating membership: %w", err)
@@ -463,4 +479,48 @@ func validateIdentityKey(pub []byte) error {
 		return fmt.Errorf("enroll: identity public key is %d bytes, want %d", len(pub), ed25519PublicKeySize)
 	}
 	return nil
+}
+
+// freeLabel picks the name this device answers to inside a network.
+//
+// Suffixed on collision, never refused. A fleet imaged with one hostname would otherwise
+// produce one enrolment and forty-nine failures, for a reason the person running the
+// installer can neither see nor fix (ADR-0021). `fileserver` becomes `fileserver-2`, and
+// the caller is told which name it actually got.
+//
+// The database holds the real constraint. This picks a candidate that looks free, and if it
+// loses a race the unique index catches it — which is why the insert distinguishes that
+// violation rather than reporting it as an enrolment that already happened.
+func freeLabel(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, displayName string, deviceID uuid.UUID) (string, error) {
+	base := dns.Label(displayName)
+	if base == "" {
+		// Nothing usable in the name at all. Derived from the device's id rather than
+		// refused: every membership needs a label, and an opaque one beats no enrolment.
+		// The same fallback the migration uses, so a device that predates this and one
+		// that arrives after it are named the same way.
+		base = "device-" + strings.ReplaceAll(deviceID.String(), "-", "")[:8]
+	}
+
+	taken, err := q.TakenDNSLabels(ctx, dbgen.TakenDNSLabelsParams{NetworkID: networkID, Prefix: &base})
+	if err != nil {
+		return "", fmt.Errorf("enroll: reading the names already in use: %w", err)
+	}
+	used := make(map[string]struct{}, len(taken))
+	for _, t := range taken {
+		used[t] = struct{}{}
+	}
+
+	if _, clash := used[base]; !clash {
+		return base, nil
+	}
+	// Bounded. A network with this many devices sharing one name has a naming problem the
+	// enrolment path cannot fix, and an unbounded loop here would hold a transaction open
+	// while it counted.
+	for n := 2; n <= 1000; n++ {
+		candidate := dns.Suffixed(base, n)
+		if _, clash := used[candidate]; !clash {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("enroll: a thousand devices in this network are already called %q", base)
 }
