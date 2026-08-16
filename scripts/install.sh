@@ -18,7 +18,7 @@
 # What it deliberately does not do: install the control plane or the relay. Those need a
 # database, a certificate and an administrator's decisions about who may reach them, and a
 # script that guessed at any of it would be configuring a security boundary on somebody's
-# behalf. The server-side units ship in the archive and docs/deploying.md walks through them.
+# behalf. The server-side units ship in the archive, under systemd/.
 set -eu
 
 REPO="${MESHP_REPO:-meshpnet/meshp}"
