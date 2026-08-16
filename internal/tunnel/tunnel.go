@@ -155,9 +155,10 @@ type Reconciler struct {
 
 	mu sync.Mutex
 
-	// lastResolver is what was last asked of the host's resolver, so an unchanged ask does
-	// not spawn a process on every reconcile tick.
-	lastResolver systemResolverState
+	// announced is what was last said about the host's resolver, so the log gets a line
+	// when that changes rather than one on every reconcile tick. The ask itself is made
+	// every pass — see applySystemResolver.
+	announced systemResolverState
 
 	// lastProbe is when each group was last probed, so a group can ask to be quieter than
 	// the daemon's reconcile interval. Under mu because Apply is entered both from the
@@ -589,7 +590,7 @@ func (r *Reconciler) Teardown() error {
 				"interface", name, "error", logx.SafeError(err))
 		}
 		r.mu.Lock()
-		r.lastResolver = systemResolverState{}
+		r.announced = systemResolverState{}
 		r.mu.Unlock()
 	}
 

@@ -269,6 +269,22 @@ jobs:
             || { echo "the end-to-end run never reported a kernel tunnel"; exit 1; }
           echo "the tunnel came up and was asserted"
 
+      - name: a name resolved on the machine holding it
+        run: |
+          # The one assertion that tests the feature rather than its parts. Everything else
+          # about DNS -- the wire format, the zones, resolvectl, the port -- is covered by
+          # tests that ask meshp directly, and all of them pass on a machine where no
+          # ordinary program can find these names. Silence here would mean the runner
+          # skipped it, which is how a feature ends up gated by nothing.
+          if grep -q "skipped-resolver" e2e.log; then
+            echo "the name assertions skipped, so the DNS feature gates nothing"
+            sed -n 's/.*skipped-resolver: /reason: /p' e2e.log
+            exit 1
+          fi
+          grep -q "through this host's own resolver" e2e.log \
+            || { echo "no name was resolved through the host resolver"; exit 1; }
+          sed -n 's/^  \(.* -> .*through this host.s own resolver\)/resolved: \1/p' e2e.log
+
       # Two agents at once, which the enrolment script cannot do: every device is handed
       # the interface name meshp0, so two daemons on one host fight over it. A namespace
       # each is what makes a real handshake — and therefore a real reachability report —

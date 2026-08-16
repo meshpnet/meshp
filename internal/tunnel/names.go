@@ -132,8 +132,18 @@ func (r *Reconciler) WithSystemResolver(s SystemResolver, addr func() netip.Addr
 // each membership configures its own interface and its own domain, so two networks on one
 // device do not fight over a single global setting.
 //
-// Skipped when nothing changed, like the filter and the forwarding rules. Every call is a
-// process spawn and a bus round trip, and the reconciler runs on a timer.
+// Asked on every pass, not only when the ask changes, and that is the whole of why this
+// repairs itself. An earlier version remembered what it had already requested and skipped a
+// repeat, which made it a cache rather than a reconciler: systemd-resolved holds per-link
+// configuration in memory only, so `systemctl restart systemd-resolved` — an ordinary
+// package upgrade — drops it and nothing puts it back. Names stayed broken until the daemon
+// was restarted, while the interface, the routes and the filter all healed on this same
+// timer. Two process spawns a minute is a small price for the thing mending itself, and it
+// is what Invariant 18 asks of every other step here.
+//
+// Nothing read back: there is no cheap, stable way to ask systemd-resolved what a link is
+// currently set to, so this re-asserts rather than compares. The operation is declarative
+// and idempotent, which is what makes that safe.
 func (r *Reconciler) applySystemResolver(ctx context.Context, iface string, state *peerset.Set) []string {
 	if r.systemResolver == nil || r.resolverAddr == nil {
 		return nil
@@ -145,14 +155,6 @@ func (r *Reconciler) applySystemResolver(ctx context.Context, iface string, stat
 		domains = []string{suffix}
 	}
 
-	want := systemResolverState{server: server, domains: strings.Join(domains, ",")}
-	r.mu.Lock()
-	unchanged := r.lastResolver == want
-	r.mu.Unlock()
-	if unchanged {
-		return nil
-	}
-
 	var err error
 	if len(domains) == 0 {
 		// No names to route, so the link goes back as it was. Reverting rather than
@@ -162,26 +164,38 @@ func (r *Reconciler) applySystemResolver(ctx context.Context, iface string, stat
 	} else {
 		err = r.systemResolver.Configure(ctx, iface, server, domains)
 	}
+
+	// Said when it changes, though it is done every pass. The work is idempotent; a line a
+	// minute repeating that nothing has happened is not, and it would bury the line that
+	// matters. A failure that persists is carried by the unapplied component below, which
+	// is the channel built for a condition rather than an event.
+	got := systemResolverState{server: server, domains: strings.Join(domains, ","), failed: err != nil}
+	r.mu.Lock()
+	changed := r.announced != got
+	r.announced = got
+	r.mu.Unlock()
+
 	if err != nil {
-		r.log.Error("this machine's resolver was not pointed at meshp",
-			"interface", iface, "error", logx.SafeError(err),
-			"consequence", "names in this network will not resolve; addresses still work")
+		if changed {
+			r.log.Error("this machine's resolver was not pointed at meshp",
+				"interface", iface, "error", logx.SafeError(err),
+				"consequence", "names in this network will not resolve; addresses still work")
+		}
 		return []string{"dns"}
 	}
 
-	r.mu.Lock()
-	r.lastResolver = want
-	r.mu.Unlock()
-
-	if len(domains) > 0 {
+	if changed && len(domains) > 0 {
 		r.log.Info("names in this network now resolve on this machine",
 			"interface", iface, "resolver", server.String(), "domains", strings.Join(domains, ","))
 	}
 	return nil
 }
 
-// systemResolverState is what was last asked of the host, so an unchanged ask is skipped.
+// systemResolverState is what was last said about the host's resolver, so a line is written
+// when the situation changes and not on every pass. It records the failure as well as the
+// ask, so a recovery is announced rather than passing in silence.
 type systemResolverState struct {
 	server  netip.AddrPort
 	domains string
+	failed  bool
 }
