@@ -111,10 +111,11 @@ func (q *Queries) CreateNetwork(ctx context.Context, arg CreateNetworkParams) (C
 const createRouteGroup = `-- name: CreateRouteGroup :one
 INSERT INTO route_groups (
     network_id, slug, name, kind, selection_mode,
-    auto_failback, failback_delay_seconds, stable_egress_ip
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    auto_failback, failback_delay_seconds, stable_egress_ip, local_failover
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id, network_id, slug, name, kind, selection_mode,
-          auto_failback, failback_delay_seconds, stable_egress_ip, created_at
+          auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+          created_at
 `
 
 type CreateRouteGroupParams struct {
@@ -126,6 +127,7 @@ type CreateRouteGroupParams struct {
 	AutoFailback         bool
 	FailbackDelaySeconds int32
 	StableEgressIp       *netip.Addr
+	LocalFailover        []byte
 }
 
 type CreateRouteGroupRow struct {
@@ -138,6 +140,7 @@ type CreateRouteGroupRow struct {
 	AutoFailback         bool
 	FailbackDelaySeconds int32
 	StableEgressIp       *netip.Addr
+	LocalFailover        []byte
 	CreatedAt            time.Time
 }
 
@@ -151,6 +154,7 @@ func (q *Queries) CreateRouteGroup(ctx context.Context, arg CreateRouteGroupPara
 		arg.AutoFailback,
 		arg.FailbackDelaySeconds,
 		arg.StableEgressIp,
+		arg.LocalFailover,
 	)
 	var i CreateRouteGroupRow
 	err := row.Scan(
@@ -163,6 +167,7 @@ func (q *Queries) CreateRouteGroup(ctx context.Context, arg CreateRouteGroupPara
 		&i.AutoFailback,
 		&i.FailbackDelaySeconds,
 		&i.StableEgressIp,
+		&i.LocalFailover,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -267,7 +272,8 @@ func (q *Queries) GetAdvertiserHealth(ctx context.Context, advertiserID uuid.UUI
 
 const getRouteGroupBySlug = `-- name: GetRouteGroupBySlug :one
 SELECT id, network_id, slug, name, kind, selection_mode,
-       auto_failback, failback_delay_seconds, stable_egress_ip, created_at
+       auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+       created_at
 FROM route_groups
 WHERE network_id = $1 AND slug = $2
 `
@@ -287,6 +293,7 @@ type GetRouteGroupBySlugRow struct {
 	AutoFailback         bool
 	FailbackDelaySeconds int32
 	StableEgressIp       *netip.Addr
+	LocalFailover        []byte
 	CreatedAt            time.Time
 }
 
@@ -303,6 +310,7 @@ func (q *Queries) GetRouteGroupBySlug(ctx context.Context, arg GetRouteGroupBySl
 		&i.AutoFailback,
 		&i.FailbackDelaySeconds,
 		&i.StableEgressIp,
+		&i.LocalFailover,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -455,7 +463,8 @@ func (q *Queries) ListRouteGroupPrefixes(ctx context.Context, dollar_1 []uuid.UU
 
 const listRouteGroups = `-- name: ListRouteGroups :many
 SELECT id, network_id, slug, name, kind, selection_mode,
-       auto_failback, failback_delay_seconds, stable_egress_ip, created_at
+       auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+       created_at
 FROM route_groups
 WHERE network_id = $1
 ORDER BY slug
@@ -471,6 +480,7 @@ type ListRouteGroupsRow struct {
 	AutoFailback         bool
 	FailbackDelaySeconds int32
 	StableEgressIp       *netip.Addr
+	LocalFailover        []byte
 	CreatedAt            time.Time
 }
 
@@ -493,6 +503,7 @@ func (q *Queries) ListRouteGroups(ctx context.Context, networkID uuid.UUID) ([]L
 			&i.AutoFailback,
 			&i.FailbackDelaySeconds,
 			&i.StableEgressIp,
+			&i.LocalFailover,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -503,6 +514,65 @@ func (q *Queries) ListRouteGroups(ctx context.Context, networkID uuid.UUID) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+const setRouteGroupFailover = `-- name: SetRouteGroupFailover :one
+UPDATE route_groups
+SET local_failover = $3,
+    updated_at = now()
+WHERE network_id = $1 AND slug = $2
+RETURNING id, network_id, slug, name, kind, selection_mode,
+          auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+          created_at
+`
+
+type SetRouteGroupFailoverParams struct {
+	NetworkID     uuid.UUID
+	Slug          string
+	LocalFailover []byte
+}
+
+type SetRouteGroupFailoverRow struct {
+	ID                   uuid.UUID
+	NetworkID            uuid.UUID
+	Slug                 string
+	Name                 string
+	Kind                 string
+	SelectionMode        string
+	AutoFailback         bool
+	FailbackDelaySeconds int32
+	StableEgressIp       *netip.Addr
+	LocalFailover        []byte
+	CreatedAt            time.Time
+}
+
+// Replaces a group's local failover policy.
+//
+// Replaced whole rather than merged field by field. The policy is a set of numbers that
+// only make sense together — a fail threshold of one alongside a recover threshold left
+// from a previous edit is a device that moves on the first lost packet and takes ten
+// successes to come back — and a partial update is how an operator ends up with a
+// combination nobody chose.
+//
+// Returns the row so the caller can report what is now in force, and no row at all when
+// the group is not in this network, which is how a typo is told from a change.
+func (q *Queries) SetRouteGroupFailover(ctx context.Context, arg SetRouteGroupFailoverParams) (SetRouteGroupFailoverRow, error) {
+	row := q.db.QueryRow(ctx, setRouteGroupFailover, arg.NetworkID, arg.Slug, arg.LocalFailover)
+	var i SetRouteGroupFailoverRow
+	err := row.Scan(
+		&i.ID,
+		&i.NetworkID,
+		&i.Slug,
+		&i.Name,
+		&i.Kind,
+		&i.SelectionMode,
+		&i.AutoFailback,
+		&i.FailbackDelaySeconds,
+		&i.StableEgressIp,
+		&i.LocalFailover,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const upsertAdvertiserHealth = `-- name: UpsertAdvertiserHealth :exec

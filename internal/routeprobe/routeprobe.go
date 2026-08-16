@@ -198,6 +198,38 @@ func (c *Chooser) observeLocked(assignment *meshpv1.RouteGroupAssignment, result
 	first := state.consecutiveFail == 0 && state.consecutiveOK == 0
 	decision := Decision{Current: state.currentID, Report: first}
 
+	// A policy that says not to move means neither direction, and the counters still run.
+	//
+	// Both directions, because the field is called `enabled` and an operator who switched
+	// local failover off has said the control plane decides where this device points. Moving
+	// away but never coming back would park every device on a fallback after one blip, which
+	// is a state nobody chose — and it would arrive silently, since the group still reports
+	// itself as honoured.
+	//
+	// The counters and the report keep running, and that is the point of putting this here
+	// rather than returning early: the control plane cannot see a path this device cannot
+	// use, so a device that stopped saying "this advertiser is dead" the moment it was told
+	// not to act on that would take away the one signal that could get somebody to act
+	// instead.
+	if !mayMove(assignment) {
+		if result.Reachable {
+			state.consecutiveFail = 0
+			state.consecutiveOK++
+			return decision
+		}
+		state.consecutiveOK = 0
+		state.consecutiveFail++
+		decision.ConsecutiveFailures = state.consecutiveFail
+		if state.consecutiveFail == failThreshold {
+			// Said once, on the pass that would have moved. Every pass would fill the log of
+			// a device that is behaving exactly as configured; never saying it leaves an
+			// operator with an unreachable prefix and no explanation.
+			decision.Report = true
+			decision.Reason = "the advertiser in use stopped answering probes, and this group's policy says not to move"
+		}
+		return decision
+	}
+
 	if !result.Reachable {
 		state.consecutiveOK = 0
 		state.consecutiveFail++
@@ -225,11 +257,6 @@ func (c *Chooser) observeLocked(assignment *meshpv1.RouteGroupAssignment, result
 
 	// Already where the server would put us; nothing to return to.
 	if state.currentID == state.preferredID {
-		return decision
-	}
-	if !assignment.GetLocalFailover().GetEnabled() && policy != nil {
-		// Failover switched off means stay where you are once you have moved, rather than
-		// oscillate under a policy that says not to.
 		return decision
 	}
 	if state.consecutiveOK < recoverThreshold {
@@ -301,6 +328,22 @@ func (c *Chooser) Forget(assigned []*meshpv1.RouteGroupAssignment) {
 			delete(c.pending, id)
 		}
 	}
+}
+
+// mayMove reports whether this group's policy lets the device choose for itself.
+//
+// An absent policy means yes. A control plane that has never heard of local failover is the
+// case this has to get right, and a device that cannot leave a dead advertiser without being
+// told to cannot leave one during the control-plane outage that is most likely to have
+// caused the problem (ADR-0003). The server states `enabled` explicitly for exactly this
+// reason — proto3 cannot tell an absent bool from false — so the only way to arrive here
+// with no policy is from a server that does not send one at all.
+func mayMove(assignment *meshpv1.RouteGroupAssignment) bool {
+	policy := assignment.GetLocalFailover()
+	if policy == nil {
+		return true
+	}
+	return policy.GetEnabled()
 }
 
 func orDefault(v, fallback int) int {

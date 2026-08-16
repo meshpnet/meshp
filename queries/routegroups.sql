@@ -21,10 +21,11 @@ ORDER BY created_at;
 -- name: CreateRouteGroup :one
 INSERT INTO route_groups (
     network_id, slug, name, kind, selection_mode,
-    auto_failback, failback_delay_seconds, stable_egress_ip
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    auto_failback, failback_delay_seconds, stable_egress_ip, local_failover
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING id, network_id, slug, name, kind, selection_mode,
-          auto_failback, failback_delay_seconds, stable_egress_ip, created_at;
+          auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+          created_at;
 
 -- name: AddRouteGroupPrefix :exec
 -- Idempotent, because publishing the same group twice must not be an error.
@@ -34,16 +35,37 @@ ON CONFLICT (route_group_id, prefix) DO NOTHING;
 
 -- name: GetRouteGroupBySlug :one
 SELECT id, network_id, slug, name, kind, selection_mode,
-       auto_failback, failback_delay_seconds, stable_egress_ip, created_at
+       auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+       created_at
 FROM route_groups
 WHERE network_id = $1 AND slug = $2;
 
 -- name: ListRouteGroups :many
 SELECT id, network_id, slug, name, kind, selection_mode,
-       auto_failback, failback_delay_seconds, stable_egress_ip, created_at
+       auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+       created_at
 FROM route_groups
 WHERE network_id = $1
 ORDER BY slug;
+
+-- name: SetRouteGroupFailover :one
+-- Replaces a group's local failover policy.
+--
+-- Replaced whole rather than merged field by field. The policy is a set of numbers that
+-- only make sense together — a fail threshold of one alongside a recover threshold left
+-- from a previous edit is a device that moves on the first lost packet and takes ten
+-- successes to come back — and a partial update is how an operator ends up with a
+-- combination nobody chose.
+--
+-- Returns the row so the caller can report what is now in force, and no row at all when
+-- the group is not in this network, which is how a typo is told from a change.
+UPDATE route_groups
+SET local_failover = sqlc.arg(local_failover),
+    updated_at = now()
+WHERE network_id = $1 AND slug = $2
+RETURNING id, network_id, slug, name, kind, selection_mode,
+          auto_failback, failback_delay_seconds, stable_egress_ip, local_failover,
+          created_at;
 
 -- name: ListRouteGroupPrefixes :many
 SELECT route_group_id, prefix

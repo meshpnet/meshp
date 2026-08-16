@@ -162,6 +162,21 @@ func assignmentFor(group store.RouteGroup, candidates []routes.Candidate) *meshp
 		RouteGroupId: group.ID.String(),
 		Name:         group.Name,
 		Mode:         modeOf(group.SelectionMode),
+		LocalFailover: &meshpv1.LocalFailoverPolicy{
+			// Enabled is stated rather than omitted. Proto3 cannot tell an absent bool from
+			// false, so a policy that left it out would reach the agent as "this device may
+			// not move itself" — the opposite of the column's default, and a fleet that sits
+			// on dead advertisers waiting for a control plane that may be the thing that
+			// failed.
+			Enabled:          group.Failover.MayMove(),
+			FailThreshold:    group.Failover.FailThreshold,
+			RecoverThreshold: group.Failover.RecoverThreshold,
+			MinHoldSeconds:   group.Failover.MinHoldSeconds,
+			// probe_targets, probe_quorum and probe_interval_ms are deliberately not sent
+			// yet. Nothing in the agent reads them: it derives reachability from handshake
+			// age, so targets on the wire would be a setting an administrator could write,
+			// see stored, and watch do nothing (ADR-0018). They arrive with the probe.
+		},
 	}
 
 	// An egress group carries the default route rather than prefixes of its own, which is

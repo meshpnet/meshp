@@ -24,14 +24,15 @@ func (s *Server) handleCreateRouteGroup(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var body struct {
-		Slug                 string   `json:"slug"`
-		Name                 string   `json:"name"`
-		Kind                 string   `json:"kind"`
-		Prefixes             []string `json:"prefixes"`
-		SelectionMode        string   `json:"selection_mode"`
-		AutoFailback         *bool    `json:"auto_failback"`
-		FailbackDelaySeconds int32    `json:"failback_delay_seconds"`
-		StableEgressIP       string   `json:"stable_egress_ip"`
+		Slug                 string          `json:"slug"`
+		Name                 string          `json:"name"`
+		Kind                 string          `json:"kind"`
+		Prefixes             []string        `json:"prefixes"`
+		SelectionMode        string          `json:"selection_mode"`
+		AutoFailback         *bool           `json:"auto_failback"`
+		FailbackDelaySeconds int32           `json:"failback_delay_seconds"`
+		StableEgressIP       string          `json:"stable_egress_ip"`
+		LocalFailover        *failoverPolicy `json:"local_failover"`
 	}
 	if err := decode(w, r, &body); err != nil {
 		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", err.Error())
@@ -46,6 +47,14 @@ func (s *Server) handleCreateRouteGroup(w http.ResponseWriter, r *http.Request) 
 		SelectionMode:        body.SelectionMode,
 		AutoFailback:         body.AutoFailback == nil || *body.AutoFailback,
 		FailbackDelaySeconds: body.FailbackDelaySeconds,
+		// Stated rather than left zero. A zero FailoverPolicy behaves identically — Enabled
+		// is a pointer and nil already means "may move" — but the row it stores is `{}`,
+		// and somebody reading this table wants to see what the group's policy is without
+		// having to know which absences are which.
+		Failover: store.DefaultFailoverPolicy(),
+	}
+	if body.LocalFailover != nil {
+		req.Failover = body.LocalFailover.toStore()
 	}
 	for _, raw := range body.Prefixes {
 		prefix, err := netip.ParsePrefix(raw)
@@ -263,6 +272,7 @@ func renderGroup(g store.RouteGroup) map[string]any {
 		"selection_mode":         g.SelectionMode,
 		"auto_failback":          g.AutoFailback,
 		"failback_delay_seconds": g.FailbackDelaySeconds,
+		"local_failover":         renderFailover(g.Failover),
 	}
 	if g.StableEgressIP != nil {
 		out["stable_egress_ip"] = g.StableEgressIP.String()
