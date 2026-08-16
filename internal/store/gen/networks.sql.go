@@ -90,7 +90,7 @@ func (q *Queries) GetConvergenceLag(ctx context.Context, networkID uuid.UUID) ([
 
 const getNetwork = `-- name: GetNetwork :one
 
-SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version FROM networks
+SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version, egress_fail_closed FROM networks
 WHERE id = $1 AND deleted_at IS NULL
 `
 
@@ -112,6 +112,7 @@ func (q *Queries) GetNetwork(ctx context.Context, id uuid.UUID) (Network, error)
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.OldestDeltaVersion,
+		&i.EgressFailClosed,
 	)
 	return i, err
 }
@@ -159,7 +160,7 @@ func (q *Queries) ListActiveMemberships(ctx context.Context, networkID uuid.UUID
 }
 
 const listNetworksForOrganization = `-- name: ListNetworksForOrganization :many
-SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version FROM networks
+SELECT id, organization_id, slug, name, state_version, created_at, updated_at, deleted_at, oldest_delta_version, egress_fail_closed FROM networks
 WHERE organization_id = $1 AND deleted_at IS NULL
 ORDER BY name
 `
@@ -183,6 +184,7 @@ func (q *Queries) ListNetworksForOrganization(ctx context.Context, organizationI
 			&i.UpdatedAt,
 			&i.DeletedAt,
 			&i.OldestDeltaVersion,
+			&i.EgressFailClosed,
 		); err != nil {
 			return nil, err
 		}
@@ -192,4 +194,57 @@ func (q *Queries) ListNetworksForOrganization(ctx context.Context, organizationI
 		return nil, err
 	}
 	return items, nil
+}
+
+const setNetworkEgressFailClosed = `-- name: SetNetworkEgressFailClosed :one
+WITH locked AS (
+    SELECT before.id, before.egress_fail_closed
+    FROM networks before
+    WHERE before.id = $1 AND before.deleted_at IS NULL
+    FOR UPDATE
+), updated AS (
+    UPDATE networks after
+    SET egress_fail_closed = $2::boolean,
+        updated_at = now()
+    FROM locked
+    WHERE after.id = locked.id
+    RETURNING after.egress_fail_closed
+)
+SELECT
+    updated.egress_fail_closed,
+    (updated.egress_fail_closed IS DISTINCT FROM locked.egress_fail_closed)::boolean AS changed
+FROM updated, locked
+`
+
+type SetNetworkEgressFailClosedParams struct {
+	ID               uuid.UUID
+	EgressFailClosed bool
+}
+
+type SetNetworkEgressFailClosedRow struct {
+	EgressFailClosed bool
+	Changed          bool
+}
+
+// Records whether devices in this network must refuse egress outside the tunnel
+// while they claim a default route (ADR-0011).
+//
+// Returns whether this actually changed anything, so the caller can decide
+// whether the network needs telling. Writing the same value again and bumping the
+// version regardless would send every agent in the network a delta describing a
+// change that did not happen, which is churn that looks exactly like a real
+// reconfiguration in the logs.
+//
+// Written as a CTE because RETURNING sees the row after the write, so an UPDATE
+// alone cannot say what the value used to be. The old row is read and locked
+// first, which also settles two administrators flipping this at once: the second
+// waits, re-reads, and reports honestly that it changed nothing.
+//
+// No row comes back for a network that does not exist or has been deleted, which
+// is how the caller tells that apart from a no-op write.
+func (q *Queries) SetNetworkEgressFailClosed(ctx context.Context, arg SetNetworkEgressFailClosedParams) (SetNetworkEgressFailClosedRow, error) {
+	row := q.db.QueryRow(ctx, setNetworkEgressFailClosed, arg.ID, arg.EgressFailClosed)
+	var i SetNetworkEgressFailClosedRow
+	err := row.Scan(&i.EgressFailClosed, &i.Changed)
+	return i, err
 }

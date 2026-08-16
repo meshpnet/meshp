@@ -145,7 +145,7 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 		FromVersion: 0,
 		ToVersion:   uint64(membership.StateVersion),
 		UpsertPeers: make([]*meshpv1.Peer, 0, len(peers)),
-		Tunnel:      b.tunnelConfig(),
+		Tunnel:      b.tunnelConfig(membership),
 		Relays:      b.relays,
 	}
 	for _, p := range peers {
@@ -205,6 +205,14 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 			// recomputes the assignments rather than touching peers.
 			routesChanged = true
 
+		case "tunnel":
+			// Nothing to set. TunnelConfig is attached to every delta below, so this row's
+			// only job is to exist: it is what stops the builder short-circuiting on "nothing
+			// in this window changed" and sending a version number with no contents. Handled
+			// explicitly rather than by falling through the switch, so that a reader looking
+			// for where 'tunnel' is dealt with finds this instead of concluding it was
+			// forgotten.
+
 		case "peer_upsert":
 			if change.MembershipID == nil {
 				continue // the membership was deleted; its removal is logged separately
@@ -229,7 +237,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// agent that missed the snapshot carrying it would have peers naming a relay it
 		// knows nothing about.
 		Relays: b.relays,
-		Tunnel: b.tunnelConfig(),
+		Tunnel: b.tunnelConfig(membership),
 	}
 
 	for id := range upserts {
@@ -315,7 +323,17 @@ func (b *StateBuilder) preferredRelay() *meshpv1.RelayConfig_Relay {
 	return b.relays.GetRelays()[0]
 }
 
-func (b *StateBuilder) tunnelConfig() *meshpv1.TunnelConfig {
+// tunnelConfig is what every delta and every snapshot tells a device about its tunnel.
+//
+// Takes the membership rather than reading the network again, and that is the load-bearing
+// detail. TunnelConfig goes out with every delta, while route group assignments are only
+// recomputed when routes changed — so anything here that needed its own query would be a
+// query somebody could later decide to skip on the cheap path. The fail-closed answer would
+// then be right on the deltas that mention routes and wrong on the ones that do not, and
+// being wrong means telling a device that is still carrying a default route to stop
+// refusing egress outside it. The membership row is loaded before any of this runs and
+// already carries the column.
+func (b *StateBuilder) tunnelConfig(membership dbgen.GetMembershipForSessionRow) *meshpv1.TunnelConfig {
 	// 1420 leaves room for WireGuard's overhead inside a 1500-byte path.
 	mtu := uint32(1420)
 
@@ -333,16 +351,28 @@ func (b *StateBuilder) tunnelConfig() *meshpv1.TunnelConfig {
 	}
 
 	return &meshpv1.TunnelConfig{
-		Mtu: mtu,
-		// Left unset, which the agent reads as closed (ADR-0011). Sending an explicit false
-		// would be this control plane asking every device to leak if its tunnel drops, and
-		// nothing here has been told to want that — an administrator opting out is a
-		// decision that needs somewhere to be recorded first, and there is nowhere yet.
-		//
-		// Unset rather than an explicit true for the same reason: what is stored is what an
-		// operator chose, and nobody has chosen anything.
-		FailClosedPolicy: meshpv1.TunnelConfig_FAIL_CLOSED_UNSPECIFIED,
+		Mtu:              mtu,
+		FailClosedPolicy: failClosedPolicy(membership.EgressFailClosed),
 	}
+}
+
+// failClosedPolicy renders the stored answer onto the wire.
+//
+// Only the opt-out is ever stated. The column defaults to true, so a network holding true is
+// a network nobody has said anything about — and ENFORCED would report that as a decision an
+// administrator made. UNSPECIFIED is the honest word for it, and the agent reads it as closed
+// anyway (ADR-0011), so nothing about the device's behaviour turns on the difference. What
+// turns on it is whether the control plane is describing the world accurately, which is worth
+// more here than a symmetry between the two branches.
+//
+// DISABLED is stated explicitly, because there the difference does matter: the agent must be
+// able to tell an administrator who chose to fail open from a control plane too old to have
+// an opinion, and only one of those may take the lock off.
+func failClosedPolicy(enforced bool) meshpv1.TunnelConfig_FailClosed {
+	if enforced {
+		return meshpv1.TunnelConfig_FAIL_CLOSED_UNSPECIFIED
+	}
+	return meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED
 }
 
 // allowedIPs renders a peer's addresses as single-host prefixes.

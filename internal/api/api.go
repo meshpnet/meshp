@@ -113,6 +113,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 
 	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
 
+	// Its own sub-resource rather than a field on a general network update, because this
+	// is the one setting here that can decide whether a laptop leaks. A PUT that names it
+	// in the path cannot be made by accident, reads unambiguously in an access log, and
+	// leaves no room for a partial update that silently carries it along.
+	mux.Handle("GET /api/v1/networks/{networkID}/egress-fail-closed", s.adminOnly(s.handleGetEgressFailClosed))
+	mux.Handle("PUT /api/v1/networks/{networkID}/egress-fail-closed", s.adminOnly(s.handleSetEgressFailClosed))
+
 	mux.Handle("GET /api/v1/networks/{networkID}/route-groups", s.adminOnly(s.handleListRouteGroups))
 	mux.Handle("POST /api/v1/networks/{networkID}/route-groups", s.adminOnly(s.handleCreateRouteGroup))
 	mux.Handle("DELETE /api/v1/networks/{networkID}/route-groups/{slug}", s.adminOnly(s.handleDeleteRouteGroup))
