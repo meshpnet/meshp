@@ -96,11 +96,41 @@ func TestOptingOutOfLocalFailoverReachesTheAgent(t *testing.T) {
 	}
 }
 
-// Probe targets are deliberately not sent yet: nothing in the agent reads them, so an
-// administrator could write them, see them stored, and watch them do nothing (ADR-0018).
-// This is here so that whoever adds them has to delete a test that says why they were not
-// there, rather than wondering whether it was an oversight.
-func TestProbeTargetsAreNotSentYet(t *testing.T) {
+// The targets an administrator named have to arrive, or the agent has nothing to dial and
+// falls back to the handshake — which is the whole thing this was supposed to replace.
+func TestProbeTargetsReachTheAgent(t *testing.T) {
+	f := newFixture(t)
+	laptop := f.enrolDevice("laptop")
+	router := f.enrolDevice("branch-router")
+	f.subnetGroup("branch-lan", "192.168.10.0/24")
+	f.advertise("branch-lan", router, 1)
+
+	f.setFailover("branch-lan", store.FailoverPolicy{
+		Enabled:      yes(),
+		ProbeTargets: []string{"192.168.10.1:22", "192.168.10.2:443"},
+		ProbeQuorum:  2, ProbeIntervalMS: 600_000,
+	})
+
+	policy := f.assignments(laptop)[0].GetLocalFailover()
+	if len(policy.GetProbeTargets()) != 2 {
+		t.Fatalf("probe_targets = %v", policy.GetProbeTargets())
+	}
+	if policy.GetProbeTargets()[0] != "192.168.10.1:22" {
+		t.Errorf("probe_targets = %v", policy.GetProbeTargets())
+	}
+	if policy.GetProbeQuorum() != 2 {
+		t.Errorf("probe_quorum = %d, want 2", policy.GetProbeQuorum())
+	}
+	if policy.GetProbeIntervalMs() != 600_000 {
+		t.Errorf("probe_interval_ms = %d, want 600000", policy.GetProbeIntervalMs())
+	}
+}
+
+// A group nobody has given targets sends none, which the agent reads as "fall back to the
+// handshake". There is deliberately no default: only an administrator knows what a working
+// path looks like for their network, and picking public addresses on their behalf would have
+// every device they own dialling a third party nobody asked it to.
+func TestAGroupWithNoTargetsSendsNone(t *testing.T) {
 	f := newFixture(t)
 	laptop := f.enrolDevice("laptop")
 	router := f.enrolDevice("branch-router")
@@ -108,8 +138,8 @@ func TestProbeTargetsAreNotSentYet(t *testing.T) {
 	f.advertise("branch-lan", router, 1)
 
 	policy := f.assignments(laptop)[0].GetLocalFailover()
-	if len(policy.GetProbeTargets()) != 0 || policy.GetProbeQuorum() != 0 || policy.GetProbeIntervalMs() != 0 {
-		t.Errorf("probe settings are on the wire before anything reads them: %+v", policy)
+	if len(policy.GetProbeTargets()) != 0 {
+		t.Errorf("a group nobody configured invented targets: %v", policy.GetProbeTargets())
 	}
 }
 

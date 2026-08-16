@@ -37,6 +37,7 @@ func (c *Chooser) recordLocked(groupID string, decision Decision, result Result)
 		Reachable:                result.Reachable,
 		RttMs:                    millis(result),
 		ConsecutiveFailures:      uint32(decision.ConsecutiveFailures),
+		FailedProbeTargets:       result.Failed,
 		SwitchedFromAdvertiserId: decision.Switched,
 		SwitchReason:             decision.Reason,
 	}
