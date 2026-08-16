@@ -517,6 +517,21 @@ jobs:
           sudo modprobe dummy || true
           echo "systemd-resolved is answering here"
 
+      # Docker is installed on this runner and sets the forward policy to DROP. A drop in one
+      # table wins over an accept in another, so meshp's forwarding chain cannot undo it and
+      # the packet tests below measure the runner image rather than meshp.
+      #
+      # Set here rather than worked around in the tests, because the tests are right: they
+      # prove the ruleset carries a packet when nothing else is refusing it. That another
+      # tool can silently defeat meshp's forwarding is a real defect in meshp and is filed
+      # separately -- it is not something this job should paper over quietly, which is why
+      # the previous policy is printed.
+      - name: nothing else on this runner is dropping forwarded packets
+        run: |
+          echo "before: $(sudo iptables -L FORWARD -n | head -1)"
+          sudo iptables -P FORWARD ACCEPT
+          echo "after:  $(sudo iptables -L FORWARD -n | head -1)"
+
       # nftables joins them for the reason the others are here, and it arrives late: this
       # package has held real-packet tests since the forwarding work — a packet crossing into
       # a carried LAN, and stopping when the group is withdrawn — and none of them has ever
