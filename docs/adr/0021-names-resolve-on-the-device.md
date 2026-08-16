@@ -93,8 +93,20 @@ Fully-qualified names always resolve, and are the answer when a bare one will no
 ### 5. `device_name` stops being display-only
 
 A resolvable name is load-bearing. It gets a syntax (an LDH label), uniqueness within
-a network, and a rename path. Names that exist today and do not satisfy it must be
-reported rather than silently mangled into something that resolves.
+a network, and a rename path.
+
+**A collision is resolved by suffixing, never by refusing.** A device asking to join as
+`fileserver` when one exists becomes `fileserver-2`, and `meshp join` prints the name it
+was actually given. Refusing would mean a fleet imaged with one hostname produces one
+enrolment and forty-nine failures, for a reason the person running the installer can
+neither see nor fix — which is a worse product than having no names at all.
+
+The same rule applies to the migration that introduces the constraint: existing
+duplicates are renamed and the change is reported, rather than the migration refusing
+to apply. That is safe **only because names are not yet addresses** — nothing routes,
+authorises or resolves by `device_name` today, so a rename costs nothing. It is the
+reason to do this before the resolver ships rather than after: once a name is an
+address, it is in somebody's shell history and a rename is a breaking change forever.
 
 ## Consequences
 
@@ -111,11 +123,21 @@ admin ones are not — so reconciliation has the discriminator it needs.
 this it invalidates a name other people have in their shell history and their scripts,
 so it needs to be deliberate, logged, and probably rate-limited.
 
-**Uniqueness has to be enforced on names that already exist.** `devices.name` has no
-constraint today, so a deployment may already hold two machines called `laptop` in one
-network. The migration cannot silently rename one. It has to refuse, or quarantine,
-and an operator has to choose — which is a worse upgrade experience than doing nothing
-and the reason to do it before there are deployments rather than after.
+**Existing duplicates get renamed by the migration**, and it must say which. `devices.name`
+has no constraint today, so a deployment may already hold two machines called `laptop`
+in one network.
+
+An earlier draft of this ADR said the migration had to refuse rather than rename, and
+that was wrong. It blocks the upgrade to protect a name nothing depends on: `device_name`
+is display-only today, so a rename breaks no route, no policy and no lookup. The window
+in which that is true closes when the resolver ships, which is what makes the ordering
+here load-bearing rather than merely tidy.
+
+**Names stop being free text.** `Dave's laptop (spare)` is not an LDH label and will not
+survive. That is a real loss and the unavoidable price of a name being an address. It
+buys something back: once a name resolves it is security-relevant, and validation closes
+off control characters and homoglyphs — a device named to impersonate another is a
+phishing surface inside the mesh.
 
 **The agent now listens on a port.** Loopback only, but it is a new thing that can
 fail to bind, a new thing to report in `meshp status`, and a new thing `meshp doctor`

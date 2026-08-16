@@ -225,12 +225,17 @@ func cmdStatus(ctx context.Context, args []string) error {
 	if !status.Enrolled {
 		fmt.Println("not enrolled")
 		fmt.Println("  run 'meshp join <token>' to join a network")
+		// The resolver here too. It comes up before any membership does, so a device
+		// that has not joined anything still has one — and somebody checking whether it
+		// bound should not have to enrol first to find out.
+		printResolver(status)
 		return nil
 	}
 
 	fmt.Printf("enrolled  %d network(s)\n", len(status.Memberships))
 	fmt.Printf("  identity  %s\n", truncate(status.IdentityPublicKey, 20))
 	fmt.Printf("  daemon    %s, up since %s\n", status.Version, status.StartedAt.Format(time.RFC3339))
+	printResolver(status)
 
 	for _, m := range status.Memberships {
 		fmt.Println()
@@ -336,6 +341,25 @@ func describeDaemonError(err error, socket string) error {
 
 // truncate shortens a key for display. Public keys are not secret, but a terminal
 // full of base64 is unreadable.
+// printResolver says where names are answered, or that they are not.
+//
+// The negative case is stated rather than omitted: a device that resolves no names looks
+// identical to one whose resolver failed to bind, and telling those apart is the whole
+// reason somebody is reading this line.
+func printResolver(status agentapi.Status) {
+	if status.Resolver == "" {
+		fmt.Println("  resolver  not running; names will not resolve, addresses still work")
+		return
+	}
+	fmt.Printf("  resolver  %s", status.Resolver)
+	if len(status.ResolverSuffixes) > 0 {
+		fmt.Printf(" for %s", strings.Join(status.ResolverSuffixes, ", "))
+	} else {
+		fmt.Print(" (no names yet)")
+	}
+	fmt.Println()
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
@@ -81,6 +82,15 @@ func main() {
 	log.Info("meshpd stopped cleanly")
 }
 
+// dnsListenAddr is where the resolver listens.
+//
+// Loopback, because the kill switch permits loopback unconditionally and a resolver anybody
+// on the café Wi-Fi could query would tell them what machines are in your customers'
+// networks. Port zero: the kernel picks, and what it picked is read back and reported,
+// because 53 is almost always already taken by whatever the machine was using before and
+// fighting it would break the host's existing DNS to install ours.
+var dnsListenAddr = netip.MustParseAddrPort("127.0.0.1:0")
+
 func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string, reconcileEvery time.Duration) error {
 	agent := newAgent(ctx, log, stateDir, reconcileEvery)
 
@@ -107,6 +117,22 @@ func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGrou
 	if err := server.Listen(); err != nil {
 		return err
 	}
+
+	// The resolver, before the sessions that fill it. Binding early means a device whose
+	// zones are still empty answers NXDOMAIN rather than nothing at all — a name that does
+	// not resolve yet is a better failure than a resolver that is not there, because the
+	// second one makes every query wait for a timeout.
+	//
+	// Its failure is not fatal. A port already taken, or a host that will not let this
+	// process bind, costs names and nothing else: the tunnel, the policy and the routes
+	// are all unaffected, and exiting here would take them down over a convenience.
+	go func() {
+		if err := agent.resolver.Listen(ctx, dnsListenAddr); err != nil && ctx.Err() == nil {
+			log.Error("no name resolution on this device",
+				"error", err, "addr", dnsListenAddr.String(),
+				"hint", "meshp status reports the resolver; addresses still work")
+		}
+	}()
 
 	agent.startAll()
 

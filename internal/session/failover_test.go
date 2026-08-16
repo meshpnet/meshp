@@ -168,3 +168,66 @@ func TestEachGroupCarriesItsOwnPolicy(t *testing.T) {
 		t.Error("one group's policy leaked into another's")
 	}
 }
+
+// The DNS suffix a device is told to use, which is what makes any of its names resolvable.
+//
+// DnsConfig has been on the wire since the beginning and nothing ever set it — the fourth
+// instance of that pattern in this repository. The agent read exactly one field from it,
+// prevent_leaks, and every other one was dead.
+func TestTheDNSSuffixReachesTheAgent(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+
+	got := f.stateFor(alice.membershipID, 0).GetDns()
+	if got == nil {
+		t.Fatal("no DNS configuration at all, so nothing this device holds is nameable")
+	}
+	if len(got.GetSearchDomains()) != 1 || got.GetSearchDomains()[0] != "hq.internal" {
+		t.Errorf("search_domains = %v, want the network's slug under .internal", got.GetSearchDomains())
+	}
+}
+
+// Split DNS, stated rather than implied. A resolver that captured every query would break
+// split-horizon corporate DNS on the first laptop that joined.
+func TestOnlyTheMeshSuffixIsRoutedToTheResolver(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+
+	routes := f.stateFor(alice.membershipID, 0).GetDns().GetRoutes()
+	if len(routes) != 1 || routes[0].GetDomain() != "hq.internal" {
+		t.Errorf("routes = %v, want just the mesh suffix", routes)
+	}
+}
+
+// Two networks, two suffixes — which is what makes a bare name ambiguous on a device in
+// both, and what ADR-0021's refusal rule is about.
+func TestEachNetworkHasItsOwnSuffix(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	other := f.otherNetwork("globex")
+	stranger := f.enrolDeviceIn(other, "stranger")
+
+	if got := f.stateFor(alice.membershipID, 0).GetDns().GetSearchDomains(); got[0] != "hq.internal" {
+		t.Errorf("hq got %v", got)
+	}
+	if got := f.stateFor(stranger.membershipID, 0).GetDns().GetSearchDomains(); got[0] != "globex.internal" {
+		t.Errorf("globex got %v", got)
+	}
+}
+
+// It rides on every delta, not only snapshots, for the reason the tunnel configuration
+// does: an agent that missed the snapshot carrying it would have peers it cannot name.
+func TestTheSuffixRidesOnEveryDelta(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	before := f.headVersion()
+	f.enrolDevice("bob")
+
+	got := f.stateFor(alice.membershipID, before)
+	if isSnapshot(got) {
+		t.Fatal("wanted a delta")
+	}
+	if len(got.GetDns().GetSearchDomains()) == 0 {
+		t.Error("a delta carried no DNS configuration")
+	}
+}

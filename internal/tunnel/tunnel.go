@@ -136,6 +136,11 @@ type Reconciler struct {
 	// is the whole verdict, which is what every device did before this existed.
 	prober Prober
 
+	// names is where this membership publishes what its network can resolve, shared with
+	// every other membership on the device so a bare name matching two of them can be seen
+	// as ambiguous from either side. Nil where nothing resolves.
+	names Names
+
 	// clock is overridable so the probe interval can be tested without waiting. Nil means
 	// the wall clock.
 	clock func() time.Time
@@ -287,6 +292,16 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 		r.fail(err)
 		return []string{"peers"}, err
 	}
+
+	// The names this network can answer for, before anything touches the kernel.
+	//
+	// Deliberately not after the interface converges. A name is desired state the agent
+	// already holds — the same peer list it is about to hand to WireGuard — so it does not
+	// depend on the kernel having accepted anything, and a host whose interface will not
+	// come up should still be able to say what `fileserver` means. Publishing after the
+	// convergence would have tied one to the other for no reason beyond where the line
+	// happened to sit.
+	r.publishNames(state)
 
 	observed, err := r.link.Observe(want.Name)
 	if err != nil {

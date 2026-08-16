@@ -24,7 +24,13 @@ SELECT
     -- session already has means there is no second query that could be skipped on
     -- the path where routes did not change — which is how a device still carrying
     -- a default route would be told to stop failing closed.
-    n.egress_fail_closed
+    n.egress_fail_closed,
+    -- The network's slug, which is what its DNS suffix is built from
+    -- (ADR-0021). Selected alongside the rest rather than looked up when a
+    -- delta needs it, for the reason egress_fail_closed is: DnsConfig rides on
+    -- every delta, so anything it needs must come from a row the session
+    -- already has.
+    n.slug            AS network_slug
 FROM device_network_memberships m
 JOIN devices d  ON d.id = m.device_id
 JOIN networks n ON n.id = m.network_id
