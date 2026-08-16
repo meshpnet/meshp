@@ -568,6 +568,31 @@ func (r *Reconciler) applyForwarding(ctx context.Context, iface string, advertis
 func (r *Reconciler) Teardown() error {
 	name := r.membership.InterfaceName
 
+	// The names first, because they are the only thing here that keeps answering after the
+	// rest is gone. A device that left a network and went on resolving its names would send
+	// somebody to `fileserver.acme.internal` and hand them an address it can no longer
+	// reach — a confident wrong answer, which is the failure this whole subsystem is
+	// arranged to avoid.
+	if r.names != nil {
+		r.names.Forget(name)
+	}
+
+	// Then the host's resolver, explicitly, before anything that can fail. Destroying the
+	// link below does make systemd-resolved drop the link's configuration, so this is
+	// belt and braces — but only for the path where the teardown completes. Observing the
+	// interface can fail and return early, and leaving a live link pointed at a resolver
+	// that has stopped answering for this network is worse than a stale rule: every query
+	// for those names would go somewhere that no longer knows them.
+	if r.systemResolver != nil {
+		if err := r.systemResolver.Revert(context.Background(), name); err != nil {
+			r.log.Warn("could not put this machine's resolver back",
+				"interface", name, "error", logx.SafeError(err))
+		}
+		r.mu.Lock()
+		r.lastResolver = systemResolverState{}
+		r.mu.Unlock()
+	}
+
 	// The policy and the forwarding first. A ruleset outliving the interface it names would
 	// go on matching nothing while an operator reads a table meshp installed and no longer
 	// maintains — and forwarding rules that outlived it would leave the host a gateway for a
