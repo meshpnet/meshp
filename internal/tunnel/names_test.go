@@ -1,7 +1,10 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"slices"
@@ -284,20 +287,53 @@ type recordingResolver struct {
 	mu         sync.Mutex
 	configured []string
 	reverted   []string
+	err        error
+}
+
+// fail makes every later ask return this error, or none when nil. A host whose resolver is
+// not running is an ordinary state, not a broken test.
+func (r *recordingResolver) fail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
 }
 
 func (r *recordingResolver) Configure(_ context.Context, iface string, _ netip.AddrPort, domains []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.configured = append(r.configured, iface+":"+strings.Join(domains, ","))
-	return nil
+	return r.err
 }
 
 func (r *recordingResolver) Revert(_ context.Context, iface string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reverted = append(r.reverted, iface)
-	return nil
+	return r.err
+}
+
+// recordingLogger returns a logger and a handle on what it was told, so a test can assert
+// that something was said once rather than on every pass.
+func recordingLogger() (*slog.Logger, *loggedLines) {
+	lines := &loggedLines{}
+	return slog.New(slog.NewTextHandler(lines, &slog.HandlerOptions{Level: slog.LevelDebug})), lines
+}
+
+type loggedLines struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *loggedLines) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *loggedLines) count(substr string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Count(l.buf.String(), substr)
 }
 
 func (r *recordingResolver) counts() (int, int) {
@@ -345,8 +381,18 @@ func TestTeardownStopsAnsweringAndPutsTheResolverBack(t *testing.T) {
 	}
 }
 
-// And an unchanged ask does not spawn a process on every reconcile tick.
-func TestTheHostResolverIsNotReconfiguredForNothing(t *testing.T) {
+// The host is asked again on every pass, because nothing here can tell when it stopped
+// listening.
+//
+// This replaces a test that asserted the opposite — that an unchanged ask was skipped — and
+// the reversal is the point. systemd-resolved keeps per-link configuration in memory only:
+// `systemctl restart systemd-resolved`, which happens on an ordinary systemd package
+// upgrade, drops it. A reconciler that remembers having asked never notices, so names stay
+// broken until the daemon restarts, while the interface, the routes and the filter all heal
+// on this same timer. There is no cheap, stable way to read back what a link is set to, so
+// re-asserting is the only mechanism available — and the operation is declarative, so it
+// costs two process spawns a minute and nothing else.
+func TestTheHostResolverIsAskedAgainOnEveryPass(t *testing.T) {
 	link := newFakeLink()
 	sys := &recordingResolver{}
 	addr := netip.MustParseAddrPort("127.0.0.1:5399")
@@ -361,7 +407,68 @@ func TestTheHostResolverIsNotReconfiguredForNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if configured, _ := sys.counts(); configured != 1 {
-		t.Errorf("configured the host resolver %d times over five identical passes", configured)
+	if configured, _ := sys.counts(); configured != 5 {
+		t.Errorf("asked the host resolver %d times over five passes, want 5 — "+
+			"a pass that skips cannot repair a resolver that forgot", configured)
+	}
+}
+
+// And it does not say so five times. The work repeats; the announcement must not, or the one
+// line that matters is buried under a line a minute saying nothing happened.
+func TestASteadyResolverIsAnnouncedOnce(t *testing.T) {
+	link := newFakeLink()
+	sys := &recordingResolver{}
+	log, lines := recordingLogger()
+
+	r := New(link, membership(), nil, nil, log).
+		WithNames(dns.NewZones()).
+		WithSystemResolver(sys, func() netip.AddrPort { return netip.MustParseAddrPort("127.0.0.1:5399") })
+
+	state := stateWithNames("acme.internal", labelled(bobKey, "fileserver", "100.90.0.2/32"))
+	for range 5 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := lines.count("names in this network now resolve"); got != 1 {
+		t.Errorf("announced %d times over five identical passes, want 1", got)
+	}
+}
+
+// A failure that persists is logged once too, and the recovery is announced.
+//
+// The condition is carried continuously by the unapplied component instead, which is the
+// channel built for a state rather than an event. Logging it every minute would be the same
+// mistake in the other direction.
+func TestAResolverThatFailsThenRecoversSaysSoOnce(t *testing.T) {
+	link := newFakeLink()
+	sys := &recordingResolver{}
+	sys.fail(errors.New("resolved is not running"))
+	log, lines := recordingLogger()
+
+	r := New(link, membership(), nil, nil, log).
+		WithNames(dns.NewZones()).
+		WithSystemResolver(sys, func() netip.AddrPort { return netip.MustParseAddrPort("127.0.0.1:5399") })
+
+	state := stateWithNames("acme.internal", labelled(bobKey, "fileserver", "100.90.0.2/32"))
+	for range 3 {
+		unapplied, err := r.Apply(context.Background(), state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(unapplied, "dns") {
+			t.Fatal("a resolver that could not be configured was not reported as unapplied")
+		}
+	}
+	if got := lines.count("was not pointed at meshp"); got != 1 {
+		t.Errorf("logged the same failure %d times, want 1", got)
+	}
+
+	sys.fail(nil)
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines.count("names in this network now resolve"); got != 1 {
+		t.Errorf("a resolver that came good announced itself %d times, want 1", got)
 	}
 }
