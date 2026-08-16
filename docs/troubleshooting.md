@@ -1,0 +1,155 @@
+# Troubleshooting
+
+## Something on this machine cannot reach the internet
+
+```bash
+sudo meshp doctor
+```
+
+This is the first thing to run and usually the last. It reads the kernel before it talks to
+the daemon, contacts nothing over the network, and works on a machine with no connectivity
+at all — which is the case it exists for.
+
+On a machine meshp is not interfering with, it says so plainly:
+
+```
+Nothing here is interfering with this machine's networking.
+
+  meshpd          running, 1 live session(s)
+  tunnel          0 interface(s) up
+  blocking        false
+  default route   false
+
+Traffic goes wherever it would have gone without meshp, except for
+the addresses inside your network.
+```
+
+On a machine that *is* refusing traffic, it says which of meshp's mechanisms is doing it,
+and prints the exact commands to undo each one.
+
+### Why a machine can end up refusing traffic
+
+A device carrying a default route installs firewall rules that block anything not going
+through the tunnel. That is the feature working: without it, the tunnel dropping silently
+puts your real address back on the wire (ADR-0011). Those rules are firewall state rather
+than process state, so **they survive `meshpd` being killed, crashing, or being upgraded**.
+That is deliberate — a lock that died with the process would not cover the cases it exists
+for — and it is also why a machine can be found in this state with nothing obviously running.
+
+What stays reachable while it is locked: the tunnel itself, the relay, the control plane
+that can call this off, the local network, DHCP and neighbour discovery. So the intended
+recovery is to tell the control plane to stop, not to reach for a console.
+
+### Recovering one machine
+
+`meshp doctor` prints the commands. They remove what meshp installed and nothing else — the
+lock lives in its own nftables table so it can be found and removed on its own, by `meshp
+down`, by the agent finding it on start-up, or by a person with a console and no idea what
+meshp is.
+
+### Recovering a fleet
+
+If the decision was wrong for the whole network rather than for one machine, turn it off
+centrally and let the agents pick it up:
+
+```bash
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"enforced":false}' \
+  "https://control.example.com/api/v1/networks/$NETWORK/egress-fail-closed"
+```
+
+Connected agents are nudged immediately rather than waiting for their next heartbeat. This
+reaches a locked machine because the control plane is one of the things the lock keeps
+reachable.
+
+## A device joined but has no tunnel
+
+```bash
+sudo meshp status
+```
+
+`interface meshp0 (not up)` on a non-Linux machine is correct and permanent for now: the
+data plane is Linux-only, and elsewhere a device enrols, holds an address, and reports
+honestly that it has no tunnel rather than pretending.
+
+On Linux, check that the kernel can make WireGuard interfaces at all:
+
+```bash
+sudo ip link add dev wgcheck type wireguard && sudo ip link del dev wgcheck
+```
+
+## Devices know about each other but cannot reach each other
+
+Almost always no relay. Nothing discovers direct paths yet, so every peer is relayed
+(ADR-0002) — a control plane with no `MESHP_RELAYS` gives agents peers with no way to reach
+them, and says so at startup:
+
+```
+no relays configured: peers will know about each other and be unable to reach each other
+```
+
+See [self-hosting](self-hosting.md#relays).
+
+## An agent will not connect to the control plane
+
+- **Plaintext to a non-loopback address is refused.** Agents will not send an enrolment
+  token or a session signature in the clear. Use TLS.
+- **`/readyz` is the right thing to check**, not `/healthz`: it reports the database and the
+  schema, so it answers "can this serve agents" rather than "is the process alive".
+
+## A route group is not being carried
+
+`meshp status` names the components that did not converge. Common causes:
+
+- **No advertiser**, or every advertiser withdrawn. A group with nobody to carry it is
+  withdrawn rather than sent with an empty candidate list, because the latter would have
+  every device install a route to nowhere and blackhole the prefix.
+- **Two networks claiming the same prefix.** A device in several networks (ADR-0004) where
+  two of them carry an identical prefix — `192.168.1.0/24` in both — carries neither, and
+  logs the collision naming both interfaces. There is no right answer to pick between them,
+  and quietly reaching the wrong customer is much worse than reaching neither
+  ([route groups](route-groups.md#two-networks-that-use-the-same-addresses)).
+- **The host cannot do it.** Claiming a default route needs policy routing; enforcing a
+  policy needs nftables. A host that cannot reports the group unhonoured rather than
+  half-claiming it.
+
+## Traffic is going through the wrong exit, or moving when it should not
+
+Read the group's failover policy back:
+
+```bash
+curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  "https://control.example.com/api/v1/networks/$NETWORK/route-groups"
+```
+
+- **Moving too eagerly**: `fail_threshold` is too low, or a probe target is unreliable.
+  Remember a single target measures that target's path rather than the advertiser's health —
+  use three and let the quorum absorb one having a bad afternoon.
+- **Not moving at all**: `enabled` may be false, which means the device does not move itself
+  in either direction. It still reports what it sees, so the control plane can tell you the
+  advertiser is dead even while the device stays on it.
+- **Moving and not coming back**: that is `recover_threshold` and `min_hold_seconds` doing
+  their job. Returning is expensive — every connection through the tunnel drops again — so
+  the policy is deliberately slower in that direction.
+
+## An API call is refused and I do not know why
+
+Refusals caused by what you sent carry the reason:
+
+```json
+{"error":"invalid","message":"an egress group carries the default route and takes no prefixes of its own"}
+```
+
+A bare `{"error":"internal"}` means something the server did not expect, and the detail is in
+its log rather than the response — deliberately, because an error whose text nobody has
+reviewed could name a table, a path or a peer.
+
+`503` with `admin_disabled` means `MESHP_ADMIN_TOKEN` is unset, so the administrative
+endpoints are switched off rather than running open.
+
+## Reporting a bug
+
+`sudo meshp doctor` output is the useful thing to include, plus `meshp status` and the
+control plane's log around the time it happened. Issues for every meshp repository live in
+[meshpnet/meshp](https://github.com/meshpnet/meshp/issues).

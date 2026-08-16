@@ -44,14 +44,25 @@ tunnel cannot quietly put a real address back on the wire — and those rules ar
 state, so they survive the agent being killed. `meshp doctor` explains that to whoever
 finds the machine, without needing a network to do it.
 
+Route groups carry traffic and fail over. A device is told an ordered list of advertisers
+and picks among them itself, so it can move off a broken one during a control-plane outage
+(ADR-0003) — and it decides by sending real traffic through the advertiser to targets an
+administrator named, rather than by trusting a WireGuard handshake, which a gateway with a
+dead uplink answers perfectly.
+
 What does not, and matters: direct paths and DNS are unimplemented, and the data plane is
 Linux-only — elsewhere a device enrols, holds an address, and reports honestly that it has
-no tunnel and cannot filter.
+no tunnel and cannot filter. There is no web dashboard and no user accounts: the
+administrative API is one shared token.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
 
 Do not deploy this. Read [`docs/adr/`](docs/adr/) instead.
+
+If you want to try it anyway, [`docs/`](docs/) has a quickstart, a self-hosting guide, a
+guide to route groups and a troubleshooting page. Every command in them has been run against
+a live control plane rather than written from the source.
 
 ## What it is
 
@@ -131,25 +142,33 @@ cp .env.example .env
 
 # Both are required. The control plane refuses to start without a secret key, and
 # leaves the administrative API switched off without an admin token.
-echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)" >> .env
-echo "MESHP_ADMIN_TOKEN=$(openssl rand -base64 32)" >> .env
+#
+# Kept in the shell too, because the commands below need it. Reading it back out of
+# .env does not work: the example declares both keys empty, so appending leaves two
+# lines with the same name — compose takes the last, a grep takes both.
+export MESHP_ADMIN_TOKEN="$(openssl rand -base64 32)"
+{
+  echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)"
+  echo "MESHP_ADMIN_TOKEN=$MESHP_ADMIN_TOKEN"
+} >> .env
 
 make build
 docker compose up -d
 ```
 
-Then enrol a device. There is no `network create` command yet, so the network and
-its address pools are seeded with SQL:
+Then enrol a device. An organisation still has to be seeded with SQL — there is no API for
+creating one yet — and everything after that is API calls:
 
 ```bash
-NETWORK=$(docker compose exec -T postgres psql -U meshp -d meshp -tAqc "
-  WITH o AS (INSERT INTO organizations (slug,name) VALUES ('acme','Acme') RETURNING id),
-       n AS (INSERT INTO networks (organization_id,slug,name) SELECT id,'hq','HQ' FROM o RETURNING id),
-       p AS (INSERT INTO address_pools (network_id,prefix,family,purpose)
-             SELECT id,'100.90.0.0/24'::cidr,4,'device' FROM n
-             UNION ALL SELECT id,'fd7c:6d65:7368::/120'::cidr,6,'device' FROM n
-             RETURNING network_id)
-  SELECT DISTINCT network_id FROM p")
+ORG=$(docker compose exec -T postgres psql -U meshp -d meshp -tAqc \
+  "INSERT INTO organizations (slug,name) VALUES ('acme','Acme') RETURNING id")
+
+NETWORK=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"organization_id\":\"$ORG\",\"slug\":\"hq\",\"name\":\"HQ\",
+       \"address_pools\":[\"100.90.0.0/24\",\"fd7c:6d65:7368::/120\"]}" \
+  http://localhost:8080/api/v1/networks | jq -r .network_id)
 
 TOKEN=$(curl -fsS -X POST \
   -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
@@ -249,7 +268,7 @@ cmd/meshpd          device agent (privileged, owns the WireGuard key)
 cmd/meshp-control   control plane
 cmd/meshp-relay     encrypted packet relay
 internal/       implementation, grouped by subsystem
-web/            React dashboard, embedded into meshp-control at build time
+docs/           guides, invariants, and the decision records
 docs/adr/       why things are the way they are — start here
 deploy/docker/  self-hosting
 ```
@@ -269,7 +288,7 @@ Related repositories:
 |---|---|---|
 | [`meshp`](https://github.com/meshpnet/meshp) | this one — agent, CLI, control plane, relay | public |
 | `meshp-infra` | deployment: how a control plane and its relays are stood up | private, empty |
-| `meshp-web` | website and documentation | private, empty |
+| `meshp-web` | the website at meshp.net | private |
 | `meshp-cloud` | the commercial layer, over this one's public API (ADR-0009) | private, empty |
 | `meshp-ios` | iOS client | not started |
 | `meshp-android` | Android client | not started |
@@ -288,7 +307,7 @@ one place to look rather than twelve.
 ## Contributing
 
 Read [`docs/adr/`](docs/adr/) first — if you disagree with a decision there,
-that disagreement is more valuable to us than a patch.
+that disagreement is more valuable to us than a patch. [`docs/`](docs/) has the guides.
 
 ```bash
 make ci        # everything the pull request will check, minus the Postgres jobs

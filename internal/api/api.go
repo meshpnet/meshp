@@ -230,6 +230,29 @@ var knownFailures = []struct {
 
 // respondError maps an error to a response, logging what it does not recognise.
 func (s *Server) respondError(w http.ResponseWriter, r *http.Request, err error) {
+	// A refusal caused by what the caller sent, whose text was written to be shown to them.
+	// Checked before the table because there is no sentinel to match: the review that lets
+	// this text out travels on the error itself. Without this branch an administrator who
+	// creates an egress group with prefixes, or a failover policy that would oscillate, gets
+	// "the request could not be completed" and has to go and read the server's log to find
+	// the explanation that was already written for them.
+	var invalid *store.InvalidError
+	if errors.As(err, &invalid) {
+		// Through logx.SafeError, unlike the table below. Those errors are sentinels whose
+		// text is fixed and written here; this one is built from what the caller sent — a
+		// slug, a kind, a probe target.
+		//
+		// Length is the part that bites today: slog does not bound a value, so without this
+		// a caller can put as much as they like into the log on every failed request, which
+		// is a cheap way to fill a disk or a log bill. Control characters are belt and
+		// braces — every construction site uses %q and slog's own handler quotes them
+		// again — and they are here so this stays true if either of those changes.
+		s.log.Info("request refused",
+			"path", logx.Safe(r.URL.Path), "code", "invalid", "error", logx.SafeError(err))
+		httpx.Error(w, s.log, http.StatusBadRequest, "invalid", invalid.Message)
+		return
+	}
+
 	for _, known := range knownFailures {
 		if errors.Is(err, known.err) {
 			s.log.Info("request refused",

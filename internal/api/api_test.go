@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,11 @@ type harness struct {
 	ctx    context.Context
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWithLog(t, nil) }
+
+// newHarnessWithLog builds a harness whose server logs where the caller can read it, for the
+// tests that are about what reaches the log rather than what reaches the client.
+func newHarnessWithLog(t *testing.T, log *slog.Logger) *harness {
 	t.Helper()
 	url := testdb.URL(t, "api")
 
@@ -102,6 +107,7 @@ func newHarness(t *testing.T) *harness {
 	srv := New(st, enroll.NewService(st, challenger, clk, nil), sessionServer, Config{
 		AdminToken: testAdminToken,
 		Clock:      clk,
+		Log:        log,
 		// Generous, so tests about something else are not throttled. The limiter has
 		// its own tests.
 		EnrolRatePerSecond: 1000,
