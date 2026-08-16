@@ -287,18 +287,8 @@ one place to look rather than twelve.
 
 ## Contributing
 
-Read [`docs/adr/`](docs/adr/) first — if you disagree with a decision there,
-that disagreement is more valuable to us than a patch.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and submit changes.
 
-```bash
-make ci        # everything the pull request will check, minus the Postgres jobs
-git commit -s  # sign-off is required and enforced
-```
-
-`main` is protected: changes arrive by pull request, the aggregate `ci` check has
-to pass, and force-pushes and deletions are refused. Branches must be current with
-`main` before merging, so expect to rebase rather than merge. Squash and rebase
-merges only — history stays linear.
 
 ## Security
 
