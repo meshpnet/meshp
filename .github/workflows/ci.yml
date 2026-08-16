@@ -493,7 +493,10 @@ jobs:
           sudo ip link del dev wgprobe
           echo "this runner can create WireGuard interfaces"
 
-      - run: sudo apt-get install -y --no-install-recommends wireguard-tools
+      # netcat-openbsd is what the mapping tests listen with: proving two customers on the
+      # same prefix are distinguishable needs a service on each of them, and ping cannot say
+      # which machine answered.
+      - run: sudo apt-get install -y --no-install-recommends wireguard-tools nftables netcat-openbsd
 
       # Creating interfaces and entering namespaces both need root, so these tests skip
       # rather than fail without it — which means an unprivileged run would report success
@@ -514,10 +517,31 @@ jobs:
           sudo modprobe dummy || true
           echo "systemd-resolved is answering here"
 
-      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, and the host resolver
+      # Docker is installed on this runner and sets the forward policy to DROP. A drop in one
+      # table wins over an accept in another, so meshp's forwarding chain cannot undo it and
+      # the packet tests below measure the runner image rather than meshp.
+      #
+      # Set here rather than worked around in the tests, because the tests are right: they
+      # prove the ruleset carries a packet when nothing else is refusing it. That another
+      # tool can silently defeat meshp's forwarding is a real defect in meshp and is filed
+      # separately -- it is not something this job should paper over quietly, which is why
+      # the previous policy is printed.
+      - name: nothing else on this runner is dropping forwarded packets
+        run: |
+          echo "before: $(sudo iptables -L FORWARD -n | head -1)"
+          sudo iptables -P FORWARD ACCEPT
+          echo "after:  $(sudo iptables -L FORWARD -n | head -1)"
+
+      # nftables joins them for the reason the others are here, and it arrives late: this
+      # package has held real-packet tests since the forwarding work — a packet crossing into
+      # a carried LAN, and stopping when the group is withdrawn — and none of them has ever
+      # run in CI. They need root, so the unprivileged test job skips them, and this job did
+      # not name the package. They gated nothing. Adding it also gates the mapping tests,
+      # which are the only place two customers on 192.168.1.0/24 are proven distinguishable.
+      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, the host resolver, and two customers on one prefix
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip
