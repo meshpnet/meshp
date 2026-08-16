@@ -62,6 +62,12 @@ type agent struct {
 	filterOnce sync.Once
 	filter     *nftables.Filter
 
+	// claims is what every membership on this device says it carries, shared so that two
+	// networks asking for the same customer prefix can each see the other. One device can
+	// hold memberships in many networks (ADR-0004), and two customers who both took their
+	// router's default both carry 192.168.1.0/24.
+	claims *tunnel.Claims
+
 	ctx context.Context
 }
 
@@ -104,7 +110,10 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
 		ControlURL:    m.ControlURL,
-	}, relay, a.filterOrNil(), log).WithChooser(chooser).WithEgress(routerOrNil())
+	}, relay, a.filterOrNil(), log).
+		WithChooser(chooser).
+		WithEgress(routerOrNil()).
+		WithClaims(a.claims)
 }
 
 // routerOrNil converts a possibly-absent router into the interface.
@@ -287,6 +296,7 @@ func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileE
 		startedAt:      time.Now().UTC(),
 		reconcileEvery: reconcileEvery,
 		running:        make(map[uuid.UUID]*sessionHandle),
+		claims:         tunnel.NewClaims(),
 		ctx:            ctx,
 	}
 }

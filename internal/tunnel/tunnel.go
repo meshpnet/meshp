@@ -106,6 +106,11 @@ type Reconciler struct {
 	// counters an operator is reading.
 	lastFilter *meshpv1.PacketFilter
 
+	// claims is shared with every other membership on this device, so a prefix two
+	// networks both carry can be seen as contested from either side. Nil where nothing
+	// shares it, which is every test that builds one reconciler.
+	claims *Claims
+
 	// chooser decides which candidate carries each group. Nil where local failover is not
 	// wanted, in which case the server's order is taken verbatim — which is what this did
 	// before there was a chooser.
@@ -180,6 +185,15 @@ func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.L
 	}
 }
 
+// WithClaims lets this reconciler see what other memberships on the device carry.
+//
+// Nil is safe and means "nothing else is running here", which is true of a device in one
+// network and of every test that builds a single reconciler.
+func (r *Reconciler) WithClaims(c *Claims) *Reconciler {
+	r.claims = c
+	return r
+}
+
 // WithEgress gives the reconciler the ability to claim a default route.
 //
 // Nil is meaningful and is the ordinary case: most devices are not full-tunnel, and a host
@@ -229,7 +243,7 @@ func (r *Reconciler) Status() Status {
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
 func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
-	want, unhonoured, err := Desired(r.membership, state, r.relay, r.chooser, r.log)
+	want, unhonoured, err := Desired(r.membership, state, r.relay, r.chooser, r.claims, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
 		// rather than approximated: applying part of a rejected configuration is how an
@@ -521,7 +535,7 @@ func (r *Reconciler) fail(err error) {
 // The second return names route groups this device was assigned and could not carry. It is
 // a translation result rather than part of the interface description, which is why it comes
 // back separately: wgplan plans kernel operations, and "what is missing" is not one.
-func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.Chooser, log *slog.Logger) (wgplan.Interface, []string, error) {
+func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.Chooser, claims *Claims, log *slog.Logger) (wgplan.Interface, []string, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -573,7 +587,7 @@ func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.
 	//
 	// Reported rather than fatal: one group this device cannot honour must not cost it the
 	// peers and prefixes it can.
-	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), chooser, log)
+	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), chooser, claims, log)
 	return iface, unhonoured, nil
 }
 
