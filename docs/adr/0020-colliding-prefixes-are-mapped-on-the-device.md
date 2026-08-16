@@ -1,6 +1,6 @@
-# ADR-0020: Colliding prefixes are mapped on the device that sees the collision
+# ADR-0020: Colliding prefixes are mapped, by the control plane that can see them
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-08-16
 
 ## Context
@@ -40,17 +40,26 @@ never will. The only thing that can see both memberships is the device holding t
 
 ## Decision
 
-**The device allocates the mapped range, and the device performs the translation, per
-membership, on its own interface.**
+**The control plane allocates the mapped range where it can see the collision. The
+device performs the translation, per membership, on its own interface.**
+
+Those are separate choices and only the first one was ever in doubt. Translation
+happens on the device in every design considered here; the question was who picks the
+numbers.
 
 Concretely, when a device holds two memberships whose route groups carry an identical
 prefix:
 
-1. **The device allocates a mapped range for each colliding membership**, from a
-   block reserved for this purpose inside its own address space. The allocation is
-   device-local state, like the collision registry in PR #70, and it is stable for the
-   life of the membership so a mapped address does not move under a running
-   connection.
+1. **The control plane allocates a mapped range for each colliding membership**, from
+   a block reserved for this purpose, and sends it as desired state. It can do this
+   because one control plane sees every membership of a device it knows —
+   `devices.identity_public_key` is unique and memberships hang off the device row —
+   so the collision is visible to it, and IPAM already exists to allocate from.
+
+   Where no single control plane can see both memberships, the collision stays
+   **refused**, exactly as PR #70 leaves it today. That is the case of a contractor
+   joined to several organisations' independently operated deployments, and it is
+   deliberately not solved here: see the alternatives.
 
 2. **Each membership already has its own interface.** `device_network_memberships`
    carries `interface_name`, and the reconciler is constructed per membership. This
@@ -101,11 +110,12 @@ not collide with anything either — including the mesh addresses of the network
 device is in, and whatever the local LAN uses. Choosing it badly recreates this
 problem one level up.
 
-**Two devices will disagree about which range means which customer**, because each
-allocates its own. That is correct and worth stating plainly: a mapped address is
-meaningful only on the device that minted it, and it must never appear in a control
-plane, an audit log or a support ticket as though it identified something globally.
-Anything that renders one for a person has to say which device it is relative to.
+**Mapped ranges are visible to the operator**, because the control plane chose them.
+They can be shown in the UI beside the route group, quoted in a support ticket, and
+correlated across the devices of one deployment. This is the main thing gained by
+moving allocation off the device, and it is worth the narrower coverage: a mapped
+address that means something different on every laptop is a diagnostic that costs more
+than it gives.
 
 **Diagnostics get harder.** `meshp status` and `meshp doctor` will show addresses that
 appear nowhere in the customer's own network, and a packet capture on the advertiser
@@ -126,22 +136,25 @@ the advertiser to source-NAT, so the customer's server sees the advertiser rathe
 the technician, which destroys the input ADR-0007's destination-side enforcement runs
 on and flattens every audit trail to one address.
 
-**Let the control plane allocate the mapped ranges.** Tidier: IPAM already exists,
-allocation is already a server-side concern, and the mapping could be sent as desired
-state. It works for a single MSP running one control plane over many customer
-networks — which is a real and important case.
+**Let the device allocate the mapped ranges.** Strictly more general: it covers the
+contractor joined to several organisations' independent deployments, which the chosen
+design refuses. The device is the only party that can see both memberships in that
+case, so nothing else can work there.
 
-Rejected because it does not work for the other one, and the other one is ADR-0004's
-headline. A technician joined to forty customers' own control planes has forty parties
-that cannot coordinate, do not know each other exists, and have no reason to. A
-mechanism that works only when one organisation owns every network is a different
-product. The device-side allocation covers both cases; the server-side allocation
-covers one.
+Not chosen, and this is the amendment worth recording. The general case is not the
+case this product is for. meshp's positioning is MSP-first: an MSP runs one control
+plane across its customers' networks, and a technician's memberships all live on it.
+Paying for the rarer case means every mapped address becomes device-local — meaningful
+only on the laptop that minted it, absent from the control plane, useless in a support
+ticket — and that cost lands on the common case to serve the uncommon one.
 
-If that constraint disappeared — if every network a device joined were always
-operated by the same control plane — server-side allocation would be the better
-answer, and the ranges would be visible to operators, which would remove the
-diagnostic cost above.
+So the general mechanism is deferred rather than rejected. It is additive: a device
+that finds a collision no control plane has resolved can allocate one itself later,
+under a flag, without changing anything decided here. Until then that case keeps the
+honest refusal from PR #70, which is a worse experience and not a wrong answer.
+
+If the positioning changed — if independent-deployment contractors became a served
+audience — this is the first thing to revisit.
 
 **Rewrite the source instead, and route by it.** `ip rule from <mapped source> lookup
 <table>` disambiguates without touching the destination. Rejected for the reason
