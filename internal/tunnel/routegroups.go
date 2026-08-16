@@ -27,7 +27,12 @@ import (
 // Returns the group names it could not honour, which the caller reports as unapplied rather
 // than swallowing: a device quietly not carrying a prefix it was assigned is indistinguishable
 // from one that is, right up until somebody tries to use it.
-func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, chooser *routeprobe.Chooser, log *slog.Logger) []string {
+func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, chooser *routeprobe.Chooser, claims *Claims, log *slog.Logger) []string {
+	// Declared before the early return, so a membership that has been taken out of every
+	// route group stops contesting prefixes it no longer carries. Leaving a stale claim
+	// behind would keep another membership refused for a network this one has left.
+	claims.Declare(iface.Name, declaredPrefixes(assignments))
+
 	if len(assignments) == 0 {
 		return nil
 	}
@@ -72,6 +77,20 @@ func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroup
 			unhonoured = append(unhonoured, name)
 			continue
 		}
+		// Another membership on this device carrying the same prefix. Refused rather than
+		// picked between: which one a packet reaches would depend on the order the routing
+		// table was written, so the technician who types `ssh 192.168.1.5` would sometimes
+		// reach one customer and sometimes the other (ADR-0019).
+		if contested := contestedPrefixes(claims, iface.Name, prefixes); len(contested) > 0 {
+			log.Error("not carrying a route group whose prefixes another network also claims",
+				"group", logx.Safe(name),
+				"prefixes", contested,
+				"also_claimed_by", claims.Contested(iface.Name, contested[0]),
+				"why", "which network a packet reached would depend on the order the routing table was written")
+			unhonoured = append(unhonoured, name)
+			continue
+		}
+
 		index, ok := byKey[wgplan.Key(best.GetPeerPublicKey())]
 		if !ok {
 			// Assigned a carrier that is not in this device's peer list. Nothing can be
@@ -111,4 +130,38 @@ func groupPrefixes(assignment *meshpv1.RouteGroupAssignment) (prefixes []netip.P
 		return nil, false, fmt.Errorf("it carries no prefixes")
 	}
 	return prefixes, false, nil
+}
+
+// declaredPrefixes is every prefix these assignments ask this membership to carry.
+//
+// Unparseable ones are skipped rather than refused: a prefix this build cannot read is
+// already reported as an unhonoured group above, and it cannot contest anything because
+// nothing can route it either.
+func declaredPrefixes(assignments []*meshpv1.RouteGroupAssignment) []netip.Prefix {
+	var out []netip.Prefix
+	for _, assignment := range assignments {
+		for _, raw := range assignment.GetPrefixes() {
+			if prefix, err := netip.ParsePrefix(raw); err == nil {
+				out = append(out, prefix.Masked())
+			}
+		}
+	}
+	return out
+}
+
+// contestedPrefixes is those of these prefixes that another membership also claims.
+func contestedPrefixes(claims *Claims, owner string, prefixes []netip.Prefix) []netip.Prefix {
+	var out []netip.Prefix
+	for _, prefix := range prefixes {
+		// A default route overlaps everything and is resolved by longest match, so it is
+		// never the contested one — an egress group alongside a customer LAN is well
+		// defined rather than ambiguous.
+		if prefix.Bits() == 0 {
+			continue
+		}
+		if len(claims.Contested(owner, prefix)) > 0 {
+			out = append(out, prefix)
+		}
+	}
+	return out
 }
