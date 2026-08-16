@@ -141,11 +141,23 @@ type Reconciler struct {
 	// as ambiguous from either side. Nil where nothing resolves.
 	names Names
 
+	// systemResolver points the host's own resolver at the agent for this network's names,
+	// or is nil on a host where meshp cannot configure one and put it back.
+	systemResolver SystemResolver
+
+	// resolverAddr is where the agent answers, read at call time because the port is the
+	// kernel's choice and is not known when this is built.
+	resolverAddr func() netip.AddrPort
+
 	// clock is overridable so the probe interval can be tested without waiting. Nil means
 	// the wall clock.
 	clock func() time.Time
 
 	mu sync.Mutex
+
+	// lastResolver is what was last asked of the host's resolver, so an unchanged ask does
+	// not spawn a process on every reconcile tick.
+	lastResolver systemResolverState
 
 	// lastProbe is when each group was last probed, so a group can ask to be quieter than
 	// the daemon's reconcile interval. Under mu because Apply is entered both from the
@@ -406,6 +418,15 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 	}
 
 	if failed := r.applyForwarding(ctx, want.Name, state.Advertised()); failed != nil {
+		unapplied = append(unapplied, failed...)
+	}
+
+	// The host's resolver last, and after the interface exists: systemd-resolved configures
+	// a link, so there has to be one. Reported as an unapplied component rather than as a
+	// failed apply — a device with peers, policy and routes but no names is worse off than
+	// one with all four, and much better off than one that reports the whole state as
+	// failed and stops converging on the rest.
+	if failed := r.applySystemResolver(ctx, want.Name, state); failed != nil {
 		unapplied = append(unapplied, failed...)
 	}
 

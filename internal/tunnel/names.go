@@ -1,10 +1,12 @@
 package tunnel
 
 import (
+	"context"
 	"net/netip"
 	"strings"
 
 	"github.com/meshpnet/meshp/internal/dns"
+	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
 )
 
@@ -98,4 +100,88 @@ func suffixFrom(state *peerset.Set) string {
 		}
 	}
 	return ""
+}
+
+// SystemResolver points the host's resolver at meshp for the names meshp owns.
+//
+// An interface, and nil on any host where meshp does not know how to configure the resolver
+// and put it back afterwards. Nil means names resolve when something asks the agent directly
+// and not otherwise — which is honest, and better than editing a file this agent cannot
+// restore (ADR-0021).
+type SystemResolver interface {
+	Configure(ctx context.Context, iface string, server netip.AddrPort, domains []string) error
+	Revert(ctx context.Context, iface string) error
+}
+
+// WithSystemResolver lets this reconciler make its network's names resolve for the whole
+// machine, rather than only for something querying the agent directly.
+//
+// The address is a function because the resolver's port is the kernel's choice and is not
+// known when the reconciler is built — 53 is almost always taken, so the agent asks for any
+// port and reports what it got.
+func (r *Reconciler) WithSystemResolver(s SystemResolver, addr func() netip.AddrPort) *Reconciler {
+	r.systemResolver = s
+	r.resolverAddr = addr
+	return r
+}
+
+// applySystemResolver tells the host where to send queries for this network's names.
+//
+// After the interface exists, unlike publishing the names themselves: systemd-resolved
+// configures a *link*, so there has to be one. That is also what makes this safe to scope —
+// each membership configures its own interface and its own domain, so two networks on one
+// device do not fight over a single global setting.
+//
+// Skipped when nothing changed, like the filter and the forwarding rules. Every call is a
+// process spawn and a bus round trip, and the reconciler runs on a timer.
+func (r *Reconciler) applySystemResolver(ctx context.Context, iface string, state *peerset.Set) []string {
+	if r.systemResolver == nil || r.resolverAddr == nil {
+		return nil
+	}
+	server := r.resolverAddr()
+
+	var domains []string
+	if suffix := suffixFrom(state); suffix != "" && server.IsValid() {
+		domains = []string{suffix}
+	}
+
+	want := systemResolverState{server: server, domains: strings.Join(domains, ",")}
+	r.mu.Lock()
+	unchanged := r.lastResolver == want
+	r.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+
+	var err error
+	if len(domains) == 0 {
+		// No names to route, so the link goes back as it was. Reverting rather than
+		// leaving a stale pointer: a link still aimed at this resolver after the device
+		// left the network would send it queries nothing here can answer.
+		err = r.systemResolver.Revert(ctx, iface)
+	} else {
+		err = r.systemResolver.Configure(ctx, iface, server, domains)
+	}
+	if err != nil {
+		r.log.Error("this machine's resolver was not pointed at meshp",
+			"interface", iface, "error", logx.SafeError(err),
+			"consequence", "names in this network will not resolve; addresses still work")
+		return []string{"dns"}
+	}
+
+	r.mu.Lock()
+	r.lastResolver = want
+	r.mu.Unlock()
+
+	if len(domains) > 0 {
+		r.log.Info("names in this network now resolve on this machine",
+			"interface", iface, "resolver", server.String(), "domains", strings.Join(domains, ","))
+	}
+	return nil
+}
+
+// systemResolverState is what was last asked of the host, so an unchanged ask is skipped.
+type systemResolverState struct {
+	server  netip.AddrPort
+	domains string
 }

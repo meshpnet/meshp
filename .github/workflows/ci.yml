@@ -488,10 +488,20 @@ jobs:
       # interface actually leaves by it cannot be tested without real interfaces, and a
       # probe that quietly used the routing table would report an advertiser healthy while
       # measuring the local network.
-      - name: interfaces, routes, teardown, a packet across the tunnel, and a bound probe
+      # resolved needs systemd-resolved to be the thing answering names here, which is true
+      # of this runner and is asserted rather than assumed: the step below fails on a skip,
+      # so a runner image that stopped shipping it would be a loud failure rather than a
+      # test quietly not running.
+      - name: this runner's names are answered by systemd-resolved
+        run: |
+          resolvectl status >/dev/null
+          sudo modprobe dummy || true
+          echo "systemd-resolved is answering here"
+
+      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, and the host resolver
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip
