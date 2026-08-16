@@ -125,6 +125,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/v1/networks/{networkID}/route-groups/{slug}", s.adminOnly(s.handleDeleteRouteGroup))
 	mux.Handle("POST /api/v1/networks/{networkID}/route-groups/{slug}/advertisers", s.adminOnly(s.handleAdvertise))
 	mux.Handle("DELETE /api/v1/networks/{networkID}/route-groups/{slug}/advertisers/{membershipID}", s.adminOnly(s.handleWithdraw))
+	mux.Handle("PUT /api/v1/networks/{networkID}/route-groups/{slug}/failover", s.adminOnly(s.handleSetRouteGroupFailover))
 }
 
 // rateLimited wraps an unauthenticated handler.

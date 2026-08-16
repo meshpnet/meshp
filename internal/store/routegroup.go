@@ -48,6 +48,12 @@ type RouteGroup struct {
 	// change, which is the ordinary case.
 	StableEgressIP *netip.Addr
 
+	// Failover is how patient devices should be about moving between this group's
+	// advertisers. Handed to agents rather than acted on here: the agent is the only thing
+	// that can see whether a path works, and it has to keep deciding during a control-plane
+	// outage (ADR-0003).
+	Failover FailoverPolicy
+
 	Prefixes []netip.Prefix
 }
 
@@ -63,6 +69,7 @@ type CreateRouteGroupRequest struct {
 	AutoFailback         bool
 	FailbackDelaySeconds int32
 	StableEgressIP       *netip.Addr
+	Failover             FailoverPolicy
 }
 
 // CreateRouteGroup stores a group and its prefixes.
@@ -78,9 +85,16 @@ func (s *Store) CreateRouteGroup(ctx context.Context, req CreateRouteGroupReques
 	if err := validateKind(req.Kind, req.Prefixes); err != nil {
 		return RouteGroup{}, err
 	}
+	if err := req.Failover.Validate(); err != nil {
+		return RouteGroup{}, err
+	}
+	failover, err := encodeFailover(req.Failover)
+	if err != nil {
+		return RouteGroup{}, err
+	}
 
 	var out RouteGroup
-	err := s.InTx(ctx, func(q *dbgen.Queries) error {
+	err = s.InTx(ctx, func(q *dbgen.Queries) error {
 		mode := req.SelectionMode
 		if mode == "" {
 			mode = "failover"
@@ -94,6 +108,7 @@ func (s *Store) CreateRouteGroup(ctx context.Context, req CreateRouteGroupReques
 			AutoFailback:         req.AutoFailback,
 			FailbackDelaySeconds: req.FailbackDelaySeconds,
 			StableEgressIp:       req.StableEgressIP,
+			LocalFailover:        failover,
 		})
 		if err != nil {
 			return fmt.Errorf("store: creating the route group: %w", err)
@@ -112,8 +127,8 @@ func (s *Store) CreateRouteGroup(ctx context.Context, req CreateRouteGroupReques
 			return err
 		}
 
-		out = routeGroupFrom(row, req.Prefixes)
-		return nil
+		out, err = routeGroupFrom(row, req.Prefixes)
+		return err
 	})
 	if err != nil {
 		return RouteGroup{}, err
@@ -253,7 +268,72 @@ func (s *Store) RouteGroupsFor(ctx context.Context, networkID uuid.UUID) ([]Rout
 
 	out := make([]RouteGroup, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, routeGroupFrom(dbgen.CreateRouteGroupRow(row), byGroup[row.ID]))
+		group, err := routeGroupFrom(dbgen.CreateRouteGroupRow(row), byGroup[row.ID])
+		if err != nil {
+			// Named, because the error itself says only that some JSON would not parse and
+			// an operator needs to know which group to go and look at.
+			return nil, fmt.Errorf("store: route group %s: %w", row.Slug, err)
+		}
+		out = append(out, group)
+	}
+	return out, nil
+}
+
+// SetRouteGroupFailover replaces a group's local failover policy.
+//
+// Whole rather than field by field: the numbers only mean anything together, and a partial
+// update is how an operator ends up with a combination nobody chose — a fail threshold of
+// one from today's edit beside a recover threshold left over from last month's.
+//
+// In one transaction with the version bump, like every other route mutation. How patient a
+// device is about moving is desired state for that device, so it has to be logged for agents
+// to collect rather than sitting in a column nothing sends.
+func (s *Store) SetRouteGroupFailover(ctx context.Context, networkID uuid.UUID, slug string, policy FailoverPolicy) (RouteGroup, error) {
+	if err := policy.Validate(); err != nil {
+		return RouteGroup{}, err
+	}
+	raw, err := encodeFailover(policy)
+	if err != nil {
+		return RouteGroup{}, err
+	}
+
+	var out RouteGroup
+	err = s.InTx(ctx, func(q *dbgen.Queries) error {
+		row, err := q.SetRouteGroupFailover(ctx, dbgen.SetRouteGroupFailoverParams{
+			NetworkID: networkID, Slug: slug, LocalFailover: raw,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoSuchRouteGroup
+		}
+		if err != nil {
+			return fmt.Errorf("store: recording the failover policy: %w", err)
+		}
+
+		prefixes, err := q.ListRouteGroupPrefixes(ctx, []uuid.UUID{row.ID})
+		if err != nil {
+			return fmt.Errorf("store: listing route group prefixes: %w", err)
+		}
+		carried := make([]netip.Prefix, 0, len(prefixes))
+		for _, p := range prefixes {
+			carried = append(carried, p.Prefix)
+		}
+
+		out, err = routeGroupFrom(dbgen.CreateRouteGroupRow(row), carried)
+		if err != nil {
+			return err
+		}
+
+		// Written unconditionally, unlike the fail-closed opt-out, which skips the bump when
+		// nothing changed. Comparing two policies for equality means deciding whether an
+		// absent threshold equals an explicit default, and getting that wrong drops a real
+		// edit silently. A route policy is changed by hand and rarely; a redundant delta
+		// costs one reconcile per device, and the reconciler is idempotent by construction
+		// (Invariant 18), so it costs nothing else.
+		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		return err
+	})
+	if err != nil {
+		return RouteGroup{}, err
 	}
 	return out, nil
 }
@@ -304,15 +384,20 @@ func (s *Store) CreateNetwork(ctx context.Context, orgID uuid.UUID, slug, name s
 	return out, nil
 }
 
-func routeGroupFrom(row dbgen.CreateRouteGroupRow, prefixes []netip.Prefix) RouteGroup {
+func routeGroupFrom(row dbgen.CreateRouteGroupRow, prefixes []netip.Prefix) (RouteGroup, error) {
+	failover, err := decodeFailover(row.LocalFailover)
+	if err != nil {
+		return RouteGroup{}, err
+	}
 	return RouteGroup{
 		ID: row.ID, NetworkID: row.NetworkID, Slug: row.Slug, Name: row.Name, Kind: row.Kind,
 		SelectionMode:        row.SelectionMode,
 		AutoFailback:         row.AutoFailback,
 		FailbackDelaySeconds: row.FailbackDelaySeconds,
 		StableEgressIP:       row.StableEgressIp,
+		Failover:             failover,
 		Prefixes:             prefixes,
-	}
+	}, nil
 }
 
 func validateSlug(what, slug string) error {
