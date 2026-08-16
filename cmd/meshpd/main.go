@@ -118,21 +118,23 @@ func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGrou
 		return err
 	}
 
-	// The resolver, before the sessions that fill it. Binding early means a device whose
-	// zones are still empty answers NXDOMAIN rather than nothing at all — a name that does
-	// not resolve yet is a better failure than a resolver that is not there, because the
-	// second one makes every query wait for a timeout.
+	// The resolver, bound before anything else runs and served afterwards.
+	//
+	// Synchronously on purpose. Binding in a goroutine meant everything below this line ran
+	// before the sockets existed, so `meshp status` could truthfully report no resolver on a
+	// device that was about to have one — which is what broke the end-to-end assertion
+	// guarding this feature, on a machine slower than the one it was written on.
 	//
 	// Its failure is not fatal. A port already taken, or a host that will not let this
-	// process bind, costs names and nothing else: the tunnel, the policy and the routes
-	// are all unaffected, and exiting here would take them down over a convenience.
-	go func() {
-		if err := agent.resolver.Listen(ctx, dnsListenAddr); err != nil && ctx.Err() == nil {
-			log.Error("no name resolution on this device",
-				"error", err, "addr", dnsListenAddr.String(),
-				"hint", "meshp status reports the resolver; addresses still work")
-		}
-	}()
+	// process bind, costs names and nothing else: the tunnel, the policy and the routes are
+	// all unaffected, and exiting here would take them down over a convenience.
+	if err := agent.resolver.Bind(dnsListenAddr); err != nil {
+		log.Error("no name resolution on this device",
+			"error", err, "addr", dnsListenAddr.String(),
+			"hint", "meshp status reports the resolver; addresses still work")
+	} else {
+		go agent.resolver.Serve(ctx)
+	}
 
 	agent.startAll()
 
