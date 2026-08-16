@@ -278,3 +278,90 @@ func resolve(t *testing.T, at netip.AddrPort, name string) string {
 	}
 	return addr.String()
 }
+
+// recordingResolver captures what was asked of the host's resolver.
+type recordingResolver struct {
+	mu         sync.Mutex
+	configured []string
+	reverted   []string
+}
+
+func (r *recordingResolver) Configure(_ context.Context, iface string, _ netip.AddrPort, domains []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.configured = append(r.configured, iface+":"+strings.Join(domains, ","))
+	return nil
+}
+
+func (r *recordingResolver) Revert(_ context.Context, iface string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reverted = append(r.reverted, iface)
+	return nil
+}
+
+func (r *recordingResolver) counts() (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.configured), len(r.reverted)
+}
+
+// Leaving a network takes its names with it.
+//
+// The one thing here that keeps answering after everything else is gone. A device that left
+// and went on resolving would send somebody to a name and hand them an address it can no
+// longer reach — a confident wrong answer, which is what this whole subsystem is arranged
+// to avoid.
+func TestTeardownStopsAnsweringAndPutsTheResolverBack(t *testing.T) {
+	link := newFakeLink()
+	zones := dns.NewZones()
+	sys := &recordingResolver{}
+	addr := netip.MustParseAddrPort("127.0.0.1:5399")
+
+	r := New(link, membership(), nil, nil, nil).
+		WithNames(zones).
+		WithSystemResolver(sys, func() netip.AddrPort { return addr })
+
+	state := stateWithNames("acme.internal", labelled(bobKey, "fileserver", "100.90.0.2/32"))
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if got := zones.Lookup("fileserver.acme.internal"); got.Code != dns.RCodeSuccess {
+		t.Fatalf("setup: the name does not resolve, code %v", got.Code)
+	}
+	if configured, _ := sys.counts(); configured != 1 {
+		t.Fatalf("setup: the host resolver was configured %d times", configured)
+	}
+
+	if err := r.Teardown(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := zones.Lookup("fileserver.acme.internal"); got.Code == dns.RCodeSuccess {
+		t.Error("a network this device has left still resolves")
+	}
+	if _, reverted := sys.counts(); reverted == 0 {
+		t.Error("the host's resolver was left pointed at a network this device has left")
+	}
+}
+
+// And an unchanged ask does not spawn a process on every reconcile tick.
+func TestTheHostResolverIsNotReconfiguredForNothing(t *testing.T) {
+	link := newFakeLink()
+	sys := &recordingResolver{}
+	addr := netip.MustParseAddrPort("127.0.0.1:5399")
+
+	r := New(link, membership(), nil, nil, nil).
+		WithNames(dns.NewZones()).
+		WithSystemResolver(sys, func() netip.AddrPort { return addr })
+
+	state := stateWithNames("acme.internal", labelled(bobKey, "fileserver", "100.90.0.2/32"))
+	for range 5 {
+		if _, err := r.Apply(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if configured, _ := sys.counts(); configured != 1 {
+		t.Errorf("configured the host resolver %d times over five identical passes", configured)
+	}
+}

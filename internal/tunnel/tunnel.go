@@ -141,11 +141,23 @@ type Reconciler struct {
 	// as ambiguous from either side. Nil where nothing resolves.
 	names Names
 
+	// systemResolver points the host's own resolver at the agent for this network's names,
+	// or is nil on a host where meshp cannot configure one and put it back.
+	systemResolver SystemResolver
+
+	// resolverAddr is where the agent answers, read at call time because the port is the
+	// kernel's choice and is not known when this is built.
+	resolverAddr func() netip.AddrPort
+
 	// clock is overridable so the probe interval can be tested without waiting. Nil means
 	// the wall clock.
 	clock func() time.Time
 
 	mu sync.Mutex
+
+	// lastResolver is what was last asked of the host's resolver, so an unchanged ask does
+	// not spawn a process on every reconcile tick.
+	lastResolver systemResolverState
 
 	// lastProbe is when each group was last probed, so a group can ask to be quieter than
 	// the daemon's reconcile interval. Under mu because Apply is entered both from the
@@ -409,6 +421,15 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 		unapplied = append(unapplied, failed...)
 	}
 
+	// The host's resolver last, and after the interface exists: systemd-resolved configures
+	// a link, so there has to be one. Reported as an unapplied component rather than as a
+	// failed apply — a device with peers, policy and routes but no names is worse off than
+	// one with all four, and much better off than one that reports the whole state as
+	// failed and stops converging on the rest.
+	if failed := r.applySystemResolver(ctx, want.Name, state); failed != nil {
+		unapplied = append(unapplied, failed...)
+	}
+
 	// Unapplied without an error: the interface converged, and what did not is named so the
 	// control plane can see this device is not where it says it is. An error here would
 	// report the whole apply as failed and hide the part that worked.
@@ -546,6 +567,31 @@ func (r *Reconciler) applyForwarding(ctx context.Context, iface string, advertis
 // Teardown removes everything this membership installed (Invariant 20).
 func (r *Reconciler) Teardown() error {
 	name := r.membership.InterfaceName
+
+	// The names first, because they are the only thing here that keeps answering after the
+	// rest is gone. A device that left a network and went on resolving its names would send
+	// somebody to `fileserver.acme.internal` and hand them an address it can no longer
+	// reach — a confident wrong answer, which is the failure this whole subsystem is
+	// arranged to avoid.
+	if r.names != nil {
+		r.names.Forget(name)
+	}
+
+	// Then the host's resolver, explicitly, before anything that can fail. Destroying the
+	// link below does make systemd-resolved drop the link's configuration, so this is
+	// belt and braces — but only for the path where the teardown completes. Observing the
+	// interface can fail and return early, and leaving a live link pointed at a resolver
+	// that has stopped answering for this network is worse than a stale rule: every query
+	// for those names would go somewhere that no longer knows them.
+	if r.systemResolver != nil {
+		if err := r.systemResolver.Revert(context.Background(), name); err != nil {
+			r.log.Warn("could not put this machine's resolver back",
+				"interface", name, "error", logx.SafeError(err))
+		}
+		r.mu.Lock()
+		r.lastResolver = systemResolverState{}
+		r.mu.Unlock()
+	}
 
 	// The policy and the forwarding first. A ruleset outliving the interface it names would
 	// go on matching nothing while an operator reads a table meshp installed and no longer
