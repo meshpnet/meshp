@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -216,21 +217,69 @@ func TestANameResolvesEndToEnd(t *testing.T) {
 }
 
 // resolve asks the resolver for an A record and returns the address, or "" when there is
-// none. Uses Go's own resolver, so this is a real client rather than a hand-rolled one.
+// none.
+//
+// A hand-built query rather than net.Resolver, and that is the fix for a test I first wrote
+// the other way. net.Resolver reads the host's /etc/resolv.conf for ndots, attempts and
+// timeout even in pure-Go mode, so "a real client" turned out to mean "a client configured
+// by whatever machine this runs on" — it passed here and timed out in CI. A test of this
+// package must not depend on the resolver configuration of the machine running it.
 func resolve(t *testing.T, at netip.AddrPort, name string) string {
 	t.Helper()
-	res := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "udp", at.String())
-		},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	addrs, err := res.LookupHost(ctx, name)
-	if err != nil || len(addrs) == 0 {
+	conn, err := net.Dial("udp", at.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Header: one question, recursion desired.
+	q := []byte{0x2a, 0x2a, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}
+	for _, label := range strings.Split(name, ".") {
+		q = append(q, byte(len(label)))
+		q = append(q, label...)
+	}
+	q = append(q, 0, 0, 1, 0, 1) // root, QTYPE=A, QCLASS=IN
+
+	if _, err := conn.Write(q); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("no reply from the resolver: %v", err)
+	}
+	reply := buf[:n]
+	if n < 12 {
+		t.Fatalf("reply is %d bytes", n)
+	}
+	if answers := int(reply[6])<<8 | int(reply[7]); answers == 0 {
 		return ""
 	}
-	return addrs[0]
+
+	// Walk past the echoed question, then past the answer's name, to the record data. Both
+	// names are uncompressed, because this resolver does not compress.
+	off := 12
+	for off < len(reply) && reply[off] != 0 {
+		off += int(reply[off]) + 1
+	}
+	off += 5 // root label, qtype, qclass
+	for off < len(reply) && reply[off] != 0 {
+		off += int(reply[off]) + 1
+	}
+	off += 1 + 2 + 2 + 4 // root label, type, class, ttl
+	if off+2 > len(reply) {
+		t.Fatal("reply is truncated before the record length")
+	}
+	length := int(reply[off])<<8 | int(reply[off+1])
+	off += 2
+	if off+length > len(reply) {
+		t.Fatal("reply is truncated before the address")
+	}
+	addr, ok := netip.AddrFromSlice(reply[off : off+length])
+	if !ok {
+		t.Fatalf("record holds %d bytes, which is not an address", length)
+	}
+	return addr.String()
 }
