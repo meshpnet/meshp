@@ -52,12 +52,16 @@ func (r *Reconciler) publishNames(state *peerset.Set) {
 
 	zone := dns.Zone{Suffix: suffix}
 	for _, peer := range state.Peers() {
-		label := hostLabel(peer.GetDeviceName())
-		if label == "" {
-			// A device whose name is not a usable label is left out rather than mangled
-			// into one that resolves. Until device names are validated at enrolment
-			// (ADR-0021), a deployment can hold anything at all here, and inventing a
-			// name for it would create an address nobody chose.
+		// The label the server assigned, not something derived here from the display
+		// name. The server is the only party that can make it unique within the network,
+		// which is what makes it resolvable at all — a name computed on the device would
+		// be one guess among however many devices are guessing.
+		label := peer.GetDnsLabel()
+		if !dns.ValidLabel(label) {
+			// Absent from a control plane too old to send one, or malformed from one that
+			// should not have. Left out rather than repaired: repairing would name a
+			// device something the server does not think it is called, so the name would
+			// resolve here and nowhere else.
 			continue
 		}
 		var addrs []netip.Addr
@@ -94,30 +98,4 @@ func suffixFrom(state *peerset.Set) string {
 		}
 	}
 	return ""
-}
-
-// hostLabel turns a device name into a DNS label, or reports that it cannot.
-//
-// Deliberately does not repair. Lowercasing is safe because DNS comparison is
-// case-insensitive, so it changes nothing about which name resolves; anything else —
-// stripping spaces, replacing punctuation — would invent a name the operator did not choose
-// and cannot predict. Two devices called `Dave's laptop` and `Daves laptop` would collide
-// into one, silently.
-//
-// Validation at enrolment is what will make this unnecessary, and until then leaving a
-// device unnamed is the honest failure.
-func hostLabel(deviceName string) string {
-	label := strings.ToLower(strings.TrimSpace(deviceName))
-	if label == "" || len(label) > 63 {
-		return ""
-	}
-	for i, c := range label {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '-' && i != 0 && i != len(label)-1:
-		default:
-			return ""
-		}
-	}
-	return label
 }

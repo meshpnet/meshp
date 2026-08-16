@@ -44,10 +44,17 @@ func (r *recordingNames) zone(owner string) dns.Zone {
 	return r.zones[owner]
 }
 
-// namedPeer is a peer with a chosen device name, since the name is the subject here.
+// namedPeer is a peer with a chosen display name.
 func namedPeer(key, deviceName string, ips ...string) *meshpv1.Peer {
 	p := peer(key, ips...)
 	p.DeviceName = deviceName
+	return p
+}
+
+// labelled is a peer the server has named, which is the ordinary case.
+func labelled(key, label string, ips ...string) *meshpv1.Peer {
+	p := namedPeer(key, label, ips...)
+	p.DnsLabel = label
 	return p
 }
 
@@ -73,8 +80,8 @@ func TestPeersBecomeResolvableNames(t *testing.T) {
 	r := New(link, membership(), nil, nil, nil).WithNames(names)
 
 	state := stateWithNames("acme.internal",
-		namedPeer(bobKey, "bob", "100.90.0.2/32", "fd7c::2/128"),
-		namedPeer(carolKey, "carol", "100.90.0.3/32"))
+		labelled(bobKey, "bob", "100.90.0.2/32", "fd7c::2/128"),
+		labelled(carolKey, "carol", "100.90.0.3/32"))
 
 	if _, err := r.Apply(context.Background(), state); err != nil {
 		t.Fatal(err)
@@ -106,7 +113,7 @@ func TestNoSearchDomainMeansNoNames(t *testing.T) {
 	names := newRecordingNames()
 	r := New(link, membership(), nil, nil, nil).WithNames(names)
 
-	state := stateWithNames("", namedPeer(bobKey, "bob", "100.90.0.2/32"))
+	state := stateWithNames("", labelled(bobKey, "bob", "100.90.0.2/32"))
 	if _, err := r.Apply(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
@@ -119,27 +126,34 @@ func TestNoSearchDomainMeansNoNames(t *testing.T) {
 	}
 }
 
-// A device name that is not a usable label is left out rather than repaired. Repairing it
-// would collide two different machines into one name, silently.
-func TestUnusableDeviceNamesAreLeftOut(t *testing.T) {
-	for name, deviceName := range map[string]string{
-		"a space":        "daves laptop x",
-		"an apostrophe":  "dave's-laptop",
-		"a leading dash": "-laptop",
-		"empty":          "",
-		"underscores":    "file_server",
-	} {
-		if got := hostLabel(deviceName); got != "" {
-			t.Errorf("%s: hostLabel(%q) = %q, want it left out", name, deviceName, got)
-		}
+// A peer whose label the server did not assign, or assigned badly, is left out rather than
+// repaired. Repairing would name a device something the server does not think it is called,
+// so the name would resolve here and nowhere else.
+func TestPeersWithoutAServerAssignedLabelAreLeftOut(t *testing.T) {
+	link := newFakeLink()
+	names := newRecordingNames()
+	r := New(link, membership(), nil, nil, nil).WithNames(names)
+
+	// One the server named, one whose label DNS cannot carry. A peer with no label at all
+	// is the same path — ValidLabel refuses the empty string — and is covered by
+	// TestValidLabelRejectsWhatDNSCannotCarry rather than duplicated here.
+	good := namedPeer(bobKey, "Dave's laptop (spare)", "100.90.0.2/32")
+	good.DnsLabel = "dave-s-laptop-spare"
+	malformed := namedPeer(carolKey, "printer", "100.90.0.3/32")
+	malformed.DnsLabel = "Not A Label"
+
+	state := stateWithNames("acme.internal", good, malformed)
+	if _, err := r.Apply(context.Background(), state); err != nil {
+		t.Fatal(err)
 	}
-	// Case is safe to change: DNS comparison is case-insensitive, so it alters nothing
-	// about which name resolves.
-	if got := hostLabel("FileServer"); got != "fileserver" {
-		t.Errorf("hostLabel(FileServer) = %q", got)
+
+	z := names.zone(membership().InterfaceName)
+	if len(z.Hosts) != 1 {
+		t.Fatalf("%d hosts published, want only the one with a usable label: %+v", len(z.Hosts), z.Hosts)
 	}
-	if got := hostLabel("branch-router-2"); got != "branch-router-2" {
-		t.Errorf("hostLabel(branch-router-2) = %q", got)
+	// And the display name is not what resolves — the server's label is.
+	if z.Hosts[0].Name != "dave-s-laptop-spare" {
+		t.Errorf("published %q, want the server's label", z.Hosts[0].Name)
 	}
 }
 
@@ -155,8 +169,8 @@ func TestANameResolvesEndToEnd(t *testing.T) {
 	r := New(link, membership(), nil, nil, nil).WithNames(zones)
 
 	state := stateWithNames("acme.internal",
-		namedPeer(bobKey, "fileserver", "100.90.0.2/32"),
-		namedPeer(carolKey, "printer", "100.90.0.3/32"))
+		labelled(bobKey, "fileserver", "100.90.0.2/32"),
+		labelled(carolKey, "printer", "100.90.0.3/32"))
 	if _, err := r.Apply(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +196,7 @@ func TestANameResolvesEndToEnd(t *testing.T) {
 
 	// And a device that left stops resolving, which is what makes a revoked peer's name
 	// go away rather than linger.
-	shrunk := stateWithNames("acme.internal", namedPeer(carolKey, "printer", "100.90.0.3/32"))
+	shrunk := stateWithNames("acme.internal", labelled(carolKey, "printer", "100.90.0.3/32"))
 	if _, err := r.Apply(context.Background(), shrunk); err != nil {
 		t.Fatal(err)
 	}

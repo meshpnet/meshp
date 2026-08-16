@@ -182,6 +182,16 @@ message Peer {
 
   string device_name = 7;   // display only
   repeated string tags = 8; // display and ACL context only; never authoritative
+
+  // The name this peer answers to inside this network, as
+  // <dns_label>.<network>.<suffix> (ADR-0021). Unique within the network, which
+  // device_name is not and was never required to be.
+  //
+  // Separate from device_name rather than replacing it, so a person keeps
+  // "Dave's laptop (spare)" in a device list while DNS gets something it can
+  // carry. Empty from a control plane too old to send one, and a device that
+  // receives none simply has no resolvable name.
+  string dns_label = 9;
 }
 
 message TunnelConfig {

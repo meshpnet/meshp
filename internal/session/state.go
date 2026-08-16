@@ -151,7 +151,7 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 	}
 	for _, p := range peers {
 		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
-			p.WireguardPublicKey, p.DeviceName, p.Tags, p.AddressV4, p.AddressV6))
+			p.WireguardPublicKey, p.DeviceName, p.DnsLabel, p.Tags, p.AddressV4, p.AddressV6))
 	}
 
 	// A snapshot describes the whole world, so it carries the filter unconditionally. An
@@ -260,7 +260,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// upsert is the newer fact, so it must not also be removed.
 		delete(removes, peer.WireguardPublicKey)
 		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
-			peer.WireguardPublicKey, peer.DeviceName, peer.Tags, peer.AddressV4, peer.AddressV6))
+			peer.WireguardPublicKey, peer.DeviceName, peer.DnsLabel, peer.Tags, peer.AddressV4, peer.AddressV6))
 	}
 
 	if routesChanged {
@@ -300,12 +300,13 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	return delta, nil
 }
 
-func (b *StateBuilder) peerFrom(publicKey, deviceName string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
+func (b *StateBuilder) peerFrom(publicKey, deviceName, dnsLabel string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
 	peer := &meshpv1.Peer{
 		PublicKey:                  publicKey,
 		AllowedIps:                 allowedIPs(v4, v6),
 		PersistentKeepaliveSeconds: keepaliveSeconds,
 		DeviceName:                 deviceName,
+		DnsLabel:                   dnsLabel,
 		Tags:                       tags,
 		// No endpoints. Nothing discovers where a peer is yet, so every peer is reached
 		// through a relay — which is what relay-first means (ADR-0002) rather than a
