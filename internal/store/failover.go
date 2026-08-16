@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/meshpnet/meshp/internal/pathprobe"
 )
 
 // FailoverPolicy is what a route group tells its devices about moving between advertisers.
@@ -37,7 +39,32 @@ type FailoverPolicy struct {
 	// MinHoldSeconds is the floor on time between switches, applied to coming back and never
 	// to leaving.
 	MinHoldSeconds uint32 `json:"min_hold_seconds,omitempty"`
+
+	// ProbeTargets are addresses the device dials through the advertiser to decide whether
+	// the path works. Empty means the device falls back to whether the advertiser's tunnel
+	// is up, which catches a gateway that is off and not one whose own uplink has failed.
+	//
+	// There is deliberately no default. Only an administrator knows what a working path
+	// looks like for their network — for a branch LAN it is a host on that LAN, and nothing
+	// else will do — and picking public addresses on their behalf would have every device
+	// they own dialling a third party nobody asked it to.
+	ProbeTargets []string `json:"probe_targets,omitempty"`
+
+	// ProbeQuorum is how many targets must answer. Zero means a majority.
+	ProbeQuorum uint32 `json:"probe_quorum,omitempty"`
+
+	// ProbeIntervalMS is the floor on how often a device probes, so a group can be quieter
+	// than the daemon's reconcile interval. Zero means probe on every pass.
+	ProbeIntervalMS uint32 `json:"probe_interval_ms,omitempty"`
 }
+
+// MaxProbeTargets caps how many addresses one group may name.
+//
+// Every device carrying the group dials all of them on every round, so this is a number an
+// administrator multiplies by their fleet without meaning to. Eight is more than enough for
+// diversity — three or four is the useful range — and small enough that a policy cannot turn
+// a fleet into a load generator.
+const MaxProbeTargets = 8
 
 // DefaultFailoverPolicy is what a group gets when nobody says otherwise.
 //
@@ -76,6 +103,32 @@ func (p FailoverPolicy) Validate() error {
 	const maxHold = 24 * 60 * 60
 	if p.MinHoldSeconds > maxHold {
 		return fmt.Errorf("store: min_hold_seconds must be at most %d", maxHold)
+	}
+
+	if len(p.ProbeTargets) > MaxProbeTargets {
+		return fmt.Errorf("store: at most %d probe targets; every device carrying this group "+
+			"dials all of them on every round", MaxProbeTargets)
+	}
+	// Parsed here rather than trusted, because the agent parses them too and a target it
+	// cannot read is one it silently drops — which lowers the number of targets a quorum is
+	// measured against without anything saying so.
+	if _, err := pathprobe.ParseTargets(p.ProbeTargets); err != nil {
+		return fmt.Errorf("store: a probe target must be a literal address and port, "+
+			"because resolving a name needs the DNS that fails with the gateway: %w", err)
+	}
+	// A quorum nothing can satisfy fails every advertiser, forever, and a device that has
+	// run out of candidates stays on the last one while reporting it dead. The agent clamps
+	// rather than obeying, so this is the only place a person can be told.
+	if p.ProbeQuorum > uint32(len(p.ProbeTargets)) {
+		return fmt.Errorf("store: probe_quorum %d cannot be met by %d targets",
+			p.ProbeQuorum, len(p.ProbeTargets))
+	}
+	// An interval below a second is a device dialling every target continuously; a day is
+	// long enough that the probe has stopped being one.
+	const minInterval, maxInterval = 1000, 24 * 60 * 60 * 1000
+	if p.ProbeIntervalMS != 0 && (p.ProbeIntervalMS < minInterval || p.ProbeIntervalMS > maxInterval) {
+		return fmt.Errorf("store: probe_interval_ms must be between %d and %d, or zero for every pass",
+			minInterval, maxInterval)
 	}
 	return nil
 }

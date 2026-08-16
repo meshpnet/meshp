@@ -21,6 +21,13 @@ type failoverPolicy struct {
 	FailThreshold    *uint32 `json:"fail_threshold"`
 	RecoverThreshold *uint32 `json:"recover_threshold"`
 	MinHoldSeconds   *uint32 `json:"min_hold_seconds"`
+
+	// ProbeTargets is a pointer to a slice so that an explicit empty list is told from an
+	// absent one. Both end up storing nothing, but only one of them is somebody deciding to
+	// stop probing, and the log line should be able to say which.
+	ProbeTargets    *[]string `json:"probe_targets"`
+	ProbeQuorum     *uint32   `json:"probe_quorum"`
+	ProbeIntervalMS *uint32   `json:"probe_interval_ms"`
 }
 
 func (p failoverPolicy) toStore() store.FailoverPolicy {
@@ -38,6 +45,15 @@ func (p failoverPolicy) toStore() store.FailoverPolicy {
 	if p.MinHoldSeconds != nil {
 		out.MinHoldSeconds = *p.MinHoldSeconds
 	}
+	if p.ProbeTargets != nil {
+		out.ProbeTargets = *p.ProbeTargets
+	}
+	if p.ProbeQuorum != nil {
+		out.ProbeQuorum = *p.ProbeQuorum
+	}
+	if p.ProbeIntervalMS != nil {
+		out.ProbeIntervalMS = *p.ProbeIntervalMS
+	}
 	return out
 }
 
@@ -48,11 +64,20 @@ func (p failoverPolicy) toStore() store.FailoverPolicy {
 // response that showed 3 where nothing is stored would make an unset field look like a
 // decision, and the next person to raise the agent's default would be surprised twice.
 func renderFailover(p store.FailoverPolicy) map[string]any {
+	targets := p.ProbeTargets
+	if targets == nil {
+		// An empty array rather than null, so a client can iterate what comes back without
+		// a special case for the group nobody has configured.
+		targets = []string{}
+	}
 	return map[string]any{
 		"enabled":           p.MayMove(),
 		"fail_threshold":    p.FailThreshold,
 		"recover_threshold": p.RecoverThreshold,
 		"min_hold_seconds":  p.MinHoldSeconds,
+		"probe_targets":     targets,
+		"probe_quorum":      p.ProbeQuorum,
+		"probe_interval_ms": p.ProbeIntervalMS,
 	}
 }
 
@@ -92,7 +117,8 @@ func (s *Server) handleSetRouteGroupFailover(w http.ResponseWriter, r *http.Requ
 		"enabled", group.Failover.MayMove(),
 		"fail_threshold", group.Failover.FailThreshold,
 		"recover_threshold", group.Failover.RecoverThreshold,
-		"min_hold_seconds", group.Failover.MinHoldSeconds)
+		"min_hold_seconds", group.Failover.MinHoldSeconds,
+		"probe_targets", len(group.Failover.ProbeTargets))
 
 	// How patient a device is about moving is desired state for every device that carries
 	// this group, so everyone needs telling.

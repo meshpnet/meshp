@@ -18,6 +18,7 @@ import (
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/nftables"
+	"github.com/meshpnet/meshp/internal/pathprobe"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/relaylink"
 	"github.com/meshpnet/meshp/internal/routeprobe"
@@ -113,7 +114,21 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 	}, relay, a.filterOrNil(), log).
 		WithChooser(chooser).
 		WithEgress(routerOrNil()).
+		WithProber(proberOrNil()).
 		WithClaims(a.claims)
+}
+
+// proberOrNil converts a possibly-absent dialer into the interface.
+//
+// Explicit for the reason routerOrNil is, and it has bitten this project already: a nil
+// *pathprobe.BoundDialer assigned straight to an interface is a non-nil interface holding a
+// nil pointer, so the reconciler's `r.prober == nil` check would pass and every probe would
+// panic on a platform that has no dialer.
+func proberOrNil() tunnel.Prober {
+	if d := pathprobe.NewDialer(); d != nil {
+		return d
+	}
+	return nil
 }
 
 // routerOrNil converts a possibly-absent router into the interface.

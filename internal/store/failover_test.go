@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"net/netip"
 	"testing"
 )
 
@@ -202,5 +203,101 @@ func TestABackwardsPolicyIsNotStored(t *testing.T) {
 	}
 	if len(groups) != 1 || groups[0].Failover.FailThreshold != 0 {
 		t.Errorf("the refused policy was stored anyway: %+v", groups[0].Failover)
+	}
+}
+
+// Probe targets have to be literal addresses. Resolving a name needs DNS, and DNS is one of
+// the things that stops working when a gateway fails — so a probe that had to resolve first
+// would blame the advertiser for a resolver's outage.
+func TestProbeTargetsMustBeAddresses(t *testing.T) {
+	for name, p := range map[string]FailoverPolicy{
+		"a hostname":         {ProbeTargets: []string{"one.one.one.one:443"}},
+		"no port":            {ProbeTargets: []string{"1.1.1.1"}},
+		"a named port":       {ProbeTargets: []string{"1.1.1.1:https"}},
+		"one bad among good": {ProbeTargets: []string{"1.1.1.1:443", "nonsense"}},
+	} {
+		if err := p.Validate(); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if err := (FailoverPolicy{ProbeTargets: []string{"1.1.1.1:443", "[2606:4700:4700::1111]:443"}}).Validate(); err != nil {
+		t.Errorf("literal addresses were refused: %v", err)
+	}
+}
+
+// A quorum nothing can satisfy fails every advertiser forever, and a device that has run out
+// of candidates stays on the last one while reporting it dead. The agent clamps rather than
+// obeying, so this is the only place a person can be told.
+func TestAnUnmeetableQuorumIsRefused(t *testing.T) {
+	if err := (FailoverPolicy{
+		ProbeTargets: []string{"1.1.1.1:443", "9.9.9.9:443"}, ProbeQuorum: 3,
+	}).Validate(); err == nil {
+		t.Error("a quorum of three across two targets was accepted")
+	}
+	if err := (FailoverPolicy{ProbeQuorum: 1}).Validate(); err == nil {
+		t.Error("a quorum with no targets at all was accepted")
+	}
+	if err := (FailoverPolicy{
+		ProbeTargets: []string{"1.1.1.1:443", "9.9.9.9:443"}, ProbeQuorum: 2,
+	}).Validate(); err != nil {
+		t.Errorf("a quorum equal to the target count was refused: %v", err)
+	}
+}
+
+// Every device carrying the group dials every target on every round, so this is a number an
+// administrator multiplies by their fleet without meaning to.
+func TestTheTargetListIsBounded(t *testing.T) {
+	var many []string
+	for i := range MaxProbeTargets + 1 {
+		many = append(many, netip.AddrPortFrom(
+			netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)}), 443).String())
+	}
+	if err := (FailoverPolicy{ProbeTargets: many}).Validate(); err == nil {
+		t.Errorf("%d targets were accepted", len(many))
+	}
+	if err := (FailoverPolicy{ProbeTargets: many[:MaxProbeTargets]}).Validate(); err != nil {
+		t.Errorf("%d targets were refused: %v", MaxProbeTargets, err)
+	}
+}
+
+// An interval below a second is a device dialling continuously; a day is long enough that
+// the probe has stopped being one. Zero stays meaningful: probe on every pass.
+func TestTheProbeIntervalIsBounded(t *testing.T) {
+	for name, p := range map[string]FailoverPolicy{
+		"a hundred milliseconds": {ProbeIntervalMS: 100},
+		"a week":                 {ProbeIntervalMS: 7 * 24 * 60 * 60 * 1000},
+	} {
+		if err := p.Validate(); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	for name, p := range map[string]FailoverPolicy{
+		"every pass":  {ProbeIntervalMS: 0},
+		"ten minutes": {ProbeIntervalMS: 600_000},
+	} {
+		if err := p.Validate(); err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+		}
+	}
+}
+
+// The targets survive the column, because that is where they live between an administrator
+// writing them and an agent being sent them.
+func TestProbeTargetsSurviveTheStore(t *testing.T) {
+	s, _ := seedNetwork(t)
+	ctx := testContext(t)
+	subnetGroup(t, s, "branch")
+
+	updated, err := s.SetRouteGroupFailover(ctx, s.netID, "branch", FailoverPolicy{
+		Enabled:      boolPtr(true),
+		ProbeTargets: []string{"192.168.10.1:22", "192.168.10.2:443"},
+		ProbeQuorum:  2, ProbeIntervalMS: 600_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Failover.ProbeTargets) != 2 || updated.Failover.ProbeQuorum != 2 ||
+		updated.Failover.ProbeIntervalMS != 600_000 {
+		t.Errorf("stored %+v", updated.Failover)
 	}
 }

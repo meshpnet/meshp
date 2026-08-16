@@ -140,6 +140,14 @@ type Result struct {
 
 	// RTT is informational and reported onward; nothing here branches on it.
 	RTT time.Duration
+
+	// Failed names the targets that did not answer, and is reported onward untouched.
+	//
+	// Nothing here branches on it either, and that is deliberate: the quorum has already
+	// turned these into a verdict, and a second rule that looked at *which* targets failed
+	// would be a policy the administrator did not write. It exists so an operator can tell
+	// one target being down from the exit being down, which the boolean cannot say.
+	Failed []string
 }
 
 // Decision is what a probe result led to.

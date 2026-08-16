@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -130,7 +131,22 @@ type Reconciler struct {
 	// in-flight masqueraded flows. An unchanged assignment is left alone.
 	lastAdvertised *meshpv1.AdvertisedRoutes
 
-	mu       sync.Mutex
+	// prober sends real traffic through the tunnel to decide whether a path works, or is
+	// nil where this platform cannot bind a socket to an interface. Nil means the handshake
+	// is the whole verdict, which is what every device did before this existed.
+	prober Prober
+
+	// clock is overridable so the probe interval can be tested without waiting. Nil means
+	// the wall clock.
+	clock func() time.Time
+
+	mu sync.Mutex
+
+	// lastProbe is when each group was last probed, so a group can ask to be quieter than
+	// the daemon's reconcile interval. Under mu because Apply is entered both from the
+	// session's applier and from the reconcile ticker.
+	lastProbe map[string]time.Time
+
 	kind     wglink.Kind
 	up       bool
 	lastErr  string
@@ -182,7 +198,16 @@ func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.L
 	return &Reconciler{
 		link: link, membership: m, relay: relay, filter: filter,
 		log: log, kind: wglink.KindUnknown,
+		lastProbe: make(map[string]time.Time),
 	}
+}
+
+// now is the reconciler's idea of the time.
+func (r *Reconciler) now() time.Time {
+	if r.clock == nil {
+		return time.Now()
+	}
+	return r.clock()
 }
 
 // WithClaims lets this reconciler see what other memberships on the device carry.
@@ -200,6 +225,17 @@ func (r *Reconciler) WithClaims(c *Claims) *Reconciler {
 // that cannot claim one reports the group unhonoured rather than half-claiming it.
 func (r *Reconciler) WithEgress(e Egress) *Reconciler {
 	r.egress = e
+	return r
+}
+
+// WithProber lets this reconciler send traffic through an advertiser to find out whether the
+// path works, rather than only asking whether the advertiser answered a handshake.
+//
+// Nil is meaningful and is the ordinary case on anything but Linux: a host that cannot bind a
+// socket to an interface has no way to guarantee the probe went through the tunnel, and a
+// measurement of the wrong path is worse than none.
+func (r *Reconciler) WithProber(p Prober) *Reconciler {
+	r.prober = p
 	return r
 }
 
@@ -277,10 +313,12 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 			"operations", len(plan.Ops))
 	}
 
-	// Every probe this pass costs is a read the reconciler already did. A device whose
-	// gateway has gone silent therefore fails over on the next tick without sending a
-	// single extra packet.
-	r.observeAdvertisers(observed, state.RouteGroups())
+	// The handshake half of this costs nothing — the reconciler has already read it from the
+	// kernel — so a device whose gateway has gone silent fails over on the next tick without
+	// sending a packet. The probe half does send traffic, and only for groups whose
+	// administrator named targets, only when the handshake says the advertiser is up, and no
+	// more often than that group's probe interval allows.
+	r.observeAdvertisers(ctx, want.Name, observed, state.RouteGroups())
 
 	// Which implementation ended up behind it, read rather than assumed. ADR-0015 requires
 	// this to be reportable: a silent userspace fallback makes a tenfold difference in
@@ -406,7 +444,7 @@ func (r *Reconciler) applyFilter(ctx context.Context, iface string, want *meshpv
 // Decisions are not acted on here. The chooser records them, and the next Apply configures
 // whatever it now points at — which keeps "decide" and "converge" in the order the rest of
 // this package uses, rather than reconfiguring an interface half way through reading it.
-func (r *Reconciler) observeAdvertisers(observed wgplan.Observed, assignments []*meshpv1.RouteGroupAssignment) {
+func (r *Reconciler) observeAdvertisers(ctx context.Context, iface string, observed wgplan.Observed, assignments []*meshpv1.RouteGroupAssignment) {
 	if r.chooser == nil {
 		return
 	}
@@ -422,6 +460,26 @@ func (r *Reconciler) observeAdvertisers(observed wgplan.Observed, assignments []
 		if !ok {
 			continue
 		}
+
+		// The handshake first, and the probe only if it passed. A stale handshake already
+		// says the advertiser is unreachable, so dialling through it would spend packets to
+		// reach the same answer — and the tunnel the probe would travel through is the thing
+		// the handshake just reported as gone.
+		if result.Reachable {
+			if probed, failed, ran := r.probeThroughAdvertiser(ctx, iface, assignment); ran {
+				result = probed
+				result.Failed = failed
+				if !result.Reachable {
+					// Said plainly, because this is the case the handshake gets wrong and the
+					// reason this exists: the advertiser answered, and nothing behind it did.
+					r.log.Warn("this advertiser is up but nothing gets through it",
+						"group", logx.Safe(assignment.GetName()),
+						"advertiser", logx.Safe(current.GetAdvertiserId()),
+						"failed_targets", len(failed))
+				}
+			}
+		}
+
 		if decision := r.chooser.Observe(assignment, result); decision.Switched != "" {
 			r.log.Info("moving to another advertiser",
 				"group", logx.Safe(assignment.GetName()),

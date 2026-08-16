@@ -212,3 +212,93 @@ func TestFailoverNeedsTheAdminToken(t *testing.T) {
 		t.Errorf("an unauthenticated caller got %d", status)
 	}
 }
+
+// probeSettings is a group's probe configuration as the API reports it.
+type probeSettings struct {
+	status          int
+	ProbeTargets    []string `json:"probe_targets"`
+	ProbeQuorum     uint32   `json:"probe_quorum"`
+	ProbeIntervalMS uint32   `json:"probe_interval_ms"`
+}
+
+func (h *harness) readProbe(slug string) probeSettings {
+	h.t.Helper()
+	req := mustRequest(h.t, http.MethodGet, h.server.URL+h.netPath("/route-groups"), "")
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var out struct {
+		RouteGroups []struct {
+			Slug          string        `json:"slug"`
+			LocalFailover probeSettings `json:"local_failover"`
+		} `json:"route_groups"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		h.t.Fatal(err)
+	}
+	for _, g := range out.RouteGroups {
+		if g.Slug == slug {
+			g.LocalFailover.status = resp.StatusCode
+			return g.LocalFailover
+		}
+	}
+	h.t.Fatalf("no group %q in the listing", slug)
+	return probeSettings{}
+}
+
+func TestSettingProbeTargets(t *testing.T) {
+	h := newHarness(t)
+	h.branchGroup(t, `{"slug":"branch","kind":"subnet","prefixes":["192.168.10.0/24"]}`)
+
+	if got := h.setFailover("branch", `{"enabled":true,
+		"probe_targets":["192.168.10.1:22","192.168.10.2:443"],
+		"probe_quorum":2,"probe_interval_ms":600000}`); got.status != http.StatusOK {
+		t.Fatalf("returned %d", got.status)
+	}
+
+	got := h.readProbe("branch")
+	if len(got.ProbeTargets) != 2 || got.ProbeTargets[0] != "192.168.10.1:22" {
+		t.Errorf("probe_targets = %v", got.ProbeTargets)
+	}
+	if got.ProbeQuorum != 2 || got.ProbeIntervalMS != 600000 {
+		t.Errorf("read back %+v", got)
+	}
+}
+
+// A group nobody has configured reports an empty array rather than null, so a client can
+// iterate what comes back without a special case for it.
+func TestAGroupWithNoProbeTargetsReportsAnEmptyList(t *testing.T) {
+	h := newHarness(t)
+	h.branchGroup(t, `{"slug":"branch","kind":"subnet","prefixes":["192.168.10.0/24"]}`)
+
+	if got := h.readProbe("branch"); got.ProbeTargets == nil {
+		t.Error("probe_targets came back as null rather than an empty list")
+	}
+}
+
+// The refusals: what an administrator writes here decides how much traffic a whole fleet
+// generates, and which failures it can see.
+func TestBadProbeSettingsAreRefused(t *testing.T) {
+	h := newHarness(t)
+	h.branchGroup(t, `{"slug":"branch","kind":"subnet","prefixes":["192.168.10.0/24"]}`)
+
+	for name, body := range map[string]string{
+		"a hostname, which needs the DNS that fails with the gateway": `{"enabled":true,"probe_targets":["one.one.one.one:443"]}`,
+		"a target with no port":                 `{"enabled":true,"probe_targets":["1.1.1.1"]}`,
+		"a quorum nothing can satisfy":          `{"enabled":true,"probe_targets":["1.1.1.1:443"],"probe_quorum":2}`,
+		"a quorum with no targets":              `{"enabled":true,"probe_quorum":1}`,
+		"more targets than a fleet should dial": `{"enabled":true,"probe_targets":["192.0.2.1:443","192.0.2.2:443","192.0.2.3:443","192.0.2.4:443","192.0.2.5:443","192.0.2.6:443","192.0.2.7:443","192.0.2.8:443","192.0.2.9:443"]}`,
+		"an interval below a second":            `{"enabled":true,"probe_interval_ms":100}`,
+	} {
+		if got := h.setFailover("branch", body); got.status == http.StatusOK {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if got := h.readProbe("branch"); len(got.ProbeTargets) != 0 {
+		t.Errorf("a refused policy was stored anyway: %+v", got)
+	}
+}

@@ -484,10 +484,14 @@ jobs:
       # while testing nothing. A skip is therefore treated as a failure here. -E keeps the
       # Go environment across sudo, and -run is not narrowed: the point is that all of them
       # run somewhere.
-      - name: interfaces, routes, teardown and a packet across the tunnel
+      # pathprobe is here for the same reason wglink is: whether a socket bound to an
+      # interface actually leaves by it cannot be tested without real interfaces, and a
+      # probe that quietly used the routing table would report an advertiser healthy while
+      # measuring the local network.
+      - name: interfaces, routes, teardown, a packet across the tunnel, and a bound probe
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip
@@ -497,7 +501,7 @@ jobs:
             echo "### Data plane"
             echo
             echo '```'
-            grep -E '^(--- |ok|FAIL)|a packet crossed' dataplane.log || true
+            grep -E '^(--- |ok|FAIL)|a packet crossed|bound to' dataplane.log || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if grep -q -- "--- SKIP" dataplane.log; then

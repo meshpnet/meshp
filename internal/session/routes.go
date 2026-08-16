@@ -172,10 +172,14 @@ func assignmentFor(group store.RouteGroup, candidates []routes.Candidate) *meshp
 			FailThreshold:    group.Failover.FailThreshold,
 			RecoverThreshold: group.Failover.RecoverThreshold,
 			MinHoldSeconds:   group.Failover.MinHoldSeconds,
-			// probe_targets, probe_quorum and probe_interval_ms are deliberately not sent
-			// yet. Nothing in the agent reads them: it derives reachability from handshake
-			// age, so targets on the wire would be a setting an administrator could write,
-			// see stored, and watch do nothing (ADR-0018). They arrive with the probe.
+
+			// What the device dials to find out whether the path through the advertiser
+			// works. Empty is the ordinary case and means the agent falls back to whether
+			// the advertiser's tunnel is up — which catches a gateway that is off, and not
+			// one whose own uplink has failed.
+			ProbeTargets:    group.Failover.ProbeTargets,
+			ProbeQuorum:     group.Failover.ProbeQuorum,
+			ProbeIntervalMs: group.Failover.ProbeIntervalMS,
 		},
 	}
 
