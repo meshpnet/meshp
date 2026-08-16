@@ -146,6 +146,7 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 		ToVersion:   uint64(membership.StateVersion),
 		UpsertPeers: make([]*meshpv1.Peer, 0, len(peers)),
 		Tunnel:      b.tunnelConfig(membership),
+		Dns:         b.dnsConfig(membership),
 		Relays:      b.relays,
 	}
 	for _, p := range peers {
@@ -238,6 +239,10 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// knows nothing about.
 		Relays: b.relays,
 		Tunnel: b.tunnelConfig(membership),
+		// Alongside the tunnel configuration and for the same reason: it is small, it
+		// changes rarely, and an agent that missed the snapshot carrying it would have
+		// peers it cannot name.
+		Dns: b.dnsConfig(membership),
 	}
 
 	for id := range upserts {
@@ -373,6 +378,34 @@ func failClosedPolicy(enforced bool) meshpv1.TunnelConfig_FailClosed {
 		return meshpv1.TunnelConfig_FAIL_CLOSED_UNSPECIFIED
 	}
 	return meshpv1.TunnelConfig_FAIL_CLOSED_DISABLED
+}
+
+// DefaultDNSSuffix is what a network's names end with when nobody has said otherwise.
+//
+// ICANN reserved `.internal` for private use, so unlike a squatted TLD it cannot be
+// delegated out from under a deployment, and unlike `.local` it does not belong to mDNS
+// (ADR-0021).
+const DefaultDNSSuffix = "internal"
+
+// dnsConfig tells a device what its names look like.
+//
+// Only the search domain today. `nameservers` is deliberately left empty: the resolver is
+// the agent's own, on a loopback port the kernel picks, so its address is something only
+// the device knows — the server naming one would be inventing an address it cannot see.
+//
+// No records either. Admin-entered records live in `dns_records` and reach the agent in a
+// `records` field this message does not have yet; adding it is a change to the proto and
+// belongs with the code that reads it, not ahead of it.
+func (b *StateBuilder) dnsConfig(membership dbgen.GetMembershipForSessionRow) *meshpv1.DnsConfig {
+	suffix := membership.NetworkSlug + "." + DefaultDNSSuffix
+	return &meshpv1.DnsConfig{
+		SearchDomains: []string{suffix},
+		// Split DNS, stated rather than implied: only this suffix goes to the mesh
+		// resolver and everything else keeps using whatever the machine already used. A
+		// resolver that captured every query would break split-horizon corporate DNS on
+		// the first laptop that joined.
+		Routes: []*meshpv1.DnsConfig_Route{{Domain: suffix}},
+	}
 }
 
 // allowedIPs renders a peer's addresses as single-host prefixes.

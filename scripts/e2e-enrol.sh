@@ -159,6 +159,20 @@ grep -q 'not enrolled' "$WORK/status-before.out" \
   || fail "an unenrolled daemon did not say so: $(cat "$WORK/status-before.out")"
 echo "  socket answers: $(head -1 "$WORK/status-before.out")"
 
+# The resolver is listening, on a daemon that has joined nothing.
+#
+# Asserted here because nothing else can. The daemon constructs a resolver and starts it in
+# a goroutine, and deleting that goroutine compiles cleanly and passes every unit test in
+# the tree — the package would be built, wired, and never listening, which is the exact
+# shape ADR-0018 is about and the shape WithChooser was missing in for two releases.
+#
+# Before enrolment on purpose: the resolver comes up ahead of any membership, so a device
+# with no names still answers, and a device whose names are missing later is a different
+# problem from one whose resolver never bound.
+grep -q '  resolver  127\.' "$WORK/status-before.out" \
+  || fail "the daemon is not answering names: $(grep resolver "$WORK/status-before.out" || echo 'no resolver line at all')"
+echo "  resolver: $(grep '  resolver' "$WORK/status-before.out" | sed 's/^ *//')"
+
 # And the stale lock is gone. Asserted on a daemon that is not enrolled, which is the case
 # that matters most: a device whose membership was revoked, or whose state was wiped, still
 # has to get its network back. Nothing in desired state can rescue it, because it has none.

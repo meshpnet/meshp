@@ -15,6 +15,7 @@ import (
 	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/agentstate"
 	"github.com/meshpnet/meshp/internal/controlurl"
+	"github.com/meshpnet/meshp/internal/dns"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/nftables"
@@ -69,6 +70,13 @@ type agent struct {
 	// router's default both carry 192.168.1.0/24.
 	claims *tunnel.Claims
 
+	// zones is every name this device can answer for, across every network it is in, and
+	// resolver is what answers from them. Shared for the reason claims is: a bare name
+	// that exists in two of this device's networks is ambiguous, and only something that
+	// sees both can say so (ADR-0021).
+	zones    *dns.Zones
+	resolver *dns.Server
+
 	ctx context.Context
 }
 
@@ -115,7 +123,8 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 		WithChooser(chooser).
 		WithEgress(routerOrNil()).
 		WithProber(proberOrNil()).
-		WithClaims(a.claims)
+		WithClaims(a.claims).
+		WithNames(a.zones)
 }
 
 // proberOrNil converts a possibly-absent dialer into the interface.
@@ -305,6 +314,7 @@ func relayStatus(l *relaylink.Link) *agentapi.RelayStatus {
 }
 
 func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileEvery time.Duration) *agent {
+	zones := dns.NewZones()
 	return &agent{
 		log:            log,
 		stateDir:       stateDir,
@@ -312,6 +322,8 @@ func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileE
 		reconcileEvery: reconcileEvery,
 		running:        make(map[uuid.UUID]*sessionHandle),
 		claims:         tunnel.NewClaims(),
+		zones:          zones,
+		resolver:       dns.NewServer(zones, log),
 		ctx:            ctx,
 	}
 }
@@ -529,6 +541,13 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 		Version:   version.Version(),
 		StartedAt: a.startedAt,
 		Enrolled:  a.state != nil,
+	}
+	// Before the enrolment check, because a resolver that is up on a device with no
+	// memberships is still a fact worth reporting — and its absence on a device that has
+	// them is the thing somebody will be looking for.
+	if addr := a.resolver.Addr(); addr.IsValid() {
+		status.Resolver = addr.String()
+		status.ResolverSuffixes = a.zones.Suffixes()
 	}
 	if a.state == nil {
 		return status, nil
