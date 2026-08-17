@@ -702,7 +702,13 @@ func (r *Reconciler) Teardown() error {
 		if err := r.filter.ApplyForward(context.Background(), name, nil); err != nil {
 			r.log.Warn("could not stop carrying prefixes", "interface", name, "error", err)
 		}
-		r.lastFilter, r.lastAdvertised = nil, nil
+		// And the translation, or a device that left one of two colliding networks goes on
+		// rewriting for it — sending traffic addressed to a range it no longer routes at a
+		// customer it can no longer reach (Invariant 20).
+		if err := r.filter.ApplyMap(context.Background(), name, nil); err != nil {
+			r.log.Warn("could not stop translating for this network", "interface", name, "error", err)
+		}
+		r.lastFilter, r.lastAdvertised, r.lastMapped = nil, nil, nil
 	}
 
 	observed, err := r.link.Observe(name)
