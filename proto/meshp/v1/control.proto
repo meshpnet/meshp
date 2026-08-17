@@ -317,6 +317,29 @@ message RouteGroupAssignment {
   // Set when the group's egress address survives failover via a floating IP.
   // Customers who allowlist an outbound IP depend on this.
   string stable_egress_ip = 7;
+
+  // Where prefixes above are reached, when the real ones collide with another
+  // network this device is in (ADR-0020). Two customers of one MSP both using
+  // 192.168.1.0/24 cannot both be in one routing table, so each is given a
+  // distinct range and the device rewrites the destination on the way into the
+  // tunnel.
+  //
+  // Present only for the prefixes that actually collide on this device, and
+  // only for the devices where they do. A prefix nothing contests is reached
+  // at the address the customer uses, because a mapped address a technician
+  // has to know about is a cost, and one paid for nothing is worse.
+  //
+  // Empty for everything else, including a device that collides on a host that
+  // cannot translate: the honest refusal from PR #70 stays, since carrying one
+  // of two identical prefixes quietly reaches the wrong customer.
+  message MappedPrefix {
+    // The customer's own prefix, exactly as it appears in prefixes above.
+    string prefix = 1;
+    // What this device reaches it by. Same size as prefix: the host part is
+    // carried across unchanged, so 100.71.5.5 is 192.168.1.5 at the far end.
+    string mapped = 2;
+  }
+  repeated MappedPrefix mapped_prefixes = 8;
 }
 
 message RouteCandidate {

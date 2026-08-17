@@ -3,9 +3,12 @@ package session
 import (
 	"context"
 
+	"net/netip"
+
 	"github.com/google/uuid"
 
 	"github.com/meshpnet/meshp/internal/health"
+	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/routes"
 	"github.com/meshpnet/meshp/internal/store"
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
@@ -51,6 +54,22 @@ func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetM
 		byGroup[row.RouteGroupID] = append(byGroup[row.RouteGroupID], row)
 	}
 
+	// Where colliding prefixes are reached, for this device (ADR-0020). Asked once for the
+	// whole device rather than per group, because the collision is a property of the device
+	// — it is two of *its* networks carrying the same prefix — and no single group can see
+	// it.
+	//
+	// A failure here is not a reason to send no routes. It means colliding prefixes keep the
+	// refusal they have today, which is the behaviour this replaces rather than a regression
+	// on it, while everything uncontested still reaches the device.
+	mapped, err := b.store.EnsureMappings(ctx, membership.DeviceID, store.DefaultMappedBlock)
+	if err != nil {
+		b.log.Error("a colliding prefix could not be given a range to be reached by",
+			"device_id", membership.DeviceID, "error", logx.SafeError(err),
+			"consequence", "route groups carrying it stay refused on devices that hold two of them")
+	}
+	mappedFor := mappedByNetwork(mapped, membership.NetworkID)
+
 	// Present, and possibly empty. A device that carried a prefix and no longer does has to
 	// be told so, and an empty list inside a present message says exactly that — while
 	// proto3 cannot tell an empty repeated field from an absent one, which is why this is a
@@ -71,7 +90,7 @@ func (b *StateBuilder) routeGroupsFor(ctx context.Context, membership dbgen.GetM
 			withdrawn = append(withdrawn, group.ID.String())
 			continue
 		}
-		assigned = append(assigned, assignmentFor(group, candidates))
+		assigned = append(assigned, assignmentFor(group, candidates, mappedFor))
 	}
 	return assigned, withdrawn, advertised, nil
 }
@@ -157,7 +176,7 @@ func healthOf(state *string) health.State {
 	return health.State(*state)
 }
 
-func assignmentFor(group store.RouteGroup, candidates []routes.Candidate) *meshpv1.RouteGroupAssignment {
+func assignmentFor(group store.RouteGroup, candidates []routes.Candidate, mapped map[netip.Prefix]netip.Prefix) *meshpv1.RouteGroupAssignment {
 	assignment := &meshpv1.RouteGroupAssignment{
 		RouteGroupId: group.ID.String(),
 		Name:         group.Name,
@@ -192,6 +211,19 @@ func assignmentFor(group store.RouteGroup, candidates []routes.Candidate) *meshp
 		for _, prefix := range group.Prefixes {
 			assignment.Prefixes = append(assignment.Prefixes, prefix.String())
 		}
+	}
+
+	// Only the prefixes this group actually carries, and only the ones that collide. A
+	// device is told where to reach a customer it cannot reach directly, and nothing else:
+	// a mapped address is a thing a person has to know about, so one handed out for a
+	// prefix nobody contests is a cost paid for nothing.
+	for _, prefix := range group.Prefixes {
+		to, ok := mapped[prefix.Masked()]
+		if !ok {
+			continue
+		}
+		assignment.MappedPrefixes = append(assignment.MappedPrefixes,
+			&meshpv1.RouteGroupAssignment_MappedPrefix{Prefix: prefix.String(), Mapped: to.String()})
 	}
 
 	if group.StableEgressIP != nil {
@@ -245,4 +277,23 @@ func healthTo(admin routes.AdminState, state health.State) meshpv1.RouteCandidat
 		// telling it so would be a claim the control plane cannot support.
 		return meshpv1.RouteCandidate_HEALTH_UNSPECIFIED
 	}
+}
+
+// mappedByNetwork narrows a device's mappings to the network this state is being built for.
+//
+// The device's mappings span every network it is in, and each membership's state must carry
+// only its own: telling a device that customer B's prefix is reached at 100.71.6.0/24 while
+// building customer A's routes would put a range on A's interface that belongs to B's.
+func mappedByNetwork(mappings []store.PrefixMapping, network uuid.UUID) map[netip.Prefix]netip.Prefix {
+	if len(mappings) == 0 {
+		return nil
+	}
+	out := make(map[netip.Prefix]netip.Prefix, len(mappings))
+	for _, m := range mappings {
+		if m.NetworkID != network {
+			continue
+		}
+		out[m.Prefix.Masked()] = m.Mapped
+	}
+	return out
 }

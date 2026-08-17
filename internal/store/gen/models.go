@@ -195,6 +195,16 @@ type Organization struct {
 	DeletedAt            *time.Time
 }
 
+// Distinct ranges for customer prefixes that collide on some device (ADR-0020). One row per (network, prefix) so a mapped address means the same thing across the deployment.
+type PrefixMapping struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	NetworkID      uuid.UUID
+	Prefix         netip.Prefix
+	MappedPrefix   netip.Prefix
+	CreatedAt      time.Time
+}
+
 type Relay struct {
 	ID         uuid.UUID
 	NetworkID  *uuid.UUID
