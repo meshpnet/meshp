@@ -12,6 +12,22 @@ updates:
       prefix: "ci"
     labels: ["dependencies", "ci"]
     open-pull-requests-limit: 5
+    groups:
+      # One pull request for CodeQL, which is one action used three times.
+      # Dependabot treats every `uses:` line as its own dependency, so a patch
+      # bump arrived as three identical pull requests -- init, autobuild and
+      # analyze -- that can only sensibly be merged together anyway.
+      codeql:
+        patterns: ["github/codeql-action*"]
+
+      # And one for everything else that is not a major. Majors are left on
+      # their own on purpose: they are the ones that need somebody to read the
+      # release notes, and burying one in a batch of patch bumps is how it gets
+      # waved through.
+      actions:
+        patterns: ["*"]
+        exclude-patterns: ["github/codeql-action*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: gomod
     directory: "/"
