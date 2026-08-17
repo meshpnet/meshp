@@ -3,9 +3,11 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -338,7 +340,7 @@ func TestDesiredRendersAddressesAsHostPrefixes(t *testing.T) {
 	m.AddressV4 = "100.90.0.1"
 	m.AddressV6 = "fd7c::1"
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +362,7 @@ func TestDesiredRefusesAnAddressThatIsNotOneHost(t *testing.T) {
 		m := membership()
 		m.AddressV4 = addr
 		m.AddressV6 = ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil); err == nil {
 			t.Errorf("%s was accepted", addr)
 		}
 	}
@@ -373,7 +375,7 @@ func TestDesiredAcceptsAnAddressThatAlreadyCarriesItsPrefix(t *testing.T) {
 	m.AddressV4 = "100.90.0.1/32"
 	m.AddressV6 = "fd7c::1/128"
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("Desired: %v", err)
 	}
@@ -386,14 +388,14 @@ func TestDesiredRefusesAMembershipWithNothingToWorkFrom(t *testing.T) {
 	t.Run("no private key", func(t *testing.T) {
 		m := membership()
 		m.PrivateKey = ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil); err == nil {
 			t.Error("a membership with no private key was accepted")
 		}
 	})
 	t.Run("no addresses", func(t *testing.T) {
 		m := membership()
 		m.AddressV4, m.AddressV6 = "", ""
-		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, nil); err == nil {
+		if _, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil); err == nil {
 			t.Error("a membership with no addresses was accepted")
 		}
 	})
@@ -408,7 +410,7 @@ func TestDesiredTakesTheMTUFromTheServer(t *testing.T) {
 		Tunnel: &meshpv1.TunnelConfig{Mtu: 1280},
 	})
 
-	iface, _, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +425,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 	state := peerset.New()
 	state.Apply(&meshpv1.StateDelta{FromVersion: 0, ToVersion: 1})
 
-	iface, _, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +440,7 @@ func TestDesiredFallsBackToADefaultMTU(t *testing.T) {
 // A peer with no endpoint is configured and unreachable, which is the honest state of every
 // peer today: nothing discovers endpoints yet.
 func TestAPeerWithNoEndpointIsStillConfigured(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +461,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 	p := peer(bobKey, "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820", "198.51.100.2:51820"}
 
-	iface, _, err := Desired(membership(), stateWith(1, p), nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, p), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +473,7 @@ func TestTheFirstEndpointIsUsed(t *testing.T) {
 // The key is carried through untouched. wgplan does not parse keys, so a translation that
 // mangled one would only fail at the kernel, on a real host, with a confusing message.
 func TestKeysArePassedThroughUnchanged(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, peer(bobKey, "100.90.0.2/32")), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +587,7 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 	m := membership()
 	m.ListenPort = 51999
 
-	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, nil)
+	iface, _, err := Desired(m, stateWith(1), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +598,7 @@ func TestARememberedPortIsAskedForAgain(t *testing.T) {
 
 // A membership that has never come up asks for any port.
 func TestAMembershipWithNoPortAsksForAny(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1), nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +657,7 @@ func relayedPeer(key, relayID string, ips ...string) *meshpv1.Peer {
 func TestARelayedPeerIsGivenItsLoopbackEndpoint(t *testing.T) {
 	relay := newFakeRelay("relay1")
 
-	iface, _, err := Desired(membership(), stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), relay, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), relay, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,7 +685,7 @@ func TestADirectEndpointWinsOverARelay(t *testing.T) {
 	p := relayedPeer(bobKey, "relay1", "100.90.0.2/32")
 	p.Endpoints = []string{"203.0.113.2:51820"}
 
-	iface, _, err := Desired(membership(), stateWith(1, p), relay, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, p), relay, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +708,7 @@ func TestAPeerOnAnUnreachableRelayDoesNotBreakTheOthers(t *testing.T) {
 	iface, _, err := Desired(membership(), stateWith(1,
 		relayedPeer(bobKey, "relay1", "100.90.0.2/32"),
 		relayedPeer(carolKey, "relay2", "100.90.0.3/32"),
-	), relay, nil, nil, nil)
+	), relay, nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("one unreachable relay refused the whole interface: %v", err)
 	}
@@ -729,7 +731,7 @@ func TestAPeerOnAnUnreachableRelayDoesNotBreakTheOthers(t *testing.T) {
 // With no relay at all — no data plane, or a deployment that has not configured one — a
 // relayed peer is unreachable rather than refused.
 func TestNoRelayLeavesRelayedPeersWithoutEndpoints(t *testing.T) {
-	iface, _, err := Desired(membership(), stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), stateWith(1, relayedPeer(bobKey, "relay1", "100.90.0.2/32")), nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,6 +829,8 @@ func TestTheListenPortIsHandedToTheRelayAfterConverging(t *testing.T) {
 
 // fakeFilter records what it was asked to enforce.
 type fakeFilter struct {
+	mu sync.Mutex
+
 	applied   []*meshpv1.PacketFilter
 	forwarded [][]*meshpv1.AdvertisedRoutes_Group
 	iface     string
@@ -853,6 +857,20 @@ type fakeFilter struct {
 	// way, asked successfully.
 	obstacles   []string
 	obstacleErr error
+
+	mappings []map[netip.Prefix]netip.Prefix
+	mappedOn string
+	mapErr   error
+}
+
+// mappings records every set of mapped ranges installed, in order, so a test can see both
+// what went in and that an empty one came after.
+func (f *fakeFilter) ApplyMap(_ context.Context, iface string, mapped map[netip.Prefix]netip.Prefix) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mappings = append(f.mappings, maps.Clone(mapped))
+	f.mappedOn = iface
+	return f.mapErr
 }
 
 func (f *fakeFilter) ForwardObstacles(context.Context) ([]string, error) {
@@ -1145,7 +1163,7 @@ func TestACarriedPrefixReachesTheCarrierAndTheRoutingTable(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", bobKey, "192.168.10.0/24")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1186,7 +1204,7 @@ func TestAnEgressGroupPutsTheDefaultInAllowedIPs(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("exit", bobKey, "0.0.0.0/0", "::/0")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatalf("an egress group made the whole description fail: %v", err)
 	}
@@ -1228,7 +1246,7 @@ func TestACarrierThatIsNotAPeerIsReported(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", carolKey, "192.168.10.0/24")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, unhonoured, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1247,7 +1265,7 @@ func TestAnUnparseablePrefixIsReportedRatherThanGuessed(t *testing.T) {
 		[]*meshpv1.RouteGroupAssignment{assignmentTo("branch-lan", bobKey, "not-a-prefix")},
 		peer(bobKey, "100.90.0.2/32"))
 
-	_, unhonoured, err := Desired(membership(), state, nil, nil, nil, nil)
+	_, unhonoured, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1265,7 +1283,7 @@ func TestAGroupWithNoCandidatesIsReported(t *testing.T) {
 	state := stateWithRoutes(1, []*meshpv1.RouteGroupAssignment{assignment},
 		peer(bobKey, "100.90.0.2/32"))
 
-	_, unhonoured, err := Desired(membership(), state, nil, nil, nil, nil)
+	_, unhonoured, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1287,7 +1305,7 @@ func TestTheFirstCandidateCarriesIt(t *testing.T) {
 	state := stateWithRoutes(1, []*meshpv1.RouteGroupAssignment{assignment},
 		peer(bobKey, "100.90.0.2/32"), peer(carolKey, "100.90.0.3/32"))
 
-	iface, _, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1608,7 +1626,7 @@ func TestADeviceFailsOverFromASilentAdvertiser(t *testing.T) {
 	if _, err := r.Apply(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
-	iface, _, err := Desired(membership(), state, nil, nil, nil, nil)
+	iface, _, err := Desired(membership(), state, nil, nil, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1636,7 +1654,7 @@ func TestADeviceFailsOverFromASilentAdvertiser(t *testing.T) {
 // currentInterface recomputes what the reconciler would configure now.
 func currentInterface(t *testing.T, r *Reconciler, state *peerset.Set) wgplan.Interface {
 	t.Helper()
-	iface, _, err := Desired(r.membership, state, r.relay, r.chooser, r.claims, r.log)
+	iface, _, err := Desired(r.membership, state, r.relay, r.chooser, r.claims, false, r.log)
 	if err != nil {
 		t.Fatal(err)
 	}
