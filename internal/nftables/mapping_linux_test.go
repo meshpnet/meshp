@@ -191,23 +191,23 @@ func namespace(t *testing.T, name, outer, inner, custAddr, ourAddr string) strin
 	return name
 }
 
-// applyInto installs one interface's rules under a table of its own.
+// applyInto installs one interface's rules.
 //
-// RenderMap rebuilds MapTableName, so two interfaces rendered into the same table would have
-// the second erase the first. That is correct for production, where one call carries every
-// mapping the device holds, and wrong for this test, which renders per interface to keep each
-// case readable. Rewriting the table name is the smaller distortion.
+// This used to rewrite the table name, because RenderMap put every interface in one table and
+// the second would erase the first. That workaround was the bug: it made the test pass while
+// production had exactly the flaw the comment described, and an end-to-end run found a device
+// reaching one of its two customers. RenderMap now names the table after the interface, so
+// there is nothing left to work around here.
 func applyInto(t *testing.T, iface, script string) {
 	t.Helper()
-	table := MapTableName + "_" + iface
-	renamed := strings.ReplaceAll(script, MapTableName, table)
+	table := MapTable(iface)
 	t.Cleanup(func() {
 		_ = exec.Command("nft", "delete", "table", "inet", table).Run()
 	})
 	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(renamed)
+	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("nft rejected the ruleset: %v\n%s\n%s", err, out, renamed)
+		t.Fatalf("nft rejected the ruleset: %v\n%s\n%s", err, out, script)
 	}
 }
 

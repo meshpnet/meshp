@@ -7,12 +7,26 @@ import (
 	"strings"
 )
 
-// MapTableName is the table that makes two customers on the same prefix distinguishable.
+// MapTableName is the prefix of the table that makes two customers on the same prefix
+// distinguishable.
 //
 // Its own table, like the lock and the forwarding rules, and rebuilt on its own trigger: the
 // mappings change when a device's memberships change, which is a different event from a
 // policy update or a route group moving between advertisers.
+//
+// One table per interface rather than one for the device, which is the whole reason this is a
+// prefix and not the name. Every membership reconciles on its own timer and rebuilds its own
+// table whole, so a single shared table would have the second membership to reconcile erase
+// the first's rules — and on a device holding two colliding memberships, which is the only
+// device that has any of these rules at all, that means exactly one of the two customers is
+// ever reachable. An end-to-end run found it doing precisely that.
 const MapTableName = "meshp_map"
+
+// MapTable is the table one interface's mappings live in.
+//
+// The interface name is already validated by the caller against a pattern nft will accept,
+// and interface names are unique on a host, so this cannot collide with another membership's.
+func MapTable(iface string) string { return MapTableName + "_" + iface }
 
 // Mapping is one colliding prefix and the range this device reaches it by.
 //
@@ -62,11 +76,13 @@ func RenderMap(iface string, mappings []Mapping) (string, error) {
 		return "", fmt.Errorf("nftables: %q is not a usable interface name", iface)
 	}
 
+	table := MapTable(iface)
+
 	var b strings.Builder
 	// add-then-delete so removal is idempotent, as everywhere else here: deleting a table
 	// that is not there is an error, and adding one that is already there is not.
-	fmt.Fprintf(&b, "add table inet %s\n", MapTableName)
-	fmt.Fprintf(&b, "delete table inet %s\n", MapTableName)
+	fmt.Fprintf(&b, "add table inet %s\n", table)
+	fmt.Fprintf(&b, "delete table inet %s\n", table)
 	if len(mappings) == 0 {
 		return b.String(), nil
 	}
@@ -76,23 +92,23 @@ func RenderMap(iface string, mappings []Mapping) (string, error) {
 		return "", err
 	}
 
-	fmt.Fprintf(&b, "add table inet %s\n", MapTableName)
+	fmt.Fprintf(&b, "add table inet %s\n", table)
 	// Priority mangle on the way out, and -300 on the way in, so both run before anything
 	// that inspects addresses. The filter chain's rules are written in terms of the real
 	// mesh addresses on the wire, and the forwarding chain's in terms of carried prefixes;
 	// translating outside them keeps every other table reading the address it expects.
 	fmt.Fprintf(&b, "add chain inet %s outbound { type filter hook postrouting priority mangle; policy accept; }\n",
-		MapTableName)
+		table)
 	fmt.Fprintf(&b, "add chain inet %s inbound { type filter hook prerouting priority -300; policy accept; }\n",
-		MapTableName)
+		table)
 
 	for _, m := range ordered {
 		host := hostWildcard(m.Mapped)
 		fmt.Fprintf(&b, "add rule inet %s outbound oifname \"%s\" %s daddr %s %s daddr set %s daddr & %s | %s\n",
-			MapTableName, iface, family(m.Mapped), m.Mapped,
+			table, iface, family(m.Mapped), m.Mapped,
 			family(m.Mapped), family(m.Mapped), host, m.Real.Masked().Addr())
 		fmt.Fprintf(&b, "add rule inet %s inbound iifname \"%s\" %s saddr %s %s saddr set %s saddr & %s | %s\n",
-			MapTableName, iface, family(m.Real), m.Real,
+			table, iface, family(m.Real), m.Real,
 			family(m.Real), family(m.Real), host, m.Mapped.Masked().Addr())
 	}
 	return b.String(), nil

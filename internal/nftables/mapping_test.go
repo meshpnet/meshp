@@ -172,3 +172,42 @@ func TestAnUnusableInterfaceNameIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// Two memberships do not erase each other, which is the defect an end-to-end run found.
+//
+// Every membership reconciles on its own timer and renders its own ruleset whole. When they
+// shared one table the second to reconcile deleted the first's rules -- so a technician in
+// two customers reached exactly one of them, and which one depended on timing. On the only
+// devices that have these rules at all, that is the feature failing completely.
+//
+// The unit tests before this one all rendered a single interface, so none of them could see
+// it. This is the smallest test that can.
+func TestTwoInterfacesDoNotShareATable(t *testing.T) {
+	first := renderMap(t, "meshp0", mapping("100.71.5.0/24", "192.168.1.0/24"))
+	second := renderMap(t, "meshp1", mapping("100.71.6.0/24", "192.168.1.0/24"))
+
+	if MapTable("meshp0") == MapTable("meshp1") {
+		t.Fatal("both interfaces render into one table, so whichever reconciles last wins")
+	}
+	// Neither script may touch the other's table, by any statement: an `add` would be
+	// harmless but a `delete` is the whole bug.
+	if strings.Contains(first, MapTable("meshp1")) {
+		t.Errorf("meshp0's ruleset names meshp1's table:\n%s", first)
+	}
+	if strings.Contains(second, MapTable("meshp0")) {
+		t.Errorf("meshp1's ruleset names meshp0's table:\n%s", second)
+	}
+}
+
+// And removal is still scoped to the interface, so one membership leaving does not take the
+// other's translation with it.
+func TestRemovingOneInterfaceLeavesTheOther(t *testing.T) {
+	empty := renderMap(t, "meshp0")
+
+	if !strings.Contains(empty, "delete table inet "+MapTable("meshp0")) {
+		t.Errorf("removing meshp0's mappings does not delete its table:\n%s", empty)
+	}
+	if strings.Contains(empty, MapTable("meshp1")) {
+		t.Errorf("removing meshp0's mappings touches meshp1's table:\n%s", empty)
+	}
+}
