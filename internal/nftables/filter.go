@@ -81,3 +81,21 @@ func (f *Filter) ForwardObstacles(ctx context.Context) ([]string, error) {
 	}
 	return out, nil
 }
+
+// ApplyMap makes this host reach colliding prefixes at the ranges allocated for them.
+//
+// Rebuilt whole on every call, like the other tables here: the ruleset is one nft transaction
+// and replacing it is atomic, so there is no moment where half a device's mappings are in
+// force. An empty map removes the table, which is what a device that stopped colliding needs
+// (Invariant 20).
+func (f *Filter) ApplyMap(ctx context.Context, iface string, mapped map[netip.Prefix]netip.Prefix) error {
+	mappings := make([]Mapping, 0, len(mapped))
+	for real, to := range mapped {
+		mappings = append(mappings, Mapping{Mapped: to, Real: real})
+	}
+	script, err := RenderMap(iface, mappings)
+	if err != nil {
+		return err
+	}
+	return Apply(ctx, script)
+}

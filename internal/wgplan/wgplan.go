@@ -106,6 +106,20 @@ type Interface struct {
 	Addresses []netip.Prefix
 
 	Peers []Peer
+
+	// Mapped is where a colliding prefix is reached, keyed by the prefix the customer
+	// actually uses (ADR-0020).
+	//
+	// It exists because these two cannot be the same list. WireGuard's allowed IPs must hold
+	// the customer's real prefix, since that is the destination in the packet by the time the
+	// tunnel sees it — the rewrite happens in postrouting, before the device transmits. The
+	// system routing table must hold the mapped range instead, because that is what the
+	// packet is addressed to when the routing decision is made, and because holding the real
+	// prefix is precisely what it cannot do twice.
+	//
+	// Empty on almost every device. A prefix nothing contests is routed and allowed under the
+	// same address, which is what the code below does when this is nil.
+	Mapped map[netip.Prefix]netip.Prefix
 }
 
 // Observed is what the platform reports an existing interface currently holds.
@@ -487,6 +501,14 @@ func wantRoutes(want Interface) []netip.Prefix {
 	for _, peer := range want.Peers {
 		for _, prefix := range peer.AllowedIPs {
 			if prefix.Bits() == 0 {
+				continue
+			}
+			// A colliding prefix is routed by the range it is reached at, not by the one the
+			// customer uses. The allowed IP stays the real prefix — that is the destination
+			// once the rewrite has happened — while the routing table holds something it can
+			// hold twice over, which is the whole of ADR-0020's third point.
+			if mapped, ok := want.Mapped[prefix]; ok {
+				out = append(out, mapped)
 				continue
 			}
 			out = append(out, prefix)

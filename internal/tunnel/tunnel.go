@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"strings"
 	"sync"
@@ -160,6 +161,10 @@ type Reconciler struct {
 	// every pass — see applySystemResolver.
 	announced systemResolverState
 
+	// lastMapped is what was last installed, so an unchanged set is not reinstalled on every
+	// reconcile. Rebuilding the table is atomic but not free, and it runs on a timer.
+	lastMapped map[netip.Prefix]netip.Prefix
+
 	// lastProbe is when each group was last probed, so a group can ask to be quieter than
 	// the daemon's reconcile interval. Under mu because Apply is entered both from the
 	// session's applier and from the reconcile ticker.
@@ -190,6 +195,11 @@ type Filter interface {
 	// interface name removes it, which is the only way it comes off: these rules are system
 	// state and outlive the process on purpose (ADR-0011).
 	ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error
+
+	// ApplyMap makes this host reach colliding prefixes at the ranges allocated for them.
+	// An empty map means nothing collides and must remove whatever was installed before,
+	// or a device that left a network keeps rewriting for it.
+	ApplyMap(ctx context.Context, iface string, mapped map[netip.Prefix]netip.Prefix) error
 
 	// ForwardObstacles names anything else on this host that drops forwarded packets, as
 	// strings an operator can go and look at. Empty means nothing was found, which is not
@@ -306,7 +316,7 @@ func (r *Reconciler) Status() Status {
 // The returned components are the parts that did not converge, which the agent reports back
 // so the control plane knows this device is not where it says it is.
 func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, error) {
-	want, unhonoured, err := Desired(r.membership, state, r.relay, r.chooser, r.claims, r.log)
+	want, unhonoured, err := Desired(r.membership, state, r.relay, r.chooser, r.claims, r.filter != nil, r.log)
 	if err != nil {
 		// A description the kernel would refuse, or one wgplan judged unsafe. Reported
 		// rather than approximated: applying part of a rejected configuration is how an
@@ -427,6 +437,12 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 		unapplied = append(unapplied, failed...)
 	}
 
+	// Before the forwarding and after the interface, because the rules name an interface
+	// that has to exist and rewrite traffic the routes above will start sending.
+	if failed := r.applyMappings(ctx, want.Name, want.Mapped); failed != nil {
+		unapplied = append(unapplied, failed...)
+	}
+
 	if failed := r.applyForwarding(ctx, want.Name, state.Advertised()); failed != nil {
 		unapplied = append(unapplied, failed...)
 	}
@@ -536,6 +552,41 @@ func (r *Reconciler) observeAdvertisers(ctx context.Context, iface string, obser
 	// A group no longer assigned should not be remembered, or a device that carried a
 	// prefix for a while keeps its choice forever.
 	r.chooser.Forget(assignments)
+}
+
+// applyMappings makes this host reach colliding prefixes at the ranges allocated for them.
+//
+// Applied whenever the set changes, and applied empty when it becomes empty: a device that
+// left one of two colliding networks stops colliding, and rules left rewriting for a network
+// it is no longer in would send its traffic to an address it can no longer reach.
+//
+// A host with no filter never gets here with anything to do. Desired refuses the mapping on a
+// host that cannot translate, so want.Mapped is empty and the colliding groups were already
+// reported unhonoured — the honest refusal rather than a route into nothing.
+func (r *Reconciler) applyMappings(ctx context.Context, iface string, mapped map[netip.Prefix]netip.Prefix) []string {
+	if r.filter == nil {
+		return nil
+	}
+	if len(mapped) == 0 && len(r.lastMapped) == 0 {
+		return nil
+	}
+	if maps.Equal(mapped, r.lastMapped) {
+		return nil
+	}
+	if err := r.filter.ApplyMap(ctx, iface, mapped); err != nil {
+		r.log.Error("could not reach colliding prefixes at the ranges allocated for them",
+			"interface", iface, "error", logx.SafeError(err),
+			"consequence", "the customers sharing those addresses are not reachable")
+		return []string{"mapping"}
+	}
+	r.lastMapped = maps.Clone(mapped)
+	if len(mapped) > 0 {
+		r.log.Info("reaching colliding prefixes at their allocated ranges",
+			"interface", iface, "mappings", len(mapped))
+	} else {
+		r.log.Info("no longer translating any prefixes", "interface", iface)
+	}
+	return nil
 }
 
 // applyForwarding makes this host carry what it advertises, or stop.
@@ -701,7 +752,7 @@ func (r *Reconciler) fail(err error) {
 // The second return names route groups this device was assigned and could not carry. It is
 // a translation result rather than part of the interface description, which is why it comes
 // back separately: wgplan plans kernel operations, and "what is missing" is not one.
-func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.Chooser, claims *Claims, log *slog.Logger) (wgplan.Interface, []string, error) {
+func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.Chooser, claims *Claims, canTranslate bool, log *slog.Logger) (wgplan.Interface, []string, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -753,7 +804,7 @@ func Desired(m Membership, state *peerset.Set, relay Relay, chooser *routeprobe.
 	//
 	// Reported rather than fatal: one group this device cannot honour must not cost it the
 	// peers and prefixes it can.
-	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), chooser, claims, log)
+	unhonoured := applyRouteGroups(&iface, state.RouteGroups(), chooser, claims, canTranslate, log)
 	return iface, unhonoured, nil
 }
 
