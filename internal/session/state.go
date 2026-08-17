@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sort"
 
@@ -30,10 +31,25 @@ type StateBuilder struct {
 	// Nil where relaying is not configured, in which case peers carry neither an endpoint
 	// nor a relay and know about each other without being able to reach each other.
 	relays *meshpv1.RelayConfig
+
+	// log is where a condition that costs a device something, but does not stop state being
+	// built, is reported. Never nil — a builder constructed without one discards, so a test
+	// does not have to supply a logger to get a state.
+	log *slog.Logger
 }
 
 // NewStateBuilder returns a builder reading from st.
-func NewStateBuilder(st *store.Store) *StateBuilder { return &StateBuilder{store: st} }
+func NewStateBuilder(st *store.Store) *StateBuilder {
+	return &StateBuilder{store: st, log: slog.New(slog.DiscardHandler)}
+}
+
+// WithLogger reports conditions that cost a device something without failing the build.
+func (b *StateBuilder) WithLogger(l *slog.Logger) *StateBuilder {
+	if l != nil {
+		b.log = l
+	}
+	return b
+}
 
 // WithRelays returns a builder that tells agents about these relays.
 func (b *StateBuilder) WithRelays(relays *meshpv1.RelayConfig) *StateBuilder {
