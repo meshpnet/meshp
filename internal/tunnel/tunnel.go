@@ -190,6 +190,15 @@ type Filter interface {
 	// interface name removes it, which is the only way it comes off: these rules are system
 	// state and outlive the process on purpose (ADR-0011).
 	ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error
+
+	// ForwardObstacles names anything else on this host that drops forwarded packets, as
+	// strings an operator can go and look at. Empty means nothing was found, which is not
+	// the same as nothing being there.
+	//
+	// Here rather than called directly, so this reconciler can be tested against a host
+	// that refuses — a condition that otherwise needs root, a real ruleset, and a machine
+	// nobody minds breaking.
+	ForwardObstacles(ctx context.Context) ([]string, error)
 }
 
 // Egress claims and releases a full tunnel's routing.
@@ -559,10 +568,47 @@ func (r *Reconciler) applyForwarding(ctx context.Context, iface string, advertis
 	r.lastAdvertised = proto.CloneOf(advertised)
 	if n := len(advertised.GetGroups()); n > 0 {
 		r.log.Info("carrying prefixes for the network", "interface", iface, "groups", n)
-	} else {
-		r.log.Info("no longer carrying anything", "interface", iface)
+		// Installed is not the same as working, and this is the one place that difference
+		// is invisible. Every base chain at a hook runs and a drop in any of them ends the
+		// packet, so another table refusing forwarded traffic defeats a ruleset meshp
+		// rendered correctly — and nothing above would notice: the rules are right, the
+		// group is applied, and nothing crosses.
+		return r.reportForwardObstacles(ctx)
 	}
+	r.log.Info("no longer carrying anything", "interface", iface)
 	return nil
+}
+
+// reportForwardObstacles says when something else on the host will drop what this device
+// carries, and reports the forwarding unapplied when it does.
+//
+// Unapplied rather than a warning alone, because the control plane is where an operator sees
+// whether an advertiser is doing its job. An advertiser that renders a correct ruleset and
+// carries nothing must not appear healthy — a route group would fail over to it and traffic
+// would stop, with every diagnostic saying the group was applied.
+//
+// Only when this device actually carries something. A host with a strict forward policy and
+// nothing to forward has no problem, and telling it otherwise is a warning that trains people
+// to ignore warnings.
+func (r *Reconciler) reportForwardObstacles(ctx context.Context) []string {
+	found, err := r.filter.ForwardObstacles(ctx)
+	if err != nil {
+		// Not knowing is the state this was in before it could ask, so it is not a reason
+		// to declare the forwarding broken. Said at debug because a host where nft cannot
+		// be read has louder problems than this.
+		r.log.Debug("could not check what else might refuse forwarded packets",
+			"error", logx.SafeError(err))
+		return nil
+	}
+	if len(found) == 0 {
+		return nil
+	}
+
+	r.log.Error("something else on this host drops forwarded packets, so this device may carry nothing",
+		"refused_by", logx.Safe(strings.Join(found, ", ")),
+		"why", "every chain at a hook runs and a drop in any of them wins; meshp cannot undo it from its own table",
+		"hint", "docker sets this policy by default; allow forwarding for this interface or remove the drop")
+	return []string{"forwarding"}
 }
 
 // Teardown removes everything this membership installed (Invariant 20).
