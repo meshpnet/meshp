@@ -134,6 +134,42 @@ func (q *Queries) MappedPrefixesForNetworks(ctx context.Context, dollar_1 []uuid
 	return items, nil
 }
 
+const networksSharingADeviceWith = `-- name: NetworksSharingADeviceWith :many
+SELECT DISTINCT theirs.network_id
+FROM device_network_memberships ours
+JOIN device_network_memberships theirs ON theirs.device_id = ours.device_id
+WHERE ours.network_id = $1
+  AND theirs.network_id <> $1
+  AND ours.state = 'active'
+  AND theirs.state = 'active'
+`
+
+// Networks that have a device in common with this one.
+//
+// Changing what a network carries can create or resolve a collision on a device that is also
+// somewhere else, and that somewhere else has no idea (ADR-0008 versions state per network;
+// ADR-0020 makes collisions a property of a device). Without telling them, the other
+// membership keeps routing the customer's real prefix and never learns its mapped range.
+func (q *Queries) NetworksSharingADeviceWith(ctx context.Context, networkID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, networksSharingADeviceWith, networkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var network_id uuid.UUID
+		if err := rows.Scan(&network_id); err != nil {
+			return nil, err
+		}
+		items = append(items, network_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const organizationForDevice = `-- name: OrganizationForDevice :one
 SELECT organization_id FROM devices WHERE id = $1
 `
@@ -143,6 +179,44 @@ func (q *Queries) OrganizationForDevice(ctx context.Context, id uuid.UUID) (uuid
 	var organization_id uuid.UUID
 	err := row.Scan(&organization_id)
 	return organization_id, err
+}
+
+const otherNetworksForDevice = `-- name: OtherNetworksForDevice :many
+SELECT DISTINCT network_id
+FROM device_network_memberships
+WHERE device_id = $1 AND network_id <> $2 AND state = 'active'
+`
+
+type OtherNetworksForDeviceParams struct {
+	DeviceID  uuid.UUID
+	NetworkID uuid.UUID
+}
+
+// The networks this device is in, apart from one.
+//
+// Used when a device joins somewhere new. Its collisions are a property of the device -- two
+// of *its* networks carrying the same prefix -- while state versions are per network
+// (ADR-0008), so joining network B changes what network A should send and nothing in network
+// A knows it. Without this the first membership keeps routing the customer's real prefix and
+// never learns the range allocated for it.
+func (q *Queries) OtherNetworksForDevice(ctx context.Context, arg OtherNetworksForDeviceParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, otherNetworksForDevice, arg.DeviceID, arg.NetworkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var network_id uuid.UUID
+		if err := rows.Scan(&network_id); err != nil {
+			return nil, err
+		}
+		items = append(items, network_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const spokenForRangesInOrganization = `-- name: SpokenForRangesInOrganization :many

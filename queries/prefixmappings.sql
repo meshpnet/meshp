@@ -62,3 +62,30 @@ RETURNING network_id, prefix, mapped_prefix;
 
 -- name: OrganizationForDevice :one
 SELECT organization_id FROM devices WHERE id = $1;
+
+-- name: OtherNetworksForDevice :many
+-- The networks this device is in, apart from one.
+--
+-- Used when a device joins somewhere new. Its collisions are a property of the device -- two
+-- of *its* networks carrying the same prefix -- while state versions are per network
+-- (ADR-0008), so joining network B changes what network A should send and nothing in network
+-- A knows it. Without this the first membership keeps routing the customer's real prefix and
+-- never learns the range allocated for it.
+SELECT DISTINCT network_id
+FROM device_network_memberships
+WHERE device_id = $1 AND network_id <> $2 AND state = 'active';
+
+-- name: NetworksSharingADeviceWith :many
+-- Networks that have a device in common with this one.
+--
+-- Changing what a network carries can create or resolve a collision on a device that is also
+-- somewhere else, and that somewhere else has no idea (ADR-0008 versions state per network;
+-- ADR-0020 makes collisions a property of a device). Without telling them, the other
+-- membership keeps routing the customer's real prefix and never learns its mapped range.
+SELECT DISTINCT theirs.network_id
+FROM device_network_memberships ours
+JOIN device_network_memberships theirs ON theirs.device_id = ours.device_id
+WHERE ours.network_id = $1
+  AND theirs.network_id <> $1
+  AND ours.state = 'active'
+  AND theirs.state = 'active';
