@@ -123,7 +123,7 @@ func (s *Store) CreateRouteGroup(ctx context.Context, req CreateRouteGroupReques
 			}
 		}
 
-		if _, err := BumpVersion(ctx, q, req.NetworkID, RoutesChanged()); err != nil {
+		if err := BumpRoutesEverywhere(ctx, q, req.NetworkID); err != nil {
 			return err
 		}
 
@@ -194,7 +194,7 @@ func (s *Store) Advertise(ctx context.Context, req AdvertiseRequest) error {
 
 		// Who carries a prefix is desired state for every device in the network, not only
 		// for the advertiser: everyone else has to be told where to send that traffic.
-		_, err = BumpVersion(ctx, q, req.NetworkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, req.NetworkID)
 		return err
 	})
 }
@@ -221,7 +221,7 @@ func (s *Store) Withdraw(ctx context.Context, networkID uuid.UUID, groupSlug str
 		if rows == 0 {
 			return ErrNoSuchRouteGroup
 		}
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 }
@@ -238,7 +238,7 @@ func (s *Store) DeleteRouteGroup(ctx context.Context, networkID uuid.UUID, slug 
 		if rows == 0 {
 			return ErrNoSuchRouteGroup
 		}
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 }
@@ -329,7 +329,7 @@ func (s *Store) SetRouteGroupFailover(ctx context.Context, networkID uuid.UUID, 
 		// edit silently. A route policy is changed by hand and rarely; a redundant delta
 		// costs one reconcile per device, and the reconciler is idempotent by construction
 		// (Invariant 18), so it costs nothing else.
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 	if err != nil {

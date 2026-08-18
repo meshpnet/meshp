@@ -273,6 +273,36 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (RedeemResult, 
 			return err
 		}
 
+		// And every other network this device is already in, because what they should send
+		// it has just changed.
+		//
+		// A device's colliding prefixes are a property of the device -- two of *its* networks
+		// carrying the same prefix (ADR-0020) -- while state versions are per network
+		// (ADR-0008). Joining here can create a collision over there, and nothing over there
+		// knows: its own version never moves, so no delta is ever sent, and that membership
+		// goes on routing the customer's real prefix while the range allocated for it sits
+		// unused. An end-to-end run found exactly that, with one interface mapped and the
+		// other not.
+		//
+		// Routes rather than peers, because what changed for those networks is which prefixes
+		// their assignments carry and how they are reached, not who is in them -- this device
+		// is not joining them.
+		//
+		// In the same transaction as the join, so a device is never enrolled without the
+		// networks that need to hear about it having been told.
+		others, err := q.OtherNetworksForDevice(ctx, dbgen.OtherNetworksForDeviceParams{
+			DeviceID:  device.ID,
+			NetworkID: tok.NetworkID,
+		})
+		if err != nil {
+			return fmt.Errorf("enroll: reading this device's other networks: %w", err)
+		}
+		for _, other := range others {
+			if _, err := store.BumpVersion(ctx, q, other, store.RoutesChanged()); err != nil {
+				return fmt.Errorf("enroll: telling network %s that this device joined another: %w", other, err)
+			}
+		}
+
 		metadata, _ := json.Marshal(map[string]any{
 			"interface_name": membership.InterfaceName,
 			"os":             req.OS,

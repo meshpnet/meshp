@@ -303,7 +303,8 @@ echo "  so ${CUST_ADDR} is ${REACH_A} in A and ${REACH_B} in B"
 echo "waiting for the technician to install both translations"
 installed=0
 for _ in $(seq 1 40); do
-  if ip netns exec "$TECH_NS" nft list table inet meshp_map >/dev/null 2>&1 \
+  if ip netns exec "$TECH_NS" nft list table inet meshp_map_meshp0 >/dev/null 2>&1 \
+     && ip netns exec "$TECH_NS" nft list table inet meshp_map_meshp1 >/dev/null 2>&1 \
      && ip netns exec "$TECH_NS" ip route show | grep -q "${MAPPED_A%%/*}" \
      && ip netns exec "$TECH_NS" ip route show | grep -q "${MAPPED_B%%/*}"; then
     installed=1; break
@@ -336,7 +337,7 @@ for _ in $(seq 1 30); do
 done
 if [ "$reached_a" != "1" ]; then
   echo "--- tech status ---" >&2; ./bin/meshp status --socket "$WORK/${TECH_NS}.sock" >&2 || true
-  echo "--- tech nft ---" >&2; ip netns exec "$TECH_NS" nft list table inet meshp_map >&2 || true
+  echo "--- tech nft ---" >&2; ip netns exec "$TECH_NS" nft list ruleset >&2 || true
   echo "--- tech routes ---" >&2; ip netns exec "$TECH_NS" ip route show >&2 || true
   echo "--- customer A log ---" >&2; tail -20 "$WORK/${CA_NS}.log" >&2
   fail "customer A is not reachable at ${REACH_A}:${PORT_A}"

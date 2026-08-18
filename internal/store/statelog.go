@@ -142,3 +142,32 @@ func (c Change) kind() (string, error) {
 			strings.Join(kinds, " and "))
 	}
 }
+
+// BumpRoutesEverywhere advances this network's version and that of every network sharing a
+// device with it.
+//
+// Route changes are the one kind that can reach outside their own network. A device's
+// colliding prefixes are a property of the device -- two of *its* networks carrying the same
+// prefix (ADR-0020) -- so adding a prefix here can create a collision on a device that is
+// also somewhere else. State versions are per network (ADR-0008), and that somewhere else has
+// no idea: its version never moves, no delta is built, and the membership there goes on
+// routing the customer's real prefix while the range allocated for it sits unused.
+//
+// Scoped to networks that actually share a device, not the whole organisation. A deployment
+// where nobody is in two networks at once pays one indexed query and bumps nothing, and one
+// route group change never reconciles a fleet that has no reason to care.
+func BumpRoutesEverywhere(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID) error {
+	if _, err := BumpVersion(ctx, q, networkID, RoutesChanged()); err != nil {
+		return err
+	}
+	sharing, err := q.NetworksSharingADeviceWith(ctx, networkID)
+	if err != nil {
+		return fmt.Errorf("store: finding networks that share a device: %w", err)
+	}
+	for _, other := range sharing {
+		if _, err := BumpVersion(ctx, q, other, RoutesChanged()); err != nil {
+			return fmt.Errorf("store: telling network %s that a shared device's routes changed: %w", other, err)
+		}
+	}
+	return nil
+}
