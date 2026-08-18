@@ -322,7 +322,9 @@ merges only — history stays linear.
 ## Security
 
 Report vulnerabilities privately through GitHub's security advisories on this
-repository, not in a public issue. See the organisation `SECURITY.md`.
+repository, not in a public issue. [SECURITY.md](SECURITY.md) says what is in scope,
+how long you should expect to wait, and which three alarming-looking behaviours are
+the product working as designed.
 
 ## License
 
