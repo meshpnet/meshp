@@ -118,7 +118,7 @@ func (q *Queries) GetNetwork(ctx context.Context, id uuid.UUID) (Network, error)
 }
 
 const listActiveMemberships = `-- name: ListActiveMemberships :many
-SELECT m.id, m.device_id, m.network_id, m.interface_name, m.address_v4, m.address_v6, m.state, m.tags, m.joined_at, m.last_seen_at, m.revoked_at
+SELECT m.id, m.device_id, m.network_id, m.interface_name, m.address_v4, m.address_v6, m.state, m.tags, m.joined_at, m.last_seen_at, m.revoked_at, m.dns_label
 FROM device_network_memberships m
 JOIN devices d ON d.id = m.device_id
 WHERE m.network_id = $1
@@ -148,6 +148,7 @@ func (q *Queries) ListActiveMemberships(ctx context.Context, networkID uuid.UUID
 			&i.JoinedAt,
 			&i.LastSeenAt,
 			&i.RevokedAt,
+			&i.DnsLabel,
 		); err != nil {
 			return nil, err
 		}

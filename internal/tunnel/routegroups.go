@@ -27,11 +27,22 @@ import (
 // Returns the group names it could not honour, which the caller reports as unapplied rather
 // than swallowing: a device quietly not carrying a prefix it was assigned is indistinguishable
 // from one that is, right up until somebody tries to use it.
-func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, chooser *routeprobe.Chooser, claims *Claims, log *slog.Logger) []string {
+func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroupAssignment, chooser *routeprobe.Chooser, claims *Claims, canTranslate bool, log *slog.Logger) []string {
+	// Where colliding prefixes are reached, but only on a host that can actually perform the
+	// translation. On one that cannot, the mapping is dropped here and the real prefix is
+	// claimed instead — so the two memberships contest it and both are refused, exactly as
+	// before ADR-0020. A device that installed a route to a mapped range nothing rewrites
+	// would blackhole the customer it was meant to reach, which is worse than saying no.
+	iface.Mapped = mappedPrefixes(assignments, canTranslate, log)
+
 	// Declared before the early return, so a membership that has been taken out of every
 	// route group stops contesting prefixes it no longer carries. Leaving a stale claim
 	// behind would keep another membership refused for a network this one has left.
-	claims.Declare(iface.Name, declaredPrefixes(assignments))
+	//
+	// What is claimed is what reaches the routing table, which for a mapped prefix is its
+	// range and not the customer's own. That is what makes the collision go away rather than
+	// needing to be special-cased: two mapped ranges are different, so nothing contests.
+	claims.Declare(iface.Name, declaredPrefixes(assignments, iface.Mapped))
 
 	if len(assignments) == 0 {
 		return nil
@@ -81,7 +92,7 @@ func applyRouteGroups(iface *wgplan.Interface, assignments []*meshpv1.RouteGroup
 		// picked between: which one a packet reaches would depend on the order the routing
 		// table was written, so the technician who types `ssh 192.168.1.5` would sometimes
 		// reach one customer and sometimes the other (ADR-0019).
-		if contested := contestedPrefixes(claims, iface.Name, prefixes); len(contested) > 0 {
+		if contested := contestedPrefixes(claims, iface.Name, routedAs(prefixes, iface.Mapped)); len(contested) > 0 {
 			log.Error("not carrying a route group whose prefixes another network also claims",
 				"group", logx.Safe(name),
 				"prefixes", contested,
@@ -137,12 +148,76 @@ func groupPrefixes(assignment *meshpv1.RouteGroupAssignment) (prefixes []netip.P
 // Unparseable ones are skipped rather than refused: a prefix this build cannot read is
 // already reported as an unhonoured group above, and it cannot contest anything because
 // nothing can route it either.
-func declaredPrefixes(assignments []*meshpv1.RouteGroupAssignment) []netip.Prefix {
+func declaredPrefixes(assignments []*meshpv1.RouteGroupAssignment, mapped map[netip.Prefix]netip.Prefix) []netip.Prefix {
 	var out []netip.Prefix
 	for _, assignment := range assignments {
 		for _, raw := range assignment.GetPrefixes() {
-			if prefix, err := netip.ParsePrefix(raw); err == nil {
-				out = append(out, prefix.Masked())
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil {
+				continue
+			}
+			out = append(out, routedAs([]netip.Prefix{prefix.Masked()}, mapped)...)
+		}
+	}
+	return out
+}
+
+// routedAs is what these prefixes look like in the routing table.
+//
+// The mapped range where there is one, the prefix itself otherwise. Everything that decides
+// whether two memberships collide has to ask this rather than look at the prefix directly,
+// because the collision is about the routing table and nothing else.
+func routedAs(prefixes []netip.Prefix, mapped map[netip.Prefix]netip.Prefix) []netip.Prefix {
+	if len(mapped) == 0 {
+		return prefixes
+	}
+	out := make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		if to, ok := mapped[p.Masked()]; ok {
+			out = append(out, to)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// mappedPrefixes reads the ranges the control plane allocated, on a host that can use them.
+//
+// Refused rather than approximated when a half will not parse or the two are different sizes:
+// the host part is carried across unchanged, so a mismatched pair would send a technician to
+// an address inside the right customer and the wrong machine.
+func mappedPrefixes(assignments []*meshpv1.RouteGroupAssignment, canTranslate bool, log *slog.Logger) map[netip.Prefix]netip.Prefix {
+	var out map[netip.Prefix]netip.Prefix
+	for _, assignment := range assignments {
+		for _, m := range assignment.GetMappedPrefixes() {
+			real, realErr := netip.ParsePrefix(m.GetPrefix())
+			to, toErr := netip.ParsePrefix(m.GetMapped())
+			if realErr != nil || toErr != nil || real.Bits() != to.Bits() ||
+				real.Addr().Is4() != to.Addr().Is4() {
+				log.Error("a mapped range this device cannot use was sent for a colliding prefix",
+					"prefix", logx.Safe(m.GetPrefix()), "mapped", logx.Safe(m.GetMapped()),
+					"consequence", "the prefix stays contested and the group is not carried")
+				continue
+			}
+			if !canTranslate {
+				// Said once per pass rather than per prefix, further down, because a host
+				// with no nftables collides on everything or nothing.
+				continue
+			}
+			if out == nil {
+				out = make(map[netip.Prefix]netip.Prefix)
+			}
+			out[real.Masked()] = to.Masked()
+		}
+	}
+	if !canTranslate && len(out) == 0 {
+		for _, assignment := range assignments {
+			if len(assignment.GetMappedPrefixes()) > 0 {
+				log.Error("this device was given ranges for colliding prefixes and cannot translate",
+					"why", "translation needs nftables, which this host does not have",
+					"consequence", "the colliding groups stay refused rather than reaching one customer at another's address")
+				break
 			}
 		}
 	}

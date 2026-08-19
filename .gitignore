@@ -36,3 +36,11 @@ CLAUDE.md
 .cursor/
 .aider*
 .continue/
+
+# Whatever an assistant derives from this repository, which is not the repository.
+# graphify writes a parsed copy of the tree — ASTs, chunk lists and a content-addressed
+# cache — and it runs to megabytes. Unanchored so it is ignored at any depth, because the
+# cache nests another graphify-out/ under .graphify/repos/<owner>/<repo>/.
+graphify-out/
+.graphify/
+.graphify_*

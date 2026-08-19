@@ -28,6 +28,8 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0017](0017-relay-credentials-over-the-control-channel.md) | An agent asks for its relay credential; the server does not push it |
 | [0018](0018-mechanisms-must-be-reachable.md) | A mechanism is not done until something running reaches it |
 | [0019](0019-egress-routing-overlap-addressing.md) | Egress is a routing problem; overlapping prefixes are an addressing one |
+| [0020](0020-colliding-prefixes-are-mapped-on-the-device.md) | Colliding prefixes are mapped, by the control plane that can see them |
+| [0021](0021-names-resolve-on-the-device.md) | Names resolve on the device, from desired state |
 
 ## Format
 

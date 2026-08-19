@@ -123,7 +123,7 @@ func (s *Store) CreateRouteGroup(ctx context.Context, req CreateRouteGroupReques
 			}
 		}
 
-		if _, err := BumpVersion(ctx, q, req.NetworkID, RoutesChanged()); err != nil {
+		if err := BumpRoutesEverywhere(ctx, q, req.NetworkID); err != nil {
 			return err
 		}
 
@@ -165,7 +165,7 @@ func (s *Store) Advertise(ctx context.Context, req AdvertiseRequest) error {
 	switch req.AdminState {
 	case "enabled", "draining", "disabled":
 	default:
-		return fmt.Errorf("store: admin state %q is not enabled, draining or disabled", req.AdminState)
+		return invalid("admin state %q is not enabled, draining or disabled", req.AdminState)
 	}
 
 	return s.InTx(ctx, func(q *dbgen.Queries) error {
@@ -194,7 +194,7 @@ func (s *Store) Advertise(ctx context.Context, req AdvertiseRequest) error {
 
 		// Who carries a prefix is desired state for every device in the network, not only
 		// for the advertiser: everyone else has to be told where to send that traffic.
-		_, err = BumpVersion(ctx, q, req.NetworkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, req.NetworkID)
 		return err
 	})
 }
@@ -221,7 +221,7 @@ func (s *Store) Withdraw(ctx context.Context, networkID uuid.UUID, groupSlug str
 		if rows == 0 {
 			return ErrNoSuchRouteGroup
 		}
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 }
@@ -238,7 +238,7 @@ func (s *Store) DeleteRouteGroup(ctx context.Context, networkID uuid.UUID, slug 
 		if rows == 0 {
 			return ErrNoSuchRouteGroup
 		}
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 }
@@ -329,7 +329,7 @@ func (s *Store) SetRouteGroupFailover(ctx context.Context, networkID uuid.UUID, 
 		// edit silently. A route policy is changed by hand and rarely; a redundant delta
 		// costs one reconcile per device, and the reconciler is idempotent by construction
 		// (Invariant 18), so it costs nothing else.
-		_, err = BumpVersion(ctx, q, networkID, RoutesChanged())
+		err = BumpRoutesEverywhere(ctx, q, networkID)
 		return err
 	})
 	if err != nil {
@@ -402,8 +402,8 @@ func routeGroupFrom(row dbgen.CreateRouteGroupRow, prefixes []netip.Prefix) (Rou
 
 func validateSlug(what, slug string) error {
 	if !slugPattern.MatchString(slug) {
-		return fmt.Errorf(
-			"store: %q is not a usable %s name; use lowercase letters, digits and hyphens", slug, what)
+		return invalid(
+			"%q is not a usable %s name; use lowercase letters, digits and hyphens", slug, what)
 	}
 	return nil
 }
@@ -418,22 +418,22 @@ func validateKind(kind string, prefixes []netip.Prefix) error {
 	switch kind {
 	case KindEgress:
 		if len(prefixes) != 0 {
-			return errors.New(
-				"store: an egress group carries the default route and takes no prefixes of its own")
+			return invalid(
+				"an egress group carries the default route and takes no prefixes of its own")
 		}
 	case KindSubnet, KindService:
 		if len(prefixes) == 0 {
-			return fmt.Errorf("store: a %s group needs at least one prefix to carry", kind)
+			return invalid("a %s group needs at least one prefix to carry", kind)
 		}
 		for _, p := range prefixes {
 			if p.Bits() == 0 {
-				return fmt.Errorf(
-					"store: %s is the default route; advertise it as an egress group rather than a %s one",
+				return invalid(
+					"%s is the default route; advertise it as an egress group rather than a %s one",
 					p, kind)
 			}
 		}
 	default:
-		return fmt.Errorf("store: %q is not one of egress, subnet, service", kind)
+		return invalid("%q is not one of egress, subnet, service", kind)
 	}
 	return nil
 }

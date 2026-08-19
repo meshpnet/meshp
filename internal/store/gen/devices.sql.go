@@ -158,9 +158,9 @@ func (q *Queries) CreateDevice(ctx context.Context, arg CreateDeviceParams) (Dev
 
 const createMembership = `-- name: CreateMembership :one
 INSERT INTO device_network_memberships (
-    device_id, network_id, interface_name, address_v4, address_v6, tags
-) VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, device_id, network_id, interface_name, address_v4, address_v6, state, tags, joined_at, last_seen_at, revoked_at
+    device_id, network_id, interface_name, address_v4, address_v6, tags, dns_label
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, device_id, network_id, interface_name, address_v4, address_v6, state, tags, joined_at, last_seen_at, revoked_at, dns_label
 `
 
 type CreateMembershipParams struct {
@@ -170,6 +170,7 @@ type CreateMembershipParams struct {
 	AddressV4     *netip.Addr
 	AddressV6     *netip.Addr
 	Tags          []string
+	DnsLabel      string
 }
 
 func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipParams) (DeviceNetworkMembership, error) {
@@ -180,6 +181,7 @@ func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipPara
 		arg.AddressV4,
 		arg.AddressV6,
 		arg.Tags,
+		arg.DnsLabel,
 	)
 	var i DeviceNetworkMembership
 	err := row.Scan(
@@ -194,6 +196,7 @@ func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipPara
 		&i.JoinedAt,
 		&i.LastSeenAt,
 		&i.RevokedAt,
+		&i.DnsLabel,
 	)
 	return i, err
 }
@@ -495,4 +498,39 @@ func (q *Queries) RevokeMembership(ctx context.Context, arg RevokeMembershipPara
 	var i RevokeMembershipRow
 	err := row.Scan(&i.MembershipID, &i.DeviceID, &i.WireguardPublicKey)
 	return i, err
+}
+
+const takenDNSLabels = `-- name: TakenDNSLabels :many
+SELECT dns_label FROM device_network_memberships
+WHERE network_id = $1 AND dns_label LIKE $2 || '%'
+`
+
+type TakenDNSLabelsParams struct {
+	NetworkID uuid.UUID
+	Prefix    *string
+}
+
+// The labels already used in a network, among those a candidate might collide with.
+//
+// Prefix-matched rather than fetching every label in the network: a network with ten
+// thousand devices has ten thousand labels and one of them is being enrolled, so the
+// interesting set is the handful that start with the same base.
+func (q *Queries) TakenDNSLabels(ctx context.Context, arg TakenDNSLabelsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, takenDNSLabels, arg.NetworkID, arg.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var dns_label string
+		if err := rows.Scan(&dns_label); err != nil {
+			return nil, err
+		}
+		items = append(items, dns_label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

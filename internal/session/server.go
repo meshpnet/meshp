@@ -90,7 +90,7 @@ func NewServer(st *store.Store, hub *Hub, cfg Config) (*Server, error) {
 	return &Server{
 		store:      st,
 		hub:        hub,
-		builder:    NewStateBuilder(st).WithRelays(cfg.Relays),
+		builder:    NewStateBuilder(st).WithRelays(cfg.Relays).WithLogger(cfg.Log),
 		challenger: challenger,
 		relay:      cfg.RelayIssuer,
 		clk:        cfg.Clock,

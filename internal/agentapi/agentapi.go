@@ -38,6 +38,18 @@ type Status struct {
 	// (ADR-0006). Public, so safe to report.
 	IdentityPublicKey string `json:"identity_public_key,omitempty"`
 
+	// Resolver is where this device answers names, or empty when it is not answering.
+	//
+	// Reported because the port is the kernel's choice — 53 is almost always taken — so
+	// this is the only way anybody finds it, whether that is a person running `dig` or
+	// the code that will configure the system resolver.
+	Resolver string `json:"resolver,omitempty"`
+
+	// ResolverSuffixes are the domains it can answer for, across every network. Worth
+	// showing beside the address: a name that will not resolve is usually a name under a
+	// suffix that is not in this list.
+	ResolverSuffixes []string `json:"resolver_suffixes,omitempty"`
+
 	Memberships []MembershipStatus `json:"memberships"`
 }
 

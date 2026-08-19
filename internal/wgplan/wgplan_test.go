@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1206,5 +1207,57 @@ func TestTwoCatchAllsAreRefused(t *testing.T) {
 	}
 	if err := iface.Validate(); err == nil {
 		t.Error("two peers both claiming every destination were accepted")
+	}
+}
+
+// A colliding prefix is routed by the range it is reached at, and allowed by the one the
+// customer uses (ADR-0020).
+//
+// The two must differ, and that is the point: the routing table cannot hold 192.168.1.0/24
+// twice, while WireGuard must be told to accept it because that is the destination in the
+// packet by the time the tunnel sees it -- the rewrite happens in postrouting, before the
+// device transmits. Getting this backwards produces a device that either cannot route to the
+// customer or silently drops every packet it does route.
+func TestAMappedPrefixIsRoutedByItsRangeAndAllowedByItsOwn(t *testing.T) {
+	real := netip.MustParsePrefix("192.168.1.0/24")
+	mapped := netip.MustParsePrefix("100.71.5.0/24")
+
+	want := Interface{
+		Name:       "meshp0",
+		PrivateKey: "private-key-of-this-device",
+		Addresses:  []netip.Prefix{netip.MustParsePrefix("100.90.0.1/32")},
+		Peers: []Peer{{
+			PublicKey:  "peer-public-key",
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("100.90.0.2/32"), real},
+		}},
+		Mapped: map[netip.Prefix]netip.Prefix{real: mapped},
+	}
+
+	routes := wantRoutes(want)
+	if !slices.Contains(routes, mapped) {
+		t.Errorf("routes = %v; the mapped range is what the routing table must hold", routes)
+	}
+	if slices.Contains(routes, real) {
+		t.Errorf("routes = %v; the customer's own prefix is the thing that cannot be held twice", routes)
+	}
+
+	// And the allowed IP is untouched, or WireGuard drops the packet the rewrite produced.
+	if !slices.Contains(want.Peers[0].AllowedIPs, real) {
+		t.Error("the peer no longer allows the prefix that actually crosses the tunnel")
+	}
+}
+
+// Everything not mapped is routed exactly as before, which is almost every prefix on almost
+// every device.
+func TestAnUnmappedPrefixIsRoutedAsItself(t *testing.T) {
+	plain := netip.MustParsePrefix("10.20.0.0/16")
+	want := Interface{
+		Name:       "meshp0",
+		PrivateKey: "private-key-of-this-device",
+		Peers:      []Peer{{PublicKey: "peer-public-key", AllowedIPs: []netip.Prefix{plain}}},
+		Mapped:     map[netip.Prefix]netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"): netip.MustParsePrefix("100.71.5.0/24")},
+	}
+	if routes := wantRoutes(want); !slices.Contains(routes, plain) {
+		t.Errorf("routes = %v, want the prefix itself", routes)
 	}
 }

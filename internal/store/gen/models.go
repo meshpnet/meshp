@@ -103,6 +103,8 @@ type DeviceNetworkMembership struct {
 	JoinedAt      time.Time
 	LastSeenAt    *time.Time
 	RevokedAt     *time.Time
+	// The name this device answers to inside this network, as <dns_label>.<network slug>.<suffix>. Unique per network because that is the scope of the name. devices.name stays free text for display.
+	DnsLabel string
 }
 
 type DnsRecord struct {
@@ -191,6 +193,16 @@ type Organization struct {
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 	DeletedAt            *time.Time
+}
+
+// Distinct ranges for customer prefixes that collide on some device (ADR-0020). One row per (network, prefix) so a mapped address means the same thing across the deployment.
+type PrefixMapping struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	NetworkID      uuid.UUID
+	Prefix         netip.Prefix
+	MappedPrefix   netip.Prefix
+	CreatedAt      time.Time
 }
 
 type Relay struct {

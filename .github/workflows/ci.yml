@@ -269,6 +269,22 @@ jobs:
             || { echo "the end-to-end run never reported a kernel tunnel"; exit 1; }
           echo "the tunnel came up and was asserted"
 
+      - name: a name resolved on the machine holding it
+        run: |
+          # The one assertion that tests the feature rather than its parts. Everything else
+          # about DNS -- the wire format, the zones, resolvectl, the port -- is covered by
+          # tests that ask meshp directly, and all of them pass on a machine where no
+          # ordinary program can find these names. Silence here would mean the runner
+          # skipped it, which is how a feature ends up gated by nothing.
+          if grep -q "skipped-resolver" e2e.log; then
+            echo "the name assertions skipped, so the DNS feature gates nothing"
+            sed -n 's/.*skipped-resolver: /reason: /p' e2e.log
+            exit 1
+          fi
+          grep -q "through this host's own resolver" e2e.log \
+            || { echo "no name was resolved through the host resolver"; exit 1; }
+          sed -n 's/^  \(.* -> .*through this host.s own resolver\)/resolved: \1/p' e2e.log
+
       # Two agents at once, which the enrolment script cannot do: every device is handed
       # the interface name meshp0, so two daemons on one host fight over it. A namespace
       # each is what makes a real handshake — and therefore a real reachability report —
@@ -296,6 +312,34 @@ jobs:
           grep -q "recorded the client's verdict" failover.log \
             || { echo "no reachability report reached the control plane"; exit 1; }
           echo "a verdict from a live client reached the control plane"
+
+      # The claim ADR-0004 has made since the beginning: one technician, two customers, both
+      # on 192.168.1.0/24. Every part of ADR-0020 had tests and the feature did not, and this
+      # run found two defects on its first complete pass -- a shared nftables table, and a
+      # collision created in one network that the other was never told about.
+      - name: two customers on one prefix, both reachable
+        run: |
+          set -o pipefail
+          {
+            echo "### Overlapping customer prefixes"
+            echo
+            echo '```'
+            sudo -E env "PATH=$PATH" ./scripts/e2e-overlap.sh "$MESHP_TEST_DATABASE_URL" 2>&1 | tee overlap.log
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: the overlap assertions were not skipped
+        run: |
+          if grep -q "^skipped:" overlap.log; then
+            echo "the overlap run skipped, so the feature gates nothing"
+            sed -n 's/^skipped: /reason: /p' overlap.log
+            exit 1
+          fi
+          # The crossover assertions are the ones that cannot be faked: both customers answer
+          # at 192.168.1.5, so a misrouted packet still finds a machine there.
+          grep -q "neither address reaches the other customer" overlap.log \
+            || { echo "the two customers were never shown to be distinguishable"; exit 1; }
+          echo "two customers on one prefix are reachable and distinct"
 
   migrations-immutable:
     name: migrations are append only
@@ -477,7 +521,10 @@ jobs:
           sudo ip link del dev wgprobe
           echo "this runner can create WireGuard interfaces"
 
-      - run: sudo apt-get install -y --no-install-recommends wireguard-tools
+      # netcat-openbsd is what the mapping tests listen with: proving two customers on the
+      # same prefix are distinguishable needs a service on each of them, and ping cannot say
+      # which machine answered.
+      - run: sudo apt-get install -y --no-install-recommends wireguard-tools nftables netcat-openbsd
 
       # Creating interfaces and entering namespaces both need root, so these tests skip
       # rather than fail without it — which means an unprivileged run would report success
@@ -488,10 +535,41 @@ jobs:
       # interface actually leaves by it cannot be tested without real interfaces, and a
       # probe that quietly used the routing table would report an advertiser healthy while
       # measuring the local network.
-      - name: interfaces, routes, teardown, a packet across the tunnel, and a bound probe
+      # resolved needs systemd-resolved to be the thing answering names here, which is true
+      # of this runner and is asserted rather than assumed: the step below fails on a skip,
+      # so a runner image that stopped shipping it would be a loud failure rather than a
+      # test quietly not running.
+      - name: this runner's names are answered by systemd-resolved
+        run: |
+          resolvectl status >/dev/null
+          sudo modprobe dummy || true
+          echo "systemd-resolved is answering here"
+
+      # Docker is installed on this runner and sets the forward policy to DROP. A drop in one
+      # table wins over an accept in another, so meshp's forwarding chain cannot undo it and
+      # the packet tests below measure the runner image rather than meshp.
+      #
+      # Set here rather than worked around in the tests, because the tests are right: they
+      # prove the ruleset carries a packet when nothing else is refusing it. That another
+      # tool can silently defeat meshp's forwarding is a real defect in meshp and is filed
+      # separately -- it is not something this job should paper over quietly, which is why
+      # the previous policy is printed.
+      - name: nothing else on this runner is dropping forwarded packets
+        run: |
+          echo "before: $(sudo iptables -L FORWARD -n | head -1)"
+          sudo iptables -P FORWARD ACCEPT
+          echo "after:  $(sudo iptables -L FORWARD -n | head -1)"
+
+      # nftables joins them for the reason the others are here, and it arrives late: this
+      # package has held real-packet tests since the forwarding work — a packet crossing into
+      # a carried LAN, and stopping when the group is withdrawn — and none of them has ever
+      # run in CI. They need root, so the unprivileged test job skips them, and this job did
+      # not name the package. They gated nothing. Adding it also gates the mapping tests,
+      # which are the only place two customers on 192.168.1.0/24 are proven distinguishable.
+      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, the host resolver, and two customers on one prefix
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip

@@ -159,6 +159,20 @@ grep -q 'not enrolled' "$WORK/status-before.out" \
   || fail "an unenrolled daemon did not say so: $(cat "$WORK/status-before.out")"
 echo "  socket answers: $(head -1 "$WORK/status-before.out")"
 
+# The resolver is listening, on a daemon that has joined nothing.
+#
+# Asserted here because nothing else can. The daemon constructs a resolver and starts it in
+# a goroutine, and deleting that goroutine compiles cleanly and passes every unit test in
+# the tree — the package would be built, wired, and never listening, which is the exact
+# shape ADR-0018 is about and the shape WithChooser was missing in for two releases.
+#
+# Before enrolment on purpose: the resolver comes up ahead of any membership, so a device
+# with no names still answers, and a device whose names are missing later is a different
+# problem from one whose resolver never bound.
+grep -q '  resolver  127\.' "$WORK/status-before.out" \
+  || fail "the daemon is not answering names: $(grep resolver "$WORK/status-before.out" || echo 'no resolver line at all')"
+echo "  resolver: $(grep '  resolver' "$WORK/status-before.out" | sed 's/^ *//')"
+
 # And the stale lock is gone. Asserted on a daemon that is not enrolled, which is the case
 # that matters most: a device whose membership was revoked, or whose state was wiped, still
 # has to get its network back. Nothing in desired state can rescue it, because it has none.
@@ -272,6 +286,15 @@ tunnel_possible=0
 if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] && ip link add dev wgprobe0 type wireguard 2>/dev/null; then
   ip link del dev wgprobe0
   tunnel_possible=1
+fi
+
+# And whether this host has a resolver meshp knows how to configure and put back. Decided by
+# asking resolved to speak rather than by looking for the binary: a container can have
+# resolvectl installed with no daemon behind it, and the agent makes the same call for the
+# same reason (internal/resolved.New).
+resolved_possible=0
+if [ "$tunnel_possible" = "1" ] && command -v resolvectl >/dev/null 2>&1 && resolvectl status >/dev/null 2>&1; then
+  resolved_possible=1
 fi
 
 # Over TLS, and the control plane says so. A run that quietly fell back to plaintext would
@@ -431,6 +454,89 @@ if [ "$tunnel_possible" = "1" ]; then
   ip route show dev meshp0 | grep -q "100.90.${OCTET}.2" \
     || { ip route show dev meshp0 >&2; fail "no route to the peer via the interface"; }
   echo "  route to the peer installed"
+
+  # ---------------------------------------------------------------------------
+  # A name a person could type
+  #
+  # Everything above proves the resolver is listening and the peer is configured. Neither
+  # proves the thing the feature exists for: that somebody types a name and reaches a
+  # machine. ADR-0021's chain has three links — the agent knows the name, this host's
+  # resolver is pointed at the agent for that domain, and the C library asks this host's
+  # resolver — and every one is tested on its own while the joins between them are
+  # inference. The resolver's own tests query it directly, so they would pass on a machine
+  # where nothing else in the world can find it.
+  #
+  # This is the join. getent goes through nsswitch and the resolved stub exactly as ssh or
+  # a browser does, so a break anywhere along that chain fails here and nowhere else.
+  if [ "$resolved_possible" = "1" ]; then
+    # From the database, not derived here: the label is the server's to assign (ADR-0021),
+    # and a name this script computed would be a test of this script's arithmetic. Reading
+    # it back also asserts that enrolment gave the membership a label at all.
+    peer_row="$(psql "$DB_URL" -tAqc "
+      SELECT m.dns_label || ' ' || host(m.address_v4)
+      FROM device_network_memberships m JOIN devices d ON d.id = m.device_id
+      WHERE m.network_id = '${NETWORK_ID}' AND d.name = 'e2e-second'")"
+    PEER_LABEL="${peer_row%% *}"
+    PEER_V4="${peer_row##* }"
+    [ -n "$PEER_LABEL" ] || fail "the peer's membership has no dns_label, so it cannot be named"
+    PEER_FQDN="${PEER_LABEL}.${SLUG}.internal"
+
+    # The reconciler configures resolved on its own timer, so this waits rather than
+    # assuming the last reconcile has happened.
+    pointed=0
+    for _ in $(seq 1 20); do
+      if resolvectl status meshp0 2>/dev/null | grep -q "${SLUG}.internal"; then pointed=1; break; fi
+      sleep 1
+    done
+    if [ "$pointed" != "1" ]; then
+      echo "--- resolvectl status meshp0 ---" >&2; resolvectl status meshp0 >&2 || true
+      echo "--- agent log, resolver lines ---" >&2
+      grep -iE "resolver|resolve" "$AGENT_LOG" | tail -20 >&2
+      fail "this host's resolver was never pointed at meshp for ${SLUG}.internal"
+    fi
+    echo "  resolved routes ${SLUG}.internal to meshp"
+
+    # Negative caching is real: anything that asked for this name before the link was
+    # configured left a failure behind that outlives the fix.
+    resolvectl flush-caches 2>/dev/null || true
+
+    resolved_name=0
+    for _ in $(seq 1 15); do
+      if getent ahostsv4 "$PEER_FQDN" >"$WORK/getent.out" 2>&1; then resolved_name=1; break; fi
+      sleep 1
+    done
+    if [ "$resolved_name" != "1" ]; then
+      echo "--- getent ---" >&2; cat "$WORK/getent.out" >&2
+      echo "--- resolvectl status meshp0 ---" >&2; resolvectl status meshp0 >&2 || true
+      echo "--- resolvectl query ---" >&2; resolvectl query "$PEER_FQDN" >&2 2>&1 || true
+      # Which link in the chain broke. If resolvectl can answer and getent cannot, this
+      # host's C library is not asking resolved at all — /etc/resolv.conf points somewhere
+      # other than the stub — and no amount of configuring a link would have helped.
+      echo "--- /etc/resolv.conf ---" >&2; cat /etc/resolv.conf >&2 2>&1 || true
+      echo "--- nsswitch hosts ---" >&2; grep '^hosts:' /etc/nsswitch.conf >&2 2>&1 || true
+      echo "--- agent log, resolver lines ---" >&2
+      grep -iE "resolver|resolve|names" "$AGENT_LOG" | tail -20 >&2
+      fail "a name this device holds does not resolve on the machine holding it: ${PEER_FQDN}"
+    fi
+    # The right machine, not merely an answer. A resolver that replied with anything at all
+    # would pass the check above.
+    grep -q "^${PEER_V4}\b" "$WORK/getent.out" \
+      || { cat "$WORK/getent.out" >&2; fail "${PEER_FQDN} resolved, but not to ${PEER_V4}"; }
+    echo "  ${PEER_FQDN} -> ${PEER_V4}, through this host's own resolver"
+
+    # And only that domain. A resolver handed every query would break split-horizon
+    # corporate DNS on the first laptop that joined, which is why the domain is installed
+    # as a routing domain rather than a search domain.
+    if getent ahostsv4 "${PEER_LABEL}.not-a-meshp-network.internal" >"$WORK/getent-foreign.out" 2>&1; then
+      if grep -qE "^100\.90\." "$WORK/getent-foreign.out"; then
+        cat "$WORK/getent-foreign.out" >&2
+        fail "a name outside this network's domain was answered from the mesh"
+      fi
+    fi
+    echo "  a name outside the network's domain is not answered from the mesh"
+  else
+    echo "  skipped-resolver: this host has no systemd-resolved to configure"
+  fi
 
   # ---------------------------------------------------------------------------
   # The relay

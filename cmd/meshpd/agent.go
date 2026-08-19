@@ -15,12 +15,14 @@ import (
 	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/agentstate"
 	"github.com/meshpnet/meshp/internal/controlurl"
+	"github.com/meshpnet/meshp/internal/dns"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/nftables"
 	"github.com/meshpnet/meshp/internal/pathprobe"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/relaylink"
+	"github.com/meshpnet/meshp/internal/resolved"
 	"github.com/meshpnet/meshp/internal/routeprobe"
 	"github.com/meshpnet/meshp/internal/sessionclient"
 	"github.com/meshpnet/meshp/internal/tunnel"
@@ -69,6 +71,20 @@ type agent struct {
 	// router's default both carry 192.168.1.0/24.
 	claims *tunnel.Claims
 
+	// zones is every name this device can answer for, across every network it is in, and
+	// resolver is what answers from them. Shared for the reason claims is: a bare name
+	// that exists in two of this device's networks is ambiguous, and only something that
+	// sees both can say so (ADR-0021).
+	zones    *dns.Zones
+	resolver *dns.Server
+
+	// systemResolver points this machine's own resolver at the agent, or is nil on a host
+	// where meshp cannot configure one and put it back afterwards. Nil means names answer
+	// only to something querying the agent directly, which the status command says plainly
+	// rather than leaving somebody to wonder why `ssh fileserver` does not work.
+	systemResolverOnce sync.Once
+	systemResolver     *resolved.Resolvectl
+
 	ctx context.Context
 }
 
@@ -115,7 +131,9 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 		WithChooser(chooser).
 		WithEgress(routerOrNil()).
 		WithProber(proberOrNil()).
-		WithClaims(a.claims)
+		WithClaims(a.claims).
+		WithNames(a.zones).
+		WithSystemResolver(a.systemResolverOrNil(), a.resolver.Addr)
 }
 
 // proberOrNil converts a possibly-absent dialer into the interface.
@@ -129,6 +147,29 @@ func proberOrNil() tunnel.Prober {
 		return d
 	}
 	return nil
+}
+
+// systemResolverOrNil converts a possibly-absent resolver configurer into the interface.
+//
+// Explicit for the reason routerOrNil and proberOrNil are: a nil *resolved.Resolvectl
+// assigned straight to an interface is a non-nil interface holding a nil pointer, so the
+// reconciler's own nil check would pass and every reconcile would call a method on nothing.
+//
+// Once, and lazily: it asks systemd-resolved for its status, which is a process spawn, and
+// doing that per membership per reconcile would be a spawn a minute for nothing.
+func (a *agent) systemResolverOrNil() tunnel.SystemResolver {
+	a.systemResolverOnce.Do(func() {
+		a.systemResolver = resolved.New(a.ctx)
+		if a.systemResolver == nil {
+			a.log.Warn("this machine's resolver cannot be configured by meshp",
+				"note", "names answer to a direct query and nowhere else",
+				"hint", "meshp status reports the resolver address; addresses always work")
+		}
+	})
+	if a.systemResolver == nil {
+		return nil
+	}
+	return a.systemResolver
 }
 
 // routerOrNil converts a possibly-absent router into the interface.
@@ -305,6 +346,7 @@ func relayStatus(l *relaylink.Link) *agentapi.RelayStatus {
 }
 
 func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileEvery time.Duration) *agent {
+	zones := dns.NewZones()
 	return &agent{
 		log:            log,
 		stateDir:       stateDir,
@@ -312,6 +354,8 @@ func newAgent(ctx context.Context, log *slog.Logger, stateDir string, reconcileE
 		reconcileEvery: reconcileEvery,
 		running:        make(map[uuid.UUID]*sessionHandle),
 		claims:         tunnel.NewClaims(),
+		zones:          zones,
+		resolver:       dns.NewServer(zones, log),
 		ctx:            ctx,
 	}
 }
@@ -529,6 +573,13 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 		Version:   version.Version(),
 		StartedAt: a.startedAt,
 		Enrolled:  a.state != nil,
+	}
+	// Before the enrolment check, because a resolver that is up on a device with no
+	// memberships is still a fact worth reporting — and its absence on a device that has
+	// them is the thing somebody will be looking for.
+	if addr := a.resolver.Addr(); addr.IsValid() {
+		status.Resolver = addr.String()
+		status.ResolverSuffixes = a.zones.Suffixes()
 	}
 	if a.state == nil {
 		return status, nil

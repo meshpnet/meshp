@@ -501,6 +501,32 @@ reaches_beyond() {
   ip netns exec "$CLIENT_NS" ping -c 1 -W 2 "$BEYOND" >/dev/null 2>&1
 }
 
+lock_installed() {
+  ip netns exec "$CLIENT_NS" nft list table inet meshp_lock >/dev/null 2>&1
+}
+
+# What to look at when an assertion about the lock fails.
+#
+# The ruleset says whether the lock is installed and what it is permitting; the claim and
+# release lines say whether it has been going up and down; the applied versions say why it
+# would have. Dumped in full rather than summarised, because this exists for a failure that
+# did not reproduce on a re-run of the same commit, and the next one has to be readable
+# without a third run to ask a further question.
+dump_egress_state() {
+  echo "--- client nftables ruleset ---" >&2
+  ip netns exec "$CLIENT_NS" nft list ruleset >&2 || true
+  echo "--- client ip rules ---" >&2
+  ip netns exec "$CLIENT_NS" ip rule show >&2 || true
+  echo "--- client agent: state versions and egress claims ---" >&2
+  grep -a \
+    -e "applied desired state" \
+    -e "refusing a delta" \
+    -e "could not apply desired state" \
+    -e "sends everything through the tunnel" \
+    -e "no longer sending everything through the tunnel" \
+    "$WORK/${CLIENT_NS}.log" | tail -40 >&2 || true
+}
+
 # Without this the rest proves nothing: an address that was never reachable is blocked by
 # the topology rather than by anything meshp did.
 reaches_beyond || fail "the client cannot reach ${BEYOND} before any claim; nothing to prove"
@@ -515,7 +541,7 @@ api -X POST -d "{\"membership_id\":\"${ADV2_MEMBERSHIP}\",\"priority\":1}" \
 
 locked=0
 for _ in $(seq 1 30); do
-  if ip netns exec "$CLIENT_NS" nft list table inet meshp_lock >/dev/null 2>&1; then locked=1; break; fi
+  if lock_installed; then locked=1; break; fi
   sleep 1
 done
 if [ "$locked" != "1" ]; then
@@ -525,10 +551,64 @@ if [ "$locked" != "1" ]; then
 fi
 echo "  the client claimed a default route and locked itself closed"
 
-if reaches_beyond; then
-  fail "traffic still left outside the tunnel with the lock on"
+# Refused, and refused *by the lock* — the two observed together, with a deadline rather
+# than in a single shot.
+#
+# A single shot was flaky, and not for the obvious reason. The lock is installed as one
+# nftables transaction (RenderLock), so a table that exists is a table already enforcing;
+# there is no gap between the table appearing above and its rules arriving. The gap is
+# above that. The reconciler re-applies the last desired state it was handed every couple of
+# seconds, and a state that momentarily arrives without the egress group takes the lock
+# straight back off (tunnel.releaseEgress) until the next state puts it back — one ping
+# landing in that window fails a test whose subject is working correctly.
+#
+# That mechanism is read off the code, not yet seen: what the failing run actually logged was
+# `refusing a delta computed against a different version` and an unapplied peer set, which is
+# the agent declining a state rather than the lock being observed coming off. Which is why
+# the failure paths below dump the ruleset and the version history — so the run after this
+# one settles it instead of inferring it again.
+#
+# Retrying on its own would hide the defect this section exists to catch, so the two are
+# told apart by what the lock is doing at the moment a packet moves. Through while the lock
+# is installed is a lock that does not block: the real failure, and it stops here without
+# retrying. Through while the lock is gone is the window above, and it is waited out.
+# Refused while the lock is gone is not success either — something other than meshp is
+# dropping it, which is the same nothing-proved that the reachability check above rules out.
+#
+# The lock is read either side of the packet, and only a packet that crossed a lock which
+# was there both before and after is called a failure. Reading it once after would put this
+# script's own scheduling in the argument: a reinstall landing between the reply and the
+# read would be indistinguishable from a lock that never blocked, and would report the flake
+# it was written to remove as a defect.
+blocked=0
+reopened=0
+for _ in $(seq 1 30); do
+  locked_before=0
+  if lock_installed; then locked_before=1; fi
+
+  if reaches_beyond; then
+    if [ "$locked_before" = "1" ] && lock_installed; then
+      dump_egress_state
+      fail "traffic still left outside the tunnel with the lock on"
+    fi
+    reopened=$(( reopened + 1 ))
+  elif lock_installed; then
+    blocked=1
+    break
+  fi
+  sleep 1
+done
+if [ "$blocked" != "1" ]; then
+  dump_egress_state
+  fail "the lock never refused anything: traffic outside the tunnel was never blocked while the lock was installed"
 fi
 echo "  and traffic outside the tunnel is refused"
+if [ "$reopened" != "0" ]; then
+  # Said out loud rather than absorbed by the retry. The run passed, and it also saw the
+  # thing that makes this assertion flaky, which is worth knowing before it fails again.
+  echo "  (${reopened} earlier attempt(s) got out while no lock was installed;" \
+       "look for 'no longer sending everything through the tunnel' in ${CLIENT_NS}.log)"
+fi
 
 # The claim in the kernel, not merely a lock that exists. Matched on the mark rather than
 # the table number, because that is what identifies the rule as meshp's and it does not
@@ -543,9 +623,14 @@ echo "  with policy routing exempting the tunnel's own traffic"
 echo "killing the agent outright"
 pkill -9 -f "${CLIENT_NS}.sock" || true
 sleep 2
-ip netns exec "$CLIENT_NS" nft list table inet meshp_lock >/dev/null 2>&1 \
-  || fail "the lock died with the agent, so a crash leaks the user's traffic"
+
+# Checked once and not polled, unlike the assertion above: the agent that could have taken
+# the lock off is gone, so there is no longer anything that could put the device in and out
+# of the locked state, and a retry here would only be waiting for a leak to stop.
+lock_installed \
+  || { dump_egress_state; fail "the lock died with the agent, so a crash leaks the user's traffic"; }
 if reaches_beyond; then
+  dump_egress_state
   fail "traffic leaked the moment the agent was killed, which is the whole failure ADR-0011 exists to prevent"
 fi
 echo "  the lock outlived the agent and traffic is still refused"

@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
@@ -81,6 +82,15 @@ func main() {
 	log.Info("meshpd stopped cleanly")
 }
 
+// dnsListenAddr is where the resolver listens.
+//
+// Loopback, because the kill switch permits loopback unconditionally and a resolver anybody
+// on the café Wi-Fi could query would tell them what machines are in your customers'
+// networks. Port zero: the kernel picks, and what it picked is read back and reported,
+// because 53 is almost always already taken by whatever the machine was using before and
+// fighting it would break the host's existing DNS to install ours.
+var dnsListenAddr = netip.MustParseAddrPort("127.0.0.1:0")
+
 func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string, reconcileEvery time.Duration) error {
 	agent := newAgent(ctx, log, stateDir, reconcileEvery)
 
@@ -106,6 +116,24 @@ func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGrou
 	})
 	if err := server.Listen(); err != nil {
 		return err
+	}
+
+	// The resolver, bound before anything else runs and served afterwards.
+	//
+	// Synchronously on purpose. Binding in a goroutine meant everything below this line ran
+	// before the sockets existed, so `meshp status` could truthfully report no resolver on a
+	// device that was about to have one — which is what broke the end-to-end assertion
+	// guarding this feature, on a machine slower than the one it was written on.
+	//
+	// Its failure is not fatal. A port already taken, or a host that will not let this
+	// process bind, costs names and nothing else: the tunnel, the policy and the routes are
+	// all unaffected, and exiting here would take them down over a convenience.
+	if err := agent.resolver.Bind(dnsListenAddr); err != nil {
+		log.Error("no name resolution on this device",
+			"error", err, "addr", dnsListenAddr.String(),
+			"hint", "meshp status reports the resolver; addresses still work")
+	} else {
+		go agent.resolver.Serve(ctx)
 	}
 
 	agent.startAll()
