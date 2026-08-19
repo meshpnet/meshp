@@ -18,9 +18,10 @@ commits, make `make ci` pass, and expect to rebase.
 
 ## Local requirements
 
-- Go as specified in [`go.mod`](go.mod). The build downloads the required
+- Go as pinned in [`.go-version`](.go-version). The build downloads the required
   toolchain automatically; nothing else needs installing for the lint, test,
-  and build targets.
+  and build targets. (`go.mod` names the *language* version, which is older on
+  purpose — following it gets you the wrong compiler.)
 - GNU Make. `make help` lists every target, and the `##` comments are the
   source of truth.
 - PostgreSQL is only needed for the control-plane database targets
