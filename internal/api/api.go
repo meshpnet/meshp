@@ -60,6 +60,11 @@ type Server struct {
 	cfg     Config
 	log     *slog.Logger
 	limit   *limiter
+
+	// presence answers who is connected. Nil when there is no session server, which is
+	// how the read endpoints stay usable in a test that does not stand one up: a device
+	// with no presence reads as disconnected, which is what it is.
+	presence Presence
 }
 
 // New builds a Server. store and svc may not be nil; the caller waits until the
@@ -77,7 +82,7 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 	if cfg.EnrolBurst <= 0 {
 		cfg.EnrolBurst = 20
 	}
-	return &Server{
+	srv := &Server{
 		store:   st,
 		enroll:  svc,
 		session: sess,
@@ -85,6 +90,14 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 		log:     cfg.Log,
 		limit:   newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
 	}
+	// Taken through the interface rather than held as a *Hub, so the thing that replaces
+	// it for multi-replica deployments (ADR-0012) has one place to arrive. A typed nil
+	// would satisfy the interface and panic on use, so the hub is only assigned when there
+	// is one.
+	if sess != nil {
+		srv.presence = sess.Hub()
+	}
+	return srv
 }
 
 // Routes registers the API on a mux.
@@ -112,6 +125,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/networks/{networkID}/acl/versions", s.adminOnly(s.handleListPolicyVersions))
 
 	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
+	mux.Handle("GET /api/v1/networks", s.adminOnly(s.handleListNetworks))
+
+	// The one read endpoint (ADR-0022). Everything else under /api/v1 creates or changes
+	// something; this answers a question about a network, and the commercial layer builds
+	// its cross-tenant roll-up on it, so its shape is not this page's to choose.
+	mux.Handle("GET /api/v1/networks/{networkID}/overview", s.adminOnly(s.handleNetworkOverview))
 
 	// Its own sub-resource rather than a field on a general network update, because this
 	// is the one setting here that can decide whether a laptop leaks. A PUT that names it
