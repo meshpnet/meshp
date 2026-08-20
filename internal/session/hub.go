@@ -272,3 +272,46 @@ func (h *Hub) NetworkCount(networkID uuid.UUID) int {
 	defer h.mu.RUnlock()
 	return len(h.byNetwork[networkID])
 }
+
+// Connected describes one membership that has a live control session.
+//
+// A value rather than a *Session, because the caller is answering a question about an
+// instant and must not be handed something that goes on changing underneath it. It is also
+// what lets this be satisfied by something other than the hub: ADR-0012 puts presence
+// behind an interface with a Redis implementation for the multi-replica case, and a shared
+// implementation cannot return pointers into one process's memory.
+type Connected struct {
+	MembershipID uuid.UUID
+	ConnectedAt  time.Time
+
+	// AppliedVersion is what the agent last said it had applied, which is not what the
+	// database says: an acknowledgement reaches this before it is written, and the two
+	// disagree for as long as that takes.
+	AppliedVersion int64
+}
+
+// NetworkPresence returns the memberships of one network that are connected right now.
+//
+// Sampled under one lock so the slice describes a single instant. A caller that walked the
+// hub itself, or asked once per membership, would assemble a picture in which a device
+// appears connected and disconnected depending on when each question was asked — which is
+// the failure this whole snapshot exists to avoid.
+//
+// An empty result and an unknown network are the same answer on purpose. Whether a network
+// exists is a question for the database, which is the only thing that knows; presence knows
+// only who is talking to this process.
+func (h *Hub) NetworkPresence(networkID uuid.UUID) []Connected {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	inNetwork := h.byNetwork[networkID]
+	out := make([]Connected, 0, len(inNetwork))
+	for _, s := range inNetwork {
+		out = append(out, Connected{
+			MembershipID:   s.MembershipID,
+			ConnectedAt:    s.ConnectedAt,
+			AppliedVersion: s.AppliedVersion(),
+		})
+	}
+	return out
+}

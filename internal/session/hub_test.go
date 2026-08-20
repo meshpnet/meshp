@@ -224,3 +224,44 @@ func TestHubIsConcurrencySafe(t *testing.T) {
 		t.Errorf("Count = %d after every session was removed, want 0", h.Count())
 	}
 }
+
+// Presence answers for one network, not for whoever happens to be connected.
+//
+// The MSP case makes this load-bearing rather than pedantic: one control plane holds forty
+// customers, and a view of one that listed another's devices would be a cross-tenant leak
+// arriving through a monitoring page (ADR-0004).
+func TestNetworkPresenceIsScopedToItsNetwork(t *testing.T) {
+	hub := NewHub()
+	acme, zenith := uuid.New(), uuid.New()
+
+	first := testSession(acme)
+	first.setApplied(12)
+	hub.Add(first)
+	hub.Add(testSession(acme))
+	hub.Add(testSession(zenith))
+
+	got := hub.NetworkPresence(acme)
+	if len(got) != 2 {
+		t.Fatalf("presence for acme has %d entries, want 2", len(got))
+	}
+	for _, c := range got {
+		if c.MembershipID == first.MembershipID && c.AppliedVersion != 12 {
+			t.Errorf("applied version = %d, want the 12 the agent reported", c.AppliedVersion)
+		}
+		if c.ConnectedAt.IsZero() {
+			t.Error("connected_at is zero, so a page cannot say how long a device has been up")
+		}
+	}
+
+	// A network nobody is connected to, and a network that does not exist, are the same
+	// answer here on purpose: presence knows who is talking to this process and nothing
+	// about which networks exist.
+	if got := hub.NetworkPresence(uuid.New()); len(got) != 0 {
+		t.Errorf("an unknown network has %d connected devices, want 0", len(got))
+	}
+
+	hub.Remove(first)
+	if got := hub.NetworkPresence(acme); len(got) != 1 {
+		t.Errorf("after a disconnect acme has %d entries, want 1", len(got))
+	}
+}
