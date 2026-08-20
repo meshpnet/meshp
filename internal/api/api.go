@@ -65,6 +65,9 @@ type Server struct {
 	// how the read endpoints stay usable in a test that does not stand one up: a device
 	// with no presence reads as disconnected, which is what it is.
 	presence Presence
+
+	// ui holds the browser sessions minted from the administrative token (ADR-0022 §5).
+	ui *uiSessions
 }
 
 // New builds a Server. store and svc may not be nil; the caller waits until the
@@ -89,6 +92,7 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 		cfg:     cfg,
 		log:     cfg.Log,
 		limit:   newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
+		ui:      newUISessions(cfg.Clock),
 	}
 	// Taken through the interface rather than held as a *Hub, so the thing that replaces
 	// it for multi-replica deployments (ADR-0012) has one place to arrive. A typed nil
@@ -125,12 +129,19 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/networks/{networkID}/acl/versions", s.adminOnly(s.handleListPolicyVersions))
 
 	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
-	mux.Handle("GET /api/v1/networks", s.adminOnly(s.handleListNetworks))
+	mux.Handle("GET /api/v1/networks", s.readable(s.handleListNetworks))
 
 	// The one read endpoint (ADR-0022). Everything else under /api/v1 creates or changes
 	// something; this answers a question about a network, and the commercial layer builds
 	// its cross-tenant roll-up on it, so its shape is not this page's to choose.
-	mux.Handle("GET /api/v1/networks/{networkID}/overview", s.adminOnly(s.handleNetworkOverview))
+	mux.Handle("GET /api/v1/networks/{networkID}/overview", s.readable(s.handleNetworkOverview))
+
+	// Signing in, which is the only route that takes the administrative token in a body.
+	// Rate limited with the enrolment endpoints: it is the one place a wrong secret can be
+	// guessed at, and while guessing a 32-byte secret is not a real threat, an endpoint
+	// that allocates on success should not be free to hammer.
+	mux.Handle("POST /api/v1/ui/session", s.rateLimited(s.handleUILogin))
+	mux.Handle("DELETE /api/v1/ui/session", http.HandlerFunc(s.handleUILogout))
 
 	// Its own sub-resource rather than a field on a general network update, because this
 	// is the one setting here that can decide whether a laptop leaks. A PUT that names it
