@@ -55,9 +55,27 @@ esac
 # certain to come from the same release. Asking twice for "latest" could straddle a
 # publication and produce a mismatch that looks like tampering.
 if [ "$VERSION" = "latest" ]; then
-  VERSION="$(curl -fsSL "${API_BASE}/releases/latest" \
-    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-  [ -n "$VERSION" ] || die "could not work out the latest version; set MESHP_VERSION"
+  # GitHub excludes pre-releases from this endpoint, so a repository whose only releases
+  # are pre-releases answers 404 here. That is the honest answer to "what is the latest
+  # stable version" and it must not be turned into an install: somebody piping this to sh
+  # is asking for the version offered as ready, and there is not one yet.
+  #
+  # -f makes the 404 a failure rather than a body, which is what separates it from a
+  # release whose JSON could not be parsed.
+  if latest="$(curl -fsSL "${API_BASE}/releases/latest" 2>/dev/null)"; then
+    VERSION="$(printf '%s' "$latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$VERSION" ] || die "could not read a version out of the latest release; set MESHP_VERSION"
+  else
+    # Naming the pre-release rather than only refusing. "Could not work out the latest
+    # version" while a release sits on the releases page is a dead end, and the reader has
+    # no way to know the two facts are compatible.
+    pre="$(curl -fsSL "${API_BASE}/releases?per_page=1" 2>/dev/null \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$pre" ] || die "could not work out the latest version; set MESHP_VERSION"
+    die "there is no stable release yet: the newest is the pre-release ${pre}.
+  Install it deliberately, having read what it is not ready for:
+    MESHP_VERSION=${pre} sh install.sh"
+  fi
 fi
 
 archive="meshp_${VERSION}_${os}_${arch}.tar.gz"
