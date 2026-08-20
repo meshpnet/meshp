@@ -23,8 +23,7 @@ as intended rather than a gap to apologise for (ADR-0002).
 What exists: enrolment end to end, a control channel carrying versioned desired state,
 kernel WireGuard interfaces reconciled against what the control plane asked for
 (ADR-0015), a relay that verifies a capability it cannot mint, and the agent side that
-attaches to it (ADR-0016, ADR-0017). Plus the parts nothing calls yet: IPAM, advertiser
-health and route-group selection.
+attaches to it (ADR-0016, ADR-0017).
 
 Devices can also be revoked: an administrator removes one and every other agent drops
 its key, which is what actually cuts it off — enforcement is at the peers, not at the
@@ -50,7 +49,20 @@ and picks among them itself, so it can move off a broken one during a control-pl
 administrator named, rather than by trusting a WireGuard handshake, which a gateway with a
 dead uplink answers perfectly.
 
-What does not, and matters: direct paths and DNS are unimplemented, and the data plane is
+Names resolve, on Linux. `meshpd` runs a resolver on loopback and answers from the desired
+state it has already applied, so names keep working when the control plane is unreachable,
+the same way the tunnel keeps carrying traffic (ADR-0021). A device is
+`<device>.<network>.internal` by default, and a bare name resolves only when exactly one of
+this device's memberships holds it — when two do it does not resolve, and the error names
+both fully-qualified alternatives rather than picking one.
+
+Networks that collide are held at once. Two customers both using `192.168.1.0/24` is the
+ordinary case for whoever supports both, and one flat routing table cannot hold that prefix
+twice. Each colliding prefix is given a mapped range allocated by the control plane, and the
+name layer resolves to the mapped address (ADR-0020), so a technician reaches both rather
+than reaching whichever membership was written last.
+
+What does not, and matters: direct paths are unimplemented, and the data plane is
 Linux-only — elsewhere a device enrols, holds an address, and reports honestly that it has
 no tunnel and cannot filter. There is no web dashboard and no user accounts: the
 administrative API is one shared token.
