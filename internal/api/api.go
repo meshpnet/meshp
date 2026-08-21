@@ -136,11 +136,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// its cross-tenant roll-up on it, so its shape is not this page's to choose.
 	mux.Handle("GET /api/v1/networks/{networkID}/overview", s.readable(s.handleNetworkOverview))
 
-	// The audit trail, which four subsystems have been writing to and nothing has read
-	// back. Behind the administrative token rather than `readable`: ADR-0022 §5 scopes the
-	// browser's cookie to the endpoints it names, and widening a credential is not
-	// something a new route should do on its own.
-	mux.Handle("GET /api/v1/networks/{networkID}/audit", s.adminOnly(s.handleListAuditEvents))
+	// The audit trail. Readable by the browser as of the amendment to ADR-0022 §5: the
+	// cookie is scoped to reads within one network, and this is one — it carries more than
+	// the overview does, and it carries it about the same network.
+	mux.Handle("GET /api/v1/networks/{networkID}/audit", s.readable(s.handleListAuditEvents))
 
 	// Signing in, which is the only route that takes the administrative token in a body.
 	// Rate limited with the enrolment endpoints: it is the one place a wrong secret can be

@@ -186,3 +186,19 @@ button.primary {
 
 .picker { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .picker label { color: var(--muted); font-size: 13px; }
+
+/* The audit trail. A list rather than a table: the interesting column is the last one, and
+   a table would give equal width to a timestamp nobody reads twice. */
+.events { margin: 0; padding: 0; list-style: none; }
+.event {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+.event:first-child { border-top: none; }
+.event .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.event .who { font-weight: 500; }
+.event .why { color: var(--muted); font-size: 13px; }
