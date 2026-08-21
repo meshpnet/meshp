@@ -14,6 +14,10 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - "scripts/install.sh"
+      # The test itself, which was missing: a change to the only thing that exercises the
+      # install path did not run the install path. The same mistake the header above
+      # describes, one level further in.
+      - "scripts/install-test.sh"
       - "deploy/systemd/**"
       - ".go-version"
       - "Makefile"
