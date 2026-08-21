@@ -76,6 +76,12 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One instant for the whole response: as_of, and whatever the fault rules compare
+	// against. Calling the clock twice would let a device be judged against a moment the
+	// response does not claim to describe.
+	now := s.cfg.Clock.Now().UTC()
+	faultCount := 0
+
 	devices := make([]map[string]any, 0, len(overview.Devices))
 	for _, d := range overview.Devices {
 		device := map[string]any{
@@ -130,6 +136,18 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 		if d.LastError != "" {
 			device["last_error"] = d.LastError
 		}
+
+		// What is wrong with it, decided here rather than by whoever is rendering
+		// (ADR-0023). Always present and always a list, so a consumer never has to tell
+		// absent from empty before it can decide whether to raise an alarm.
+		var live *session.Connected
+		if c, ok := connected[d.MembershipID]; ok {
+			live = &c
+		}
+		faults := deviceFaults(d, live, now)
+		device["faults"] = faults
+		faultCount += len(faults)
+
 		devices = append(devices, device)
 	}
 
@@ -149,6 +167,11 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 				// as healthy would make a group that has never worked look fine.
 				"health":    healthOrUnknown(a.Health),
 				"connected": false,
+				// Whether this candidate could carry anything at all, decided by the same
+				// rule that decides whether the group has a fault. A consumer marking
+				// unusable candidates must not have to derive it a second time and reach a
+				// different answer (ADR-0023 §5).
+				"viable": viableAdvertiser(a),
 			}
 			if _, live := connected[a.MembershipID]; live {
 				advertiser["connected"] = true
@@ -166,7 +189,11 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 		for _, p := range g.Prefixes {
 			prefixes = append(prefixes, p.String())
 		}
+		groupTrouble := groupFaults(g)
+		faultCount += len(groupTrouble)
+
 		group := map[string]any{
+			"faults":         groupTrouble,
 			"id":             g.ID,
 			"slug":           g.Slug,
 			"name":           g.Name,
@@ -184,7 +211,7 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]any{
 		// The instant everything below describes. Rendered by the page, so a poll that
 		// failed makes it visibly stale rather than leaving old numbers looking current.
-		"as_of": s.cfg.Clock.Now().UTC(),
+		"as_of": now,
 		"network": map[string]any{
 			"id":            overview.NetworkID,
 			"slug":          overview.Slug,
@@ -194,6 +221,9 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 		"devices":           devices,
 		"devices_truncated": overview.DevicesTruncated,
 		"route_groups":      groups,
+		// Every fault in the network, counted once. A roll-up drawing forty tiles should
+		// not have to walk forty device lists to put a number on each one (ADR-0023).
+		"fault_count": faultCount,
 		// The server decides how often it is asked, so a deployment under load can slow
 		// its pages down without shipping a new one.
 		"poll_after_seconds": int(overviewPollInterval / time.Second),
