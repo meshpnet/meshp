@@ -280,6 +280,7 @@ cmd/meshpd          device agent (privileged, owns the WireGuard key)
 cmd/meshp-control   control plane
 cmd/meshp-relay     encrypted packet relay
 internal/       implementation, grouped by subsystem
+web/            the page a person looks at — hand-written, no build step
 docs/           guides, invariants, and the decision records
 docs/adr/       why things are the way they are — start here
 deploy/docker/  self-hosting

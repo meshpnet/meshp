@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>meshp</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <span class="wordmark">meshp</span>
+      <span id="freshness" class="freshness"></span>
+      <button id="signout" class="linkish" type="button" hidden>Sign out</button>
+    </header>
+
+    <!-- Everything below is replaced by app.js. What is here is what somebody sees when
+         it has not run: a page that says so, rather than an empty white rectangle that
+         looks like a network with nothing in it. -->
+    <main id="view">
+      <noscript>
+        <div class="panel">
+          <h1>This page needs JavaScript</h1>
+          <p>
+            It polls the control plane and redraws itself, so there is nothing useful to
+            show without it. The same answer is available from the API directly:
+            <code>GET /api/v1/networks/{id}/overview</code>.
+          </p>
+        </div>
+      </noscript>
+      <div class="panel" id="boot">Loading…</div>
+    </main>
+  </body>
+</html>
