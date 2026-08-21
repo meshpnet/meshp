@@ -5,6 +5,14 @@ INSERT INTO devices (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
+-- name: GetDevice :one
+-- One device by id, for the places that hold an id and need a name.
+--
+-- Unscoped like GetDeviceByIdentityKey, and for the same reason: the caller has already
+-- established which network it is acting in, and the id it holds came from a row it read
+-- under that scope. A tenant parameter here would suggest a check this cannot perform.
+SELECT * FROM devices WHERE id = $1;
+
 -- name: GetDeviceByIdentityKey :one
 SELECT * FROM devices
 WHERE identity_public_key = $1;

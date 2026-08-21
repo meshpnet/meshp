@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -92,17 +93,30 @@ func (s *Store) ObserveAdvertiser(ctx context.Context, req ObserveRequest) (heal
 		// candidates without any advertiser's health moving: an agent that finds its first
 		// choice slow and switches has changed the answer to "what is carrying this" while
 		// changing nobody's health state.
-		if req.MembershipID != uuid.Nil && req.RouteGroupID != uuid.Nil {
-			// The row count says whether anything moved, and is deliberately not returned:
-			// the caller already knows, because the agent tells it which candidate it
-			// switched away from and why.
-			if _, err := q.UpsertRouteAssignment(ctx, dbgen.UpsertRouteAssignmentParams{
+		if req.MembershipID != uuid.Nil {
+			version, err := q.UpsertRouteAssignment(ctx, dbgen.UpsertRouteAssignmentParams{
 				MembershipID: req.MembershipID,
-				RouteGroupID: req.RouteGroupID,
+				RouteGroupID: row.RouteGroupID,
 				AdvertiserID: &req.AdvertiserID,
 				Reason:       req.Reason,
-			}); err != nil {
+			})
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				// The same choice as last time, which is most reports. Nothing moved, so
+				// there is nothing to audit.
+			case err != nil:
 				return fmt.Errorf("store: recording the route assignment: %w", err)
+			case version > 1:
+				// A device moved between candidates. ADR-0003 completes here: the server
+				// records what the agent chose and emits an audit event, treating it as
+				// something that happened rather than as drift to be corrected.
+				//
+				// Version 1 is deliberately not audited. That is a device recording a
+				// choice for the first time, which happens on every enrolment and
+				// describes nothing going wrong.
+				if err := auditRouteSwitch(ctx, q, req, row.RouteGroupID); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -133,20 +147,38 @@ type ObserveRequest struct {
 	// monitor's job, not this call's.
 	Observed health.Signal
 
-	// MembershipID and RouteGroupID name the device doing the reporting and the group it is
-	// reporting about, so its choice can be written down alongside the health it produced.
+	// MembershipID names the device doing the reporting, so its choice can be written down
+	// alongside the health that choice produced.
 	//
 	// Zero on a caller that has only an advertiser to talk about, which skips the recording
 	// rather than guessing at a membership. Recorded in the same transaction as the health
 	// on purpose: the two come from one message, and split across transactions they could
 	// disagree about which candidate a device is using at the moment somebody looks.
+	//
+	// There is deliberately no route group here. The agent names one in its report, and
+	// taking it would let a device file an advertiser from one group as its choice in
+	// another — nothing ties advertiser_id to route_group_id in the schema, so the pair
+	// would simply be wrong and would stay wrong. The group is read from the advertiser
+	// instead, which is scoped to the session's network and is the only version of the
+	// answer this end can vouch for.
 	MembershipID uuid.UUID
-	RouteGroupID uuid.UUID
 
 	// Reason is the agent's own account of why it chose this candidate, kept verbatim. It
 	// is what answers "why did my outbound IP change?" six weeks later, and rewriting it
 	// here would lose the only description that came from the machine that decided.
 	Reason string
+
+	// DeviceID is who is reporting, recorded as the actor when a move is audited. An
+	// agent's failover is a device's action, not the control plane's — ADR-0003 gives the
+	// choice to the agent — so attributing it to "system" would name the wrong actor for
+	// the one decision here that nobody at the control plane made.
+	DeviceID uuid.UUID
+
+	// SwitchedFrom is the candidate the agent says it moved away from, kept for the audit
+	// record. The agent's claim rather than a lookup: the row it replaced is gone by the
+	// time this is written, and the two would agree anyway except in the case where the
+	// agent's account is the interesting one.
+	SwitchedFrom string
 
 	Clock clock.Clock
 }
@@ -163,4 +195,56 @@ func nilIfZero(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// auditRouteSwitch writes down that a device moved itself between candidates.
+//
+// In the transaction that recorded the move, for the reason revocation gives: a change that
+// committed while its audit record was rolled back is one nobody can account for afterwards.
+//
+// Costs two extra reads, and only ever on a move. Both are lookups this call does not
+// otherwise need — the organisation the event is filed under, and the device's name — and a
+// move is rare enough that paying for them here is cheaper than carrying them through every
+// routine report that changes nothing.
+func auditRouteSwitch(ctx context.Context, q *dbgen.Queries, req ObserveRequest, groupID uuid.UUID) error {
+	network, err := q.GetNetwork(ctx, req.NetworkID)
+	if err != nil {
+		return fmt.Errorf("store: reading the network for a route audit event: %w", err)
+	}
+
+	// The name, so the log reads as "hq-gateway moved" rather than as a pair of UUIDs. An
+	// audit trail nobody can read without three joins is one nobody reads.
+	label := ""
+	if device, err := q.GetDevice(ctx, req.DeviceID); err == nil {
+		label = device.Name
+	}
+
+	metadata, _ := json.Marshal(map[string]any{
+		"advertiser_id":  req.AdvertiserID.String(),
+		"switched_from":  req.SwitchedFrom,
+		"reason":         req.Reason,
+		"membership_id":  req.MembershipID.String(),
+		"route_group_id": groupID.String(),
+	})
+
+	networkID := req.NetworkID
+	actorID := req.DeviceID
+	orgID := network.OrganizationID
+	if _, err := q.CreateAuditEvent(ctx, dbgen.CreateAuditEventParams{
+		OrganizationID: &orgID,
+		NetworkID:      &networkID,
+		// Not "system". The schema's comment on that value predates ADR-0003, which moved
+		// the choice to the agent: this is a device reporting something it did, and filing
+		// it under the control plane would credit the wrong actor.
+		ActorKind:    "device",
+		ActorID:      &actorID,
+		ActorLabel:   label,
+		Action:       "route.switched",
+		ResourceKind: "route_group",
+		ResourceID:   &groupID,
+		Metadata:     metadata,
+	}); err != nil {
+		return fmt.Errorf("store: writing the route switch audit event: %w", err)
+	}
+	return nil
 }

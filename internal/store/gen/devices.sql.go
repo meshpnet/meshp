@@ -255,6 +255,38 @@ func (q *Queries) CreateWireGuardKey(ctx context.Context, arg CreateWireGuardKey
 	return i, err
 }
 
+const getDevice = `-- name: GetDevice :one
+SELECT id, organization_id, user_id, name, hostname, os, os_version, agent_version, identity_public_key, capabilities, created_at, updated_at, last_seen_at, revoked_at, revoked_reason FROM devices WHERE id = $1
+`
+
+// One device by id, for the places that hold an id and need a name.
+//
+// Unscoped like GetDeviceByIdentityKey, and for the same reason: the caller has already
+// established which network it is acting in, and the id it holds came from a row it read
+// under that scope. A tenant parameter here would suggest a check this cannot perform.
+func (q *Queries) GetDevice(ctx context.Context, id uuid.UUID) (Device, error) {
+	row := q.db.QueryRow(ctx, getDevice, id)
+	var i Device
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.UserID,
+		&i.Name,
+		&i.Hostname,
+		&i.Os,
+		&i.OsVersion,
+		&i.AgentVersion,
+		&i.IdentityPublicKey,
+		&i.Capabilities,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastSeenAt,
+		&i.RevokedAt,
+		&i.RevokedReason,
+	)
+	return i, err
+}
+
 const getDeviceByIdentityKey = `-- name: GetDeviceByIdentityKey :one
 SELECT id, organization_id, user_id, name, hostname, os, os_version, agent_version, identity_public_key, capabilities, created_at, updated_at, last_seen_at, revoked_at, revoked_reason FROM devices
 WHERE identity_public_key = $1

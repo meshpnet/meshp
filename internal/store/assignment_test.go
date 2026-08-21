@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/health"
+	dbgen "github.com/meshpnet/meshp/internal/store/gen"
 )
 
 // assignmentFor reads back what the control plane recorded about one device's choice.
@@ -41,9 +43,9 @@ func TestAnAgentsChoiceIsRecorded(t *testing.T) {
 
 	if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
 		NetworkID: s.netID, AdvertiserID: advertiserID,
-		MembershipID: membershipID, RouteGroupID: group.ID,
-		Reason:   "first choice, reachable",
-		Observed: health.SignalOK, Clock: clk,
+		MembershipID: membershipID,
+		Reason:       "first choice, reachable",
+		Observed:     health.SignalOK, Clock: clk,
 	}); err != nil {
 		t.Fatalf("ObserveAdvertiser: %v", err)
 	}
@@ -80,9 +82,9 @@ func TestRepeatingTheSameChoiceWritesNothing(t *testing.T) {
 		clk.Advance(time.Minute)
 		if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
 			NetworkID: s.netID, AdvertiserID: advertiserID,
-			MembershipID: membershipID, RouteGroupID: group.ID,
-			Reason:   "still fine",
-			Observed: health.SignalOK, Clock: clk,
+			MembershipID: membershipID,
+			Reason:       "still fine",
+			Observed:     health.SignalOK, Clock: clk,
 		}); err != nil {
 			t.Fatalf("ObserveAdvertiser: %v", err)
 		}
@@ -120,9 +122,9 @@ func TestMovingBetweenCandidatesUpdatesTheRecord(t *testing.T) {
 		clk.Advance(time.Minute)
 		if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
 			NetworkID: s.netID, AdvertiserID: step.advertiser,
-			MembershipID: membershipID, RouteGroupID: group.ID,
-			Reason:   step.reason,
-			Observed: health.SignalOK, Clock: clk,
+			MembershipID: membershipID,
+			Reason:       step.reason,
+			Observed:     health.SignalOK, Clock: clk,
 		}); err != nil {
 			t.Fatalf("ObserveAdvertiser: %v", err)
 		}
@@ -142,7 +144,7 @@ func TestMovingBetweenCandidatesUpdatesTheRecord(t *testing.T) {
 
 // A caller with only an advertiser to talk about records health and nothing else, rather
 // than inventing a membership to attach a choice to.
-func TestAReportWithNoGroupRecordsNoChoice(t *testing.T) {
+func TestAReportWithNoMembershipRecordsNoChoice(t *testing.T) {
 	s, addDevice := seedNetwork(t)
 	ctx := testContext(t)
 	membershipID := addDevice()
@@ -166,7 +168,7 @@ func TestTheOverviewCountsWhoIsUsingEachCandidate(t *testing.T) {
 	s, addDevice := seedNetwork(t)
 	ctx := testContext(t)
 	membershipID := addDevice()
-	group := subnetGroup(t, s, "branch")
+	subnetGroup(t, s, "branch")
 	advertiserID := advertiserFor(t, s, "branch", membershipID)
 
 	before, err := s.NetworkOverview(ctx, s.netID, DefaultOverviewDevices)
@@ -179,8 +181,8 @@ func TestTheOverviewCountsWhoIsUsingEachCandidate(t *testing.T) {
 
 	if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
 		NetworkID: s.netID, AdvertiserID: advertiserID,
-		MembershipID: membershipID, RouteGroupID: group.ID,
-		Observed: health.SignalOK, Clock: clock.NewFake(),
+		MembershipID: membershipID,
+		Observed:     health.SignalOK, Clock: clock.NewFake(),
 	}); err != nil {
 		t.Fatalf("ObserveAdvertiser: %v", err)
 	}
@@ -203,4 +205,147 @@ func inUseFor(overview NetworkOverview, advertiserID uuid.UUID) int64 {
 		}
 	}
 	return -1
+}
+
+// routeSwitches reads the audit trail for moves in this network.
+func routeSwitches(t *testing.T, s seeded) []dbgen.AuditEvent {
+	t.Helper()
+	netID := s.netID
+	events, err := s.Queries().ListAuditEventsForNetwork(testContext(t), dbgen.ListAuditEventsForNetworkParams{
+		NetworkID: &netID, Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []dbgen.AuditEvent
+	for _, e := range events {
+		if e.Action == "route.switched" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// The other half of ADR-0003's sentence: the server records what the agent chose *and emits
+// an audit event*. Only the recording existed; a device could move itself between
+// candidates and the only trace was a log line that rotates away.
+func TestAMoveIsAudited(t *testing.T) {
+	s, addDevice := seedNetwork(t)
+	ctx := testContext(t)
+	clk := clock.NewFake()
+	membershipID := addDevice()
+	otherID := addDevice()
+	subnetGroup(t, s, "branch")
+	first := advertiserFor(t, s, "branch", membershipID)
+	second := advertiserFor(t, s, "branch", otherID)
+
+	deviceID := deviceFor(t, s, membershipID)
+	for _, step := range []struct {
+		advertiser uuid.UUID
+		from       string
+		reason     string
+	}{
+		{first, "", "first choice, reachable"},
+		{second, first.String(), "first choice stopped answering"},
+	} {
+		clk.Advance(time.Minute)
+		if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
+			NetworkID: s.netID, AdvertiserID: step.advertiser,
+			MembershipID: membershipID, DeviceID: deviceID,
+			Reason: step.reason, SwitchedFrom: step.from,
+			Observed: health.SignalOK, Clock: clk,
+		}); err != nil {
+			t.Fatalf("ObserveAdvertiser: %v", err)
+		}
+	}
+
+	events := routeSwitches(t, s)
+	// One, not two. The first report is a device recording a choice, which happens on every
+	// enrolment and describes nothing going wrong.
+	if len(events) != 1 {
+		t.Fatalf("%d route.switched events, want 1 (the move, not the first choice)", len(events))
+	}
+	event := events[0]
+	// A device's action, not the control plane's. ADR-0003 gives the choice to the agent.
+	if event.ActorKind != "device" {
+		t.Errorf("actor_kind = %q, want device", event.ActorKind)
+	}
+	if event.ActorID == nil || *event.ActorID != deviceID {
+		t.Errorf("actor_id = %v, want the device that moved (%s)", event.ActorID, deviceID)
+	}
+	if event.ActorLabel == "" {
+		t.Error("actor_label is empty; an audit line of bare UUIDs is one nobody reads")
+	}
+	// The agent's own words, which is what somebody is reading this to find.
+	for _, want := range []string{"first choice stopped answering", first.String(), second.String()} {
+		if !strings.Contains(string(event.Metadata), want) {
+			t.Errorf("metadata does not mention %q: %s", want, event.Metadata)
+		}
+	}
+}
+
+// Repeating a choice is not an event. Reports arrive on every heartbeat, and an audit trail
+// that recorded each one would bury the moves it exists to show.
+func TestRepeatingAChoiceIsNotAudited(t *testing.T) {
+	s, addDevice := seedNetwork(t)
+	ctx := testContext(t)
+	clk := clock.NewFake()
+	membershipID := addDevice()
+	subnetGroup(t, s, "branch")
+	advertiserID := advertiserFor(t, s, "branch", membershipID)
+	deviceID := deviceFor(t, s, membershipID)
+
+	for range 5 {
+		clk.Advance(time.Minute)
+		if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
+			NetworkID: s.netID, AdvertiserID: advertiserID,
+			MembershipID: membershipID, DeviceID: deviceID,
+			Observed: health.SignalOK, Clock: clk,
+		}); err != nil {
+			t.Fatalf("ObserveAdvertiser: %v", err)
+		}
+	}
+
+	if events := routeSwitches(t, s); len(events) != 0 {
+		t.Errorf("%d route.switched events after five identical reports, want 0", len(events))
+	}
+}
+
+// The assignment is filed under the advertiser's own group, which is the only end that can
+// tie the two together: nothing in the schema constrains advertiser_id to route_group_id, so
+// a group taken from the agent's message could file a candidate from one group as a device's
+// choice in another, and it would stay wrong.
+func TestTheAssignmentIsFiledUnderTheAdvertisersGroup(t *testing.T) {
+	s, addDevice := seedNetwork(t)
+	ctx := testContext(t)
+	membershipID := addDevice()
+	branch := subnetGroup(t, s, "branch")
+	other := subnetGroup(t, s, "other")
+	advertiserID := advertiserFor(t, s, "branch", membershipID)
+
+	if _, err := s.ObserveAdvertiser(ctx, ObserveRequest{
+		NetworkID: s.netID, AdvertiserID: advertiserID,
+		MembershipID: membershipID, DeviceID: deviceFor(t, s, membershipID),
+		Observed: health.SignalOK, Clock: clock.NewFake(),
+	}); err != nil {
+		t.Fatalf("ObserveAdvertiser: %v", err)
+	}
+
+	if _, _, _, ok := assignmentFor(t, s, membershipID, branch.ID); !ok {
+		t.Error("nothing was filed under the group the advertiser actually belongs to")
+	}
+	if _, _, _, ok := assignmentFor(t, s, membershipID, other.ID); ok {
+		t.Error("something was filed under a group this advertiser is not in")
+	}
+}
+
+// deviceFor is the device behind a membership.
+func deviceFor(t *testing.T, s seeded, membershipID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := s.pool.QueryRow(testContext(t),
+		`SELECT device_id FROM device_network_memberships WHERE id = $1`, membershipID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

@@ -735,7 +735,7 @@ func (q *Queries) UpsertRouteAdvertiser(ctx context.Context, arg UpsertRouteAdve
 	return i, err
 }
 
-const upsertRouteAssignment = `-- name: UpsertRouteAssignment :execrows
+const upsertRouteAssignment = `-- name: UpsertRouteAssignment :one
 INSERT INTO route_assignments (
     membership_id, route_group_id, advertiser_id, reason, decided_locally
 ) VALUES ($1, $2, $3, $4, true)
@@ -746,6 +746,7 @@ SET advertiser_id   = EXCLUDED.advertiser_id,
     version         = route_assignments.version + 1,
     assigned_at     = now()
 WHERE route_assignments.advertiser_id IS DISTINCT FROM EXCLUDED.advertiser_id
+RETURNING version
 `
 
 type UpsertRouteAssignmentParams struct {
@@ -772,16 +773,20 @@ type UpsertRouteAssignmentParams struct {
 // on every heartbeat, and an UPDATE that ran each time would write a row per device per
 // group every twenty-five seconds — the write rate ADR-0012 exists to keep away from the
 // tables holding desired state. Unchanged reports now cost a conflict check and nothing
-// else, and the row count tells the caller whether anything actually moved.
+// else, and no row comes back at all when nothing moved.
+//
+// The version is returned because it says which kind of change this was without a second
+// query: 1 is a device recording a choice for the first time, and anything higher is a
+// device that moved. Only the second is worth an audit event — the first happens on every
+// enrolment and describes nothing going wrong.
 func (q *Queries) UpsertRouteAssignment(ctx context.Context, arg UpsertRouteAssignmentParams) (int64, error) {
-	result, err := q.db.Exec(ctx, upsertRouteAssignment,
+	row := q.db.QueryRow(ctx, upsertRouteAssignment,
 		arg.MembershipID,
 		arg.RouteGroupID,
 		arg.AdvertiserID,
 		arg.Reason,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	var version int64
+	err := row.Scan(&version)
+	return version, err
 }
