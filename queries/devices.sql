@@ -78,6 +78,22 @@ WHERE network_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT $2;
 
+-- name: PageAuditEventsForNetwork :many
+-- One page of a network's audit trail, newest first.
+--
+-- Keyed on the id rather than on a timestamp. created_at has no uniqueness and two events
+-- written in the same transaction share it exactly, so a timestamp cursor would either
+-- repeat them on the next page or skip them — and this is the one table where a reader
+-- silently missing a row defeats the purpose of having it.
+--
+-- The id is a bigserial, so ordering by it descending is the same order as by time for
+-- everything a caller can observe. A cursor of zero starts at the newest.
+SELECT * FROM audit_events
+WHERE network_id = $1
+  AND (sqlc.arg(before)::bigint = 0 OR id < sqlc.arg(before)::bigint)
+ORDER BY id DESC
+LIMIT sqlc.arg(page_size);
+
 -- name: RevokeMembership :one
 -- Take a device out of a network, and say which key stopped being a peer.
 --

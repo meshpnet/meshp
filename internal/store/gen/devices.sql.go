@@ -493,6 +493,62 @@ func (q *Queries) ListMembershipsForNetwork(ctx context.Context, networkID uuid.
 	return items, nil
 }
 
+const pageAuditEventsForNetwork = `-- name: PageAuditEventsForNetwork :many
+SELECT id, organization_id, network_id, actor_kind, actor_id, actor_label, action, resource_kind, resource_id, source_ip, metadata, created_at FROM audit_events
+WHERE network_id = $1
+  AND ($2::bigint = 0 OR id < $2::bigint)
+ORDER BY id DESC
+LIMIT $3
+`
+
+type PageAuditEventsForNetworkParams struct {
+	NetworkID *uuid.UUID
+	Before    int64
+	PageSize  int32
+}
+
+// One page of a network's audit trail, newest first.
+//
+// Keyed on the id rather than on a timestamp. created_at has no uniqueness and two events
+// written in the same transaction share it exactly, so a timestamp cursor would either
+// repeat them on the next page or skip them — and this is the one table where a reader
+// silently missing a row defeats the purpose of having it.
+//
+// The id is a bigserial, so ordering by it descending is the same order as by time for
+// everything a caller can observe. A cursor of zero starts at the newest.
+func (q *Queries) PageAuditEventsForNetwork(ctx context.Context, arg PageAuditEventsForNetworkParams) ([]AuditEvent, error) {
+	rows, err := q.db.Query(ctx, pageAuditEventsForNetwork, arg.NetworkID, arg.Before, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.NetworkID,
+			&i.ActorKind,
+			&i.ActorID,
+			&i.ActorLabel,
+			&i.Action,
+			&i.ResourceKind,
+			&i.ResourceID,
+			&i.SourceIp,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const revokeMembership = `-- name: RevokeMembership :one
 UPDATE device_network_memberships m
 SET state = 'revoked', revoked_at = now()
