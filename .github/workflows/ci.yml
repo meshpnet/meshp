@@ -45,6 +45,19 @@ jobs:
       - name: go.mod is tidy
         run: make tidy-check
 
+      # The protos have had this check since the beginning; the database bindings never
+      # did, and were found stale — a query's comments had been edited without
+      # regenerating, so the committed Go described an older version of its own SQL.
+      # ADR-0013 commits generated code so nobody needs the toolchain to build; that only
+      # holds while what is committed is what the generator produces.
+      - name: committed database code matches the queries
+        run: |
+          make sqlc
+          if ! git diff --exit-code -- internal/store/gen/; then
+            echo "internal/store/gen is not what sqlc generates from queries/; run 'make sqlc' and commit the result"
+            exit 1
+          fi
+
   test:
     name: test and coverage
     runs-on: ubuntu-latest

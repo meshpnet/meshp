@@ -84,6 +84,28 @@ func (s *Store) ObserveAdvertiser(ctx context.Context, req ObserveRequest) (heal
 			return fmt.Errorf("store: storing advertiser health: %w", err)
 		}
 
+		// What this device says it is using, which nothing recorded until now. ADR-0003
+		// splits authority — the server owns authorisation and order, the agent owns
+		// liveness — and says the server records what the agent chose. This is that half.
+		//
+		// Written whether or not health changed, because a device can move between
+		// candidates without any advertiser's health moving: an agent that finds its first
+		// choice slow and switches has changed the answer to "what is carrying this" while
+		// changing nobody's health state.
+		if req.MembershipID != uuid.Nil && req.RouteGroupID != uuid.Nil {
+			// The row count says whether anything moved, and is deliberately not returned:
+			// the caller already knows, because the agent tells it which candidate it
+			// switched away from and why.
+			if _, err := q.UpsertRouteAssignment(ctx, dbgen.UpsertRouteAssignmentParams{
+				MembershipID: req.MembershipID,
+				RouteGroupID: req.RouteGroupID,
+				AdvertiserID: &req.AdvertiserID,
+				Reason:       req.Reason,
+			}); err != nil {
+				return fmt.Errorf("store: recording the route assignment: %w", err)
+			}
+		}
+
 		if !out.Changed {
 			return nil
 		}
@@ -110,6 +132,21 @@ type ObserveRequest struct {
 	// devices — so one laptop's broken Wi-Fi is not mistaken for a broken exit — is the
 	// monitor's job, not this call's.
 	Observed health.Signal
+
+	// MembershipID and RouteGroupID name the device doing the reporting and the group it is
+	// reporting about, so its choice can be written down alongside the health it produced.
+	//
+	// Zero on a caller that has only an advertiser to talk about, which skips the recording
+	// rather than guessing at a membership. Recorded in the same transaction as the health
+	// on purpose: the two come from one message, and split across transactions they could
+	// disagree about which candidate a device is using at the moment somebody looks.
+	MembershipID uuid.UUID
+	RouteGroupID uuid.UUID
+
+	// Reason is the agent's own account of why it chose this candidate, kept verbatim. It
+	// is what answers "why did my outbound IP change?" six weeks later, and rewriting it
+	// here would lose the only description that came from the machine that decided.
+	Reason string
 
 	Clock clock.Clock
 }

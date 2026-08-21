@@ -49,6 +49,10 @@ type OverviewDevice struct {
 
 // OverviewAdvertiser is one device offering to carry a route group's prefixes.
 type OverviewAdvertiser struct {
+	// ID is the advertiser row, which is what an assignment names. Not the membership: one
+	// device can advertise for several groups, so the two are not interchangeable here.
+	ID uuid.UUID
+
 	MembershipID uuid.UUID
 	DeviceName   string
 	Priority     int32
@@ -56,6 +60,17 @@ type OverviewAdvertiser struct {
 	AdminState   string
 	Region       string
 	City         string
+
+	// InUseBy is how many devices currently report routing through this candidate.
+	//
+	// An observation, not an instruction. ADR-0003 gives the agent the choice, so this is
+	// the count of agents that have said what they chose — which is the closest thing to
+	// "which candidate is carrying this" that exists, and it did not exist at all until
+	// something started recording what devices report.
+	//
+	// Zero is not "not carrying". A device that has never sent a reachability report has
+	// nothing recorded, and a group whose devices are all quiet reads as zero everywhere.
+	InUseBy int64
 
 	// Health is what the control plane has been told about this advertiser, and is empty
 	// when it has been told nothing. Empty is not healthy: an advertiser nobody has
@@ -181,9 +196,26 @@ func (s *Store) NetworkOverview(ctx context.Context, networkID uuid.UUID, device
 		if err != nil {
 			return fmt.Errorf("store: listing route advertisers: %w", err)
 		}
+		// How many devices say they are using each candidate. Read in the same transaction
+		// as everything else, so the counts describe the same instant as the health beside
+		// them — a candidate shown as unhealthy and carrying forty devices is a real state,
+		// and one assembled from two instants would not be.
+		assignmentRows, err := q.CountRouteAssignments(ctx, ids)
+		if err != nil {
+			return fmt.Errorf("store: counting route assignments: %w", err)
+		}
+		inUse := make(map[uuid.UUID]int64, len(assignmentRows))
+		for _, row := range assignmentRows {
+			if row.AdvertiserID != nil {
+				inUse[*row.AdvertiserID] = row.Devices
+			}
+		}
+
 		advertisers := make(map[uuid.UUID][]OverviewAdvertiser, len(groups))
 		for _, a := range advertiserRows {
 			entry := OverviewAdvertiser{
+				ID:           a.ID,
+				InUseBy:      inUse[a.ID],
 				MembershipID: a.MembershipID,
 				DeviceName:   a.DeviceName,
 				Priority:     a.Priority,

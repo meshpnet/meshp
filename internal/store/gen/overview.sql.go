@@ -51,12 +51,14 @@ type ListAllNetworksRow struct {
 // transaction. Everything here is deliberately shaped for a consumer that is not this
 // repository's web page: the commercial layer builds its cross-tenant roll-up on the same
 // endpoint (ADR-0009), so these cannot be reshaped to suit whatever one screen needs.
-// Every network this control plane holds, so a view can offer a choice.
+// scope: global the only credential that reaches this is the administrative token, which is
+// a single shared secret granting every route already (ADR-0022 §5), so a tenant parameter
+// here would suggest a constraint that does not exist. The day roles arrive, this is the
+// first query that has to grow a caller, and that is a change to this line as much as to
+// the SQL.
 //
-// Unscoped, because the credential that reaches it is unscoped. That is only defensible
-// while the administrative token is a single shared secret granting everything; the day
-// roles arrive this is the first query that needs a caller, and it is written here in one
-// place so it is found rather than missed.
+// Every network this control plane holds, so a view can offer a choice rather than
+// requiring somebody to paste a UUID.
 func (q *Queries) ListAllNetworks(ctx context.Context) ([]ListAllNetworksRow, error) {
 	rows, err := q.db.Query(ctx, listAllNetworks)
 	if err != nil {

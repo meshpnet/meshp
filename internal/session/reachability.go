@@ -38,10 +38,27 @@ func (s *Server) handleReachabilityReport(ctx context.Context, sess *Session, re
 		observed = health.SignalOK
 	}
 
+	// The group the device is talking about, so its choice can be written down beside the
+	// health that choice produced. An unparseable id records the health and skips the
+	// assignment rather than dropping the report: the two facts are independent, and losing
+	// a health signal because a newer agent sent a group id this build cannot read would be
+	// the wrong half to discard (ADR-0008).
+	groupID, groupErr := uuid.Parse(report.GetRouteGroupId())
+	if groupErr != nil {
+		groupID = uuid.Nil
+	}
+
 	transition, err := s.store.ObserveAdvertiser(ctx, store.ObserveRequest{
 		NetworkID:    sess.NetworkID,
 		AdvertiserID: advertiserID,
 		Observed:     observed,
+		// What this device says it is using, and why. ADR-0003 makes the agent the
+		// authority on liveness and says the server records what it chose; this is the
+		// recording, and it is what lets anything answer "which candidate is carrying
+		// this" — a question nothing could answer before.
+		MembershipID: sess.MembershipID,
+		RouteGroupID: groupID,
+		Reason:       report.GetSwitchReason(),
 		Clock:        s.clk,
 	})
 	if err != nil {
