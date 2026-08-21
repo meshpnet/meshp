@@ -93,88 +93,11 @@ function show(...nodes) {
 }
 
 // --- what counts as broken ------------------------------------------------------------
-
-/**
- * Whether this candidate could carry anything at all.
- *
- * Deliberately not a function of `connected`. That is the control session, and an agent
- * keeps forwarding from the state it last applied when the control plane is unreachable
- * (ADR-0008) — so an advertiser whose session has dropped may well still be carrying, and
- * calling the group broken on that basis would raise an alarm for a control-plane outage
- * rather than a data-plane one. Disconnection is shown; it is not a fault by itself.
- *
- * `unknown` health is not treated as broken either, for the opposite reason: nobody has
- * reported on it yet, which is not the same as knowing it is down. It is called out as
- * unproven where it appears.
- */
-function viable(advertiser) {
-  if (advertiser.admin_state !== "enabled") return false;
-  return advertiser.health !== "unhealthy" && advertiser.health !== "offline";
-}
-
-/** What is wrong with a route group, in words. Empty means nothing is. */
-function groupFaults(group) {
-  const faults = [];
-  if (!group.advertisers.length) {
-    faults.push("nothing is offering to carry this");
-    return faults;
-  }
-  if (!group.advertisers.some(viable)) {
-    faults.push("no candidate can carry this: every advertiser is disabled, draining or unhealthy");
-  }
-  return faults;
-}
-
-/**
- * How long a control session must have been up before a tunnel with no handshakes counts
- * as broken rather than as new.
- *
- * A device reports its data plane the moment it applies state, and at that point there
- * have been no handshakes because there has not been time for any. Without this, every
- * join would flash "has never carried anything" for as long as it took to be wrong.
- */
-const TUNNEL_GRACE_SECONDS = 120;
-
-/** What is wrong with a device, in words. `asOf` is the server's clock, not this one's. */
-function deviceFaults(device, asOf) {
-  const faults = [];
-  if (device.state !== "active") return faults;
-
-  if (device.unapplied_components && device.unapplied_components.length) {
-    faults.push(`could not apply: ${device.unapplied_components.join(", ")}`);
-  }
-  if (device.last_error) {
-    faults.push(device.last_error);
-  }
-  if (!device.connected && !device.last_ack_at) {
-    // Enrolled and never heard from. Easy to miss in a list of names, and it is usually
-    // an installation that did not finish rather than a device that has gone away.
-    faults.push("has never applied any configuration");
-  }
-  // The one thing a path report is allowed to call a fault. A device can apply every
-  // version it is sent and pass no traffic at all, and until it reported its peers nothing
-  // could tell the difference (#117).
-  //
-  // "Never handshaked", not "handshaked a while ago". WireGuard renews a handshake when
-  // traffic flows, so a quiet peer looks stale while being perfectly healthy — but a peer
-  // that has never completed one has never carried a packet, and that is unambiguous.
-  if (device.tunnel && device.tunnel.peers > 0 && device.tunnel.handshaked === 0 && settled(device, asOf)) {
-    faults.push("tunnel has never carried anything: no peer has completed a handshake");
-  }
-  return faults;
-}
-
-/**
- * Whether this device has been connected long enough for "no handshakes" to mean anything.
- *
- * Both timestamps come from the server, so this survives a browser whose clock is wrong —
- * which is the machine somebody is reading this on, and the one whose clock nobody checks.
- */
-function settled(device, asOf) {
-  if (!device.connected_since || !asOf) return false;
-  const up = (Date.parse(asOf) - Date.parse(device.connected_since)) / 1000;
-  return Number.isFinite(up) && up > TUNNEL_GRACE_SECONDS;
-}
+//
+// Nothing here decides that. The control plane does, and sends `faults` on every device and
+// every route group (ADR-0023): there are two consumers of that endpoint and rules kept
+// here could only ever be a second opinion that drifts from the commercial layer's. Any
+// rule that reappears in this file is a bug.
 
 /** How a device's data plane reads, in words. */
 function tunnelSummary(device) {
@@ -229,7 +152,7 @@ function renderVerdict(data, faultCount) {
 }
 
 function renderGroup(group) {
-  const faults = groupFaults(group);
+  const faults = group.faults || [];
 
   const carriers = group.advertisers.map((advertiser) => {
     const health = advertiser.health || "unknown";
@@ -244,7 +167,7 @@ function renderGroup(group) {
 
     return el(
       "li",
-      { class: `carrier ${viable(advertiser) ? "" : "not-viable"}` },
+      { class: `carrier ${advertiser.viable ? "" : "not-viable"}` },
       dot(HEALTH_CLASS[health] || "unknown", health),
       el("span", { class: "who" }, advertiser.device_name),
       el("span", { class: "why" }, bits.join(" · ")),
@@ -272,7 +195,7 @@ function renderGroup(group) {
       el(
         "div",
         {},
-        faults.length ? el("div", { class: "nobody" }, faults.join("; ")) : null,
+        faults.length ? el("div", { class: "nobody" }, faults.map((f) => f.message).join("; ")) : null,
         carriers.length
           ? el("ul", { class: "carriers" }, carriers)
           : el("div", { class: "note" }, "no advertisers"),
@@ -281,9 +204,9 @@ function renderGroup(group) {
   );
 }
 
-function renderDevices(devices, asOf) {
+function renderDevices(devices) {
   const rows = devices.map((device) => {
-    const faults = deviceFaults(device, asOf);
+    const faults = device.faults || [];
     const addresses = [device.address_v4, device.address_v6].filter(Boolean);
 
     let stateLabel;
@@ -326,7 +249,7 @@ function renderDevices(devices, asOf) {
           ? el(
               "ul",
               { class: "faults" },
-              faults.map((fault) => el("li", {}, fault)),
+              faults.map((fault) => el("li", {}, fault.message)),
             )
           : el("span", { class: "note" }, "—"),
       ),
@@ -357,20 +280,18 @@ function renderDevices(devices, asOf) {
 }
 
 function renderOverview(data, networks) {
-  const groupFaultCount = data.route_groups.reduce((n, g) => n + groupFaults(g).length, 0);
-  const deviceFaultCount = data.devices.reduce((n, d) => n + deviceFaults(d, data.as_of).length, 0);
 
   // Devices with something wrong first. A list sorted by name buries the one device the
   // page exists to surface somewhere in the middle of forty that are fine.
   const devices = [...data.devices].sort((a, b) => {
-    const byFault = (deviceFaults(b, data.as_of).length > 0) - (deviceFaults(a, data.as_of).length > 0);
+    const byFault = ((b.faults || []).length > 0) - ((a.faults || []).length > 0);
     if (byFault) return byFault;
     return a.device_name.localeCompare(b.device_name);
   });
 
   show(
     renderNetworkBar(data, networks),
-    renderVerdict(data, groupFaultCount + deviceFaultCount),
+    renderVerdict(data, data.fault_count || 0),
     el("h2", {}, "What is carried, and by what"),
     data.route_groups.length
       ? el("div", {}, data.route_groups.map(renderGroup))
@@ -379,7 +300,7 @@ function renderOverview(data, networks) {
     el(
       "div",
       { class: "panel" },
-      renderDevices(devices, data.as_of),
+      renderDevices(devices),
       data.devices_truncated
         ? el(
             "p",

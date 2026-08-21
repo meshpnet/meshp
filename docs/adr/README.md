@@ -31,6 +31,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0020](0020-colliding-prefixes-are-mapped-on-the-device.md) | Colliding prefixes are mapped, by the control plane that can see them |
 | [0021](0021-names-resolve-on-the-device.md) | Names resolve on the device, from desired state |
 | [0022](0022-web-view-in-the-control-plane.md) | The web view ships inside the control plane and polls one snapshot |
+| [0023](0023-the-overview-says-what-is-wrong.md) | The overview says what is wrong, not only what is true |
 
 ## Format
 
