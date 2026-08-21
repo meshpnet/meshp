@@ -172,6 +172,10 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 				// unusable candidates must not have to derive it a second time and reach a
 				// different answer (ADR-0023 §5).
 				"viable": viableAdvertiser(a),
+				// How many devices report routing through this one. The nearest thing to
+				// "which candidate is carrying" that exists: the agent chooses (ADR-0003),
+				// so this is a count of what agents have said, not a decision anybody made.
+				"in_use_by": a.InUseBy,
 			}
 			if _, live := connected[a.MembershipID]; live {
 				advertiser["connected"] = true

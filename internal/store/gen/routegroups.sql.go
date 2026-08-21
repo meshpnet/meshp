@@ -30,6 +30,55 @@ func (q *Queries) AddRouteGroupPrefix(ctx context.Context, arg AddRouteGroupPref
 	return err
 }
 
+const countRouteAssignments = `-- name: CountRouteAssignments :many
+SELECT
+    r.route_group_id,
+    r.advertiser_id,
+    count(*)::bigint AS devices
+FROM route_assignments r
+JOIN device_network_memberships m ON m.id = r.membership_id
+JOIN devices d ON d.id = m.device_id
+WHERE r.route_group_id = ANY($1::uuid[])
+  AND r.advertiser_id IS NOT NULL
+  -- Revoked devices stop counting. An assignment outlives the membership that made it
+  -- until the cascade catches up, and a candidate shown as carrying for a device that is
+  -- out of the network is worse than no number at all.
+  AND m.state = 'active'
+  AND d.revoked_at IS NULL
+GROUP BY r.route_group_id, r.advertiser_id
+`
+
+type CountRouteAssignmentsRow struct {
+	RouteGroupID uuid.UUID
+	AdvertiserID *uuid.UUID
+	Devices      int64
+}
+
+// How many devices report currently using each candidate, per group.
+//
+// Counts rather than rows. A subnet group in a fifty-device network has fifty assignments
+// and one useful fact — which candidate is carrying — so returning the rows would make the
+// overview grow with the network to say the same thing.
+func (q *Queries) CountRouteAssignments(ctx context.Context, dollar_1 []uuid.UUID) ([]CountRouteAssignmentsRow, error) {
+	rows, err := q.db.Query(ctx, countRouteAssignments, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountRouteAssignmentsRow
+	for rows.Next() {
+		var i CountRouteAssignmentsRow
+		if err := rows.Scan(&i.RouteGroupID, &i.AdvertiserID, &i.Devices); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createAddressPool = `-- name: CreateAddressPool :one
 INSERT INTO address_pools (network_id, prefix, family, purpose)
 VALUES ($1, $2, $3, $4)
@@ -684,4 +733,55 @@ func (q *Queries) UpsertRouteAdvertiser(ctx context.Context, arg UpsertRouteAdve
 		&i.Provider,
 	)
 	return i, err
+}
+
+const upsertRouteAssignment = `-- name: UpsertRouteAssignment :execrows
+INSERT INTO route_assignments (
+    membership_id, route_group_id, advertiser_id, reason, decided_locally
+) VALUES ($1, $2, $3, $4, true)
+ON CONFLICT (membership_id, route_group_id) DO UPDATE
+SET advertiser_id   = EXCLUDED.advertiser_id,
+    reason          = EXCLUDED.reason,
+    decided_locally = true,
+    version         = route_assignments.version + 1,
+    assigned_at     = now()
+WHERE route_assignments.advertiser_id IS DISTINCT FROM EXCLUDED.advertiser_id
+`
+
+type UpsertRouteAssignmentParams struct {
+	MembershipID uuid.UUID
+	RouteGroupID uuid.UUID
+	AdvertiserID *uuid.UUID
+	Reason       string
+}
+
+// Record which candidate a device says it is currently using.
+//
+// An observation, never an instruction. ADR-0003 gives the server authorisation and order
+// and the agent the choice, so this is the control plane writing down what it was told —
+// which is the half of that ADR ("the server records it") that was never built. It is what
+// answers "why did my outbound IP change?", and it is where the page finds which advertiser
+// is actually carrying, a question nothing could answer before.
+//
+// decided_locally is always true. The column was written when the control plane was
+// expected to decide sometimes; ADR-0003 settled that it never does, so the flag records a
+// design that no longer exists. Kept rather than dropped because a migration to remove one
+// boolean is not worth the churn, and set honestly rather than left at its default.
+//
+// The WHERE on the conflict is load-bearing. Reachability reports arrive from every device
+// on every heartbeat, and an UPDATE that ran each time would write a row per device per
+// group every twenty-five seconds — the write rate ADR-0012 exists to keep away from the
+// tables holding desired state. Unchanged reports now cost a conflict check and nothing
+// else, and the row count tells the caller whether anything actually moved.
+func (q *Queries) UpsertRouteAssignment(ctx context.Context, arg UpsertRouteAssignmentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertRouteAssignment,
+		arg.MembershipID,
+		arg.RouteGroupID,
+		arg.AdvertiserID,
+		arg.Reason,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

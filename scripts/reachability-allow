@@ -35,12 +35,6 @@ table:dns_records      — as above
 #
 table:relays           — relays come from MESHP_RELAYS; whether this table should exist at all is an open question
 
-# --- possibly a table that should be dropped rather than read ------------------------------
-#
-# ADR-0003 gives the server the ordered candidate list and the agent the choice, so there may
-# be no single assignment to record. Raised in #121; this entry is a placeholder for that
-# decision, not an answer to it.
-table:route_assignments — ADR-0003 may mean nothing should ever write this; see #121
 
 # --- direct paths -------------------------------------------------------------------------
 #

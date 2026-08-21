@@ -157,6 +157,14 @@ function renderGroup(group) {
   const carriers = group.advertisers.map((advertiser) => {
     const health = advertiser.health || "unknown";
     const bits = [`priority ${advertiser.priority}`];
+    // What devices say they are using, which is as close to "chosen" as anything gets: the
+    // server owns the order and the agent owns the choice (ADR-0003), so this is a count of
+    // reports rather than a decision. Shown only when something is using it — zero means
+    // "nothing has reported", not "not carrying", and a column of zeroes would read as the
+    // second.
+    if (advertiser.in_use_by > 0) {
+      bits.unshift(`carrying ${advertiser.in_use_by} device${advertiser.in_use_by === 1 ? "" : "s"}`);
+    }
     if (advertiser.weight !== 1) bits.push(`weight ${advertiser.weight}`);
     bits.push(health === "unknown" ? "never health checked" : health);
     if (advertiser.admin_state !== "enabled") bits.push(advertiser.admin_state);
