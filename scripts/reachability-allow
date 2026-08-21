@@ -23,14 +23,6 @@ table:role_bindings    — as above
 table:groups           — as above
 table:group_members    — as above
 
-# --- half-built, and named as such ---------------------------------------------------------
-#
-# ADR-0021 §2 decided admin-entered DNS records travel to the agent as desired state, like
-# everything else. The resolver answers from the peer list it already holds; the records half
-# is not built, so nothing reads these.
-table:dns_zones        — ADR-0021 §2 is only half implemented: names resolve from peers, admin records do not travel yet
-table:dns_records      — as above
-
 # --- configuration overtook the table ------------------------------------------------------
 #
 table:relays           — relays come from MESHP_RELAYS; whether this table should exist at all is an open question

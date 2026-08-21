@@ -240,6 +240,32 @@ message DnsConfig {
 
   // Block plaintext DNS outside the tunnel while a default route is claimed.
   bool prevent_leaks = 4;
+
+  // A name an administrator wrote down, as opposed to one derived from a device.
+  //
+  // These cannot be synthesised from the peer list — a name for something that is not a
+  // meshp device at all, or a second name for something that is — so they are desired
+  // state and travel with everything else, versioned and acknowledged like peers and
+  // route groups (ADR-0021 §2).
+  message Record {
+    // The label within this network's zone, without the suffix: "git", not
+    // "git.acme.internal". The suffix is the network's and is already in search_domains,
+    // so repeating it here would let the two disagree.
+    string name = 1;
+
+    // "A" or "AAAA". CNAME is in the schema and is not sent yet: the resolver answers
+    // from a flat name-to-address map, and an alias needs chasing or returning as its own
+    // record type. Accepting one here before that exists would be a record that arrives
+    // and does nothing.
+    string type = 2;
+
+    // The address, as text. Parsed by the agent, which refuses the record rather than the
+    // whole state if it will not parse.
+    string value = 3;
+
+    uint32 ttl_seconds = 4;
+  }
+  repeated Record records = 5;
 }
 
 // Compiled ACL. The control plane owns the policy document; the agent receives
