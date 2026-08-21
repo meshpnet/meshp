@@ -77,6 +77,20 @@ type Applier interface {
 	Apply(ctx context.Context, state *peerset.Set) (unapplied []string, err error)
 }
 
+// PathReports is asked what the tunnel currently looks like.
+//
+// Separate from Applier on purpose. Applying is a thing the agent is told to do; this is a
+// thing it is asked about, and the two run on different clocks — the whole point is to hear
+// from a device between reconciles, when nothing has changed and the tunnel has quietly
+// stopped working anyway.
+//
+// Returning nil means "nothing to say", which is not the same as a report with no paths: a
+// membership whose interface has not come up has no data plane to describe, and sending an
+// empty report would tell the control plane its peers are all down.
+type PathReports interface {
+	Paths() *meshpv1.PathReport
+}
+
 // RelayCredentials is whatever needs a relay token, if anything does.
 //
 // The agent asks and the server answers; the server never pushes (ADR-0017). This is the
@@ -151,6 +165,10 @@ type Options struct {
 	// Reachability is asked for advertiser verdicts to send on. Nil on a build with no
 	// data plane, which has nothing to observe and so nothing to say.
 	Reachability ReachabilityReports
+
+	// Paths is asked what this device's data plane looks like. Nil on a build with no
+	// data plane, for the same reason.
+	Paths PathReports
 
 	// CanFilter is whether this host can enforce a packet filter.
 	//
@@ -292,6 +310,30 @@ func (c *Client) sendReachabilityReports(outbound chan<- *meshpv1.ClientMessage)
 			c.opts.Reachability.Requeue(reports[i:])
 			return
 		}
+	}
+}
+
+// sendPathReport passes on what this device's tunnel currently looks like.
+//
+// On the heartbeat only, and dropped rather than queued when the writer is behind. This is
+// the opposite trade to a reachability report: that one is produced when something has
+// already gone wrong and is worth waiting for, while this is a periodic description of a
+// state that will be described again in twenty-five seconds. A report that waits is a
+// report that arrives stale, and a stale one is worse than none — it is the number an
+// operator reads while deciding whether a tunnel is alive.
+func (c *Client) sendPathReport(outbound chan<- *meshpv1.ClientMessage) {
+	if c.opts.Paths == nil {
+		return
+	}
+	report := c.opts.Paths.Paths()
+	if report == nil {
+		return
+	}
+	select {
+	case outbound <- &meshpv1.ClientMessage{
+		Payload: &meshpv1.ClientMessage_PathReport{PathReport: report},
+	}:
+	default:
 	}
 }
 
@@ -491,6 +533,11 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 				// with no state delta anywhere near it. Without this, a device on a quiet
 				// network would hold the news of its own failover indefinitely.
 				c.sendReachabilityReports(outbound)
+
+				// And what the data plane looks like, which nothing else reports. An
+				// acknowledgement says a device applied a version; this is the only thing
+				// that says whether the tunnel it configured is carrying anything (#117).
+				c.sendPathReport(outbound)
 			}
 		}
 	}()
@@ -536,6 +583,15 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 			// Applying state ran a reconcile, which is what produces a verdict, so this is
 			// the earliest moment there is anything to send.
 			c.sendReachabilityReports(outbound)
+
+			// And the interface has just been configured, so this is the earliest the
+			// control plane can be told what it looks like. Waiting for the next heartbeat
+			// would leave a device that has just joined invisible for up to 25 seconds.
+			//
+			// It will report no handshakes, because there have not been any yet. That is
+			// true and is why the reader applies a grace period before calling it a fault:
+			// a tunnel seconds old has not failed, it has not started.
+			c.sendPathReport(outbound)
 
 		case *meshpv1.ServerMessage_RelayToken:
 			c.handleRelayToken(payload.RelayToken)

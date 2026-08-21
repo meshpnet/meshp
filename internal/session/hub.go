@@ -40,6 +40,12 @@ type Session struct {
 	relayTok []byte
 	relayExp time.Time
 
+	// tunnelMu guards what this device last said about its own data plane. Written by the
+	// read loop and read by anything sampling presence, so it needs a lock of its own
+	// rather than riding on the session being reachable only from one goroutine.
+	tunnelMu sync.Mutex
+	tunnel   TunnelState
+
 	ID           string
 	MembershipID uuid.UUID
 	NetworkID    uuid.UUID
@@ -288,6 +294,26 @@ type Connected struct {
 	// database says: an acknowledgement reaches this before it is written, and the two
 	// disagree for as long as that takes.
 	AppliedVersion int64
+
+	// Tunnel is what the device last said about its data plane, zero-valued when it has
+	// said nothing yet. ReportedAt is what distinguishes the two: a device that has
+	// genuinely reported no peers and one that has not reported at all are different, and
+	// only one of them is worth showing.
+	Tunnel TunnelState
+}
+
+// setTunnel records a device's account of its own data plane.
+func (s *Session) setTunnel(state TunnelState) {
+	s.tunnelMu.Lock()
+	defer s.tunnelMu.Unlock()
+	s.tunnel = state
+}
+
+// Tunnel returns it.
+func (s *Session) Tunnel() TunnelState {
+	s.tunnelMu.Lock()
+	defer s.tunnelMu.Unlock()
+	return s.tunnel
 }
 
 // NetworkPresence returns the memberships of one network that are connected right now.
@@ -311,6 +337,7 @@ func (h *Hub) NetworkPresence(networkID uuid.UUID) []Connected {
 			MembershipID:   s.MembershipID,
 			ConnectedAt:    s.ConnectedAt,
 			AppliedVersion: s.AppliedVersion(),
+			Tunnel:         s.Tunnel(),
 		})
 	}
 	return out
