@@ -1,0 +1,49 @@
+# Mechanisms nothing reaches, and why that is currently correct.
+#
+# Every line here is an exception to scripts/reachability-check.sh. The file is the point of
+# the check: ADR-0018 says a mechanism is not done until something running reaches it, and
+# until now telling "deliberately not yet" from "we forgot" meant reading the history of
+# each one. An entry costs a sentence and a reviewer's attention, which is what "nobody has
+# looked" did not.
+#
+# Format: <kind>:<name> — reason
+# Kinds: table (a schema table no query in queries/ touches)
+#        message (a protocol message the oneofs name and no Go outside proto/gen references)
+#
+# Removing an entry is how a mechanism graduates. Adding one should be uncomfortable.
+
+# --- waiting for the authentication work ---------------------------------------------------
+#
+# ADR-0022 §5 ships the browser view on a cookie derived from the single admin token, and is
+# explicit that per-user accounts become a prerequisite the moment the UI grows a write path.
+# These are the tables that work will read. They have been in the schema since migration 0001.
+table:users            — no accounts exist yet; ADR-0022 §5 defers them and says when they stop being deferrable
+table:roles            — as above
+table:role_bindings    — as above
+table:groups           — as above
+table:group_members    — as above
+
+# --- half-built, and named as such ---------------------------------------------------------
+#
+# ADR-0021 §2 decided admin-entered DNS records travel to the agent as desired state, like
+# everything else. The resolver answers from the peer list it already holds; the records half
+# is not built, so nothing reads these.
+table:dns_zones        — ADR-0021 §2 is only half implemented: names resolve from peers, admin records do not travel yet
+table:dns_records      — as above
+
+# --- configuration overtook the table ------------------------------------------------------
+#
+table:relays           — relays come from MESHP_RELAYS; whether this table should exist at all is an open question
+
+# --- possibly a table that should be dropped rather than read ------------------------------
+#
+# ADR-0003 gives the server the ordered candidate list and the agent the choice, so there may
+# be no single assignment to record. Raised in #121; this entry is a placeholder for that
+# decision, not an answer to it.
+table:route_assignments — ADR-0003 may mean nothing should ever write this; see #121
+
+# --- direct paths -------------------------------------------------------------------------
+#
+# meshp is relay-first (ADR-0002): connectivity never depends on hole punching succeeding, so
+# the absence of signalling costs performance rather than function.
+message:SignalEnvelope  — direct-path signalling is not built; relay-first means nothing depends on it

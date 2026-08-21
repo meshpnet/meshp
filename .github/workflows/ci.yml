@@ -388,6 +388,17 @@ jobs:
       # linked into it, so self-hosters run exactly the binary we run.
       - run: make standalone-check
 
+  reachability:
+    name: everything defined is reached
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # ADR-0018, checked rather than remembered. Three mechanisms have sat unreached for
+      # months apiece and each was found by somebody reading nearby code for another reason
+      # (#121). Needs no toolchain: it reads the schema, the protocol and the queries.
+      - run: ./scripts/reachability-check.sh
+
   vuln:
     name: vulnerabilities
     runs-on: ubuntu-latest
@@ -594,7 +605,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, image, dataplane, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, reachability, image, dataplane, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |

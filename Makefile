@@ -232,6 +232,10 @@ generate: proto sqlc ## Run all code generation
 
 ## --- invariants -----------------------------------------------------------
 
+.PHONY: reachability
+reachability: ## ADR-0018: fail on a mechanism nothing reaches
+	@./scripts/reachability-check.sh
+
 .PHONY: standalone-check
 standalone-check: ## Invariant 12: the core must not depend on the commercial layer
 	@if grep -rn --include='*.go' 'meshpnet/meshp-cloud' . ; then \
