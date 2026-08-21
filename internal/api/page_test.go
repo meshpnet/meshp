@@ -81,27 +81,33 @@ func TestTheAssetsAreServed(t *testing.T) {
 	}
 }
 
-// An unknown API path must answer as an API, not as a page.
+// The regression that took the container down, and the one this package could not see.
 //
-// The page handler is the catch-all for GET, so this is the one that would regress
-// silently: a caller that asked for JSON and was handed HTML with a 404 learns nothing
-// about what it got wrong, and a client library would fail while parsing rather than
-// while checking the status.
-func TestAnUnknownAPIPathAnswersAsAnAPI(t *testing.T) {
-	ts := pageServerFor(t)
+// meshp-control registers `/api/v1/` on its mux while the database is still coming up, so
+// the API's own routes go on beside it. A `GET /` catch-all conflicts with a pattern that
+// names no method — neither is more specific — and ServeMux reports that by panicking at
+// registration. Every test here passed while the shipped binary died at startup, because
+// they all built a mux holding only these routes.
+func TestThePageDoesNotClaimTheWholeURLSpace(t *testing.T) {
+	mux := http.NewServeMux()
+	// What the control plane has already registered by the time the API is wired up.
+	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "still starting up", http.StatusServiceUnavailable)
+	})
 
-	status, header, body := get(t, ts.URL+"/api/v1/there-is-no-such-thing")
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", status)
+	// Panics on a conflicting pattern, which is the whole assertion.
+	New(nil, nil, nil, Config{}).Routes(mux)
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	// Both still answer: the page at the root, and the bootstrap route for anything under
+	// /api/v1 that the API did not claim.
+	if status, _, _ := get(t, ts.URL+"/"); status != http.StatusOK {
+		t.Errorf("GET / = %d, want 200", status)
 	}
-	if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("Content-Type = %q, want application/json", ct)
-	}
-	if !strings.Contains(body, "no_such_endpoint") {
-		t.Errorf("body = %q, want it to name the failure", body)
-	}
-	if strings.Contains(body, "<html") {
-		t.Error("an API path was answered with the page")
+	if status, _, body := get(t, ts.URL+"/api/v1/not-a-route"); status != http.StatusServiceUnavailable {
+		t.Errorf("GET /api/v1/not-a-route = %d (%q), want the bootstrap route's 503", status, body)
 	}
 }
 
@@ -113,12 +119,14 @@ func TestAnUnknownAPIPathAnswersAsAnAPI(t *testing.T) {
 func TestAnUnknownPathIsNotThePage(t *testing.T) {
 	ts := pageServerFor(t)
 
-	status, _, body := get(t, ts.URL+"/networks/not-a-route")
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", status)
-	}
-	if strings.Contains(body, "/app.js") {
-		t.Error("an unknown path was answered with the page")
+	for _, path := range []string{"/networks/not-a-route", "/api/v1/not-a-route", "/index.html/extra"} {
+		status, _, body := get(t, ts.URL+path)
+		if status != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, status)
+		}
+		if strings.Contains(body, "/app.js") {
+			t.Errorf("GET %s was answered with the page", path)
+		}
 	}
 }
 

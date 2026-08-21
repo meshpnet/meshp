@@ -1,10 +1,9 @@
 package api
 
 import (
+	"io/fs"
 	"net/http"
-	"strings"
 
-	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/web"
 )
 
@@ -23,20 +22,46 @@ const contentSecurityPolicy = "default-src 'none'; " +
 	"script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; " +
 	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-// handlePage serves the view (ADR-0022 §2).
+// routePage registers the view (ADR-0022 §2), one route per embedded file.
+//
+// Explicitly, rather than as a `GET /` catch-all. The catch-all is the obvious way to
+// serve a page and it is wrong here twice over.
+//
+// It panics. A pattern registered without a method conflicts with `GET /` — neither is
+// more specific — and meshp-control registers `/api/v1/` on its mux before the database is
+// up, so the two together take the process down at startup. Every test in this package
+// passed while that was true, because they build a mux holding only these routes.
+//
+// And it over-serves. A catch-all answers /anything-at-all with the page, which turns a
+// mistyped URL into a dashboard that looks like it worked. Registering exactly what is
+// embedded means the served set and the embedded set cannot drift, because they are the
+// same list read once.
+func (s *Server) routePage(mux *http.ServeMux) {
+	entries, err := fs.ReadDir(web.FS, ".")
+	if err != nil {
+		// Unreachable: the FS is built at compile time from a fixed pattern. Logged rather
+		// than ignored, because the failure it would describe is a page that silently is
+		// not there.
+		s.log.Error("could not read the embedded page", "error", err)
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		mux.Handle("GET /"+entry.Name(), http.HandlerFunc(s.handlePage))
+	}
+	// {$} matches the root and nothing below it, so this claims one path rather than the
+	// whole space beneath it.
+	mux.Handle("GET /{$}", http.HandlerFunc(s.handlePage))
+}
+
+// handlePage serves the view.
 //
 // From the same binary and the same port as the API it reads, so a self-hoster's
 // deployment stays the one unit deploy/systemd describes rather than gaining a second
 // artefact, a second port and a CORS policy between two halves of one product.
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
-	// This is the catch-all for GET, so anything under /api/ that matched no route above
-	// arrives here. It must not be answered with HTML: a caller that asked for JSON and
-	// got a page back learns nothing about what it got wrong.
-	if strings.HasPrefix(r.URL.Path, "/api/") {
-		httpx.Error(w, s.log, http.StatusNotFound, "no_such_endpoint", "no such endpoint")
-		return
-	}
-
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -51,8 +76,7 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 // pageServer serves the embedded files. Built once: it holds no request state, and
 // rebuilding it per request would re-read the FS index every time.
 //
-// There is no history-mode fallback to index.html for unknown paths. The page routes on
-// the fragment, which never reaches a server, so a request for a path that is not a file
-// is a request for something that does not exist — and answering it with the page would
-// turn every typo into a dashboard that silently shows the wrong thing.
+// There is no history-mode fallback to index.html, and no route reaches this for a path
+// that is not an embedded file. The page routes on the fragment, which never reaches a
+// server, so there is nothing for a fallback to serve.
 var pageServer = http.FileServerFS(web.FS)

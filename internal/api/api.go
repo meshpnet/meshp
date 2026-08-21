@@ -143,9 +143,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/ui/session", s.rateLimited(s.handleUILogin))
 	mux.Handle("DELETE /api/v1/ui/session", http.HandlerFunc(s.handleUILogout))
 
-	// The page itself, last because it is the catch-all: every pattern above is more
-	// specific and wins (ADR-0022 §2).
-	mux.Handle("GET /", http.HandlerFunc(s.handlePage))
+	// The page itself (ADR-0022 §2), registered as one route per embedded file rather
+	// than as a catch-all — see routePage for why that distinction is load-bearing.
+	s.routePage(mux)
 
 	// Its own sub-resource rather than a field on a general network update, because this
 	// is the one setting here that can decide whether a laptop leaks. A PUT that names it
