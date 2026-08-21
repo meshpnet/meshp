@@ -33,6 +33,10 @@ type Change struct {
 	// Tunnel marks a change to the network's tunnel configuration — today, whether devices
 	// claiming a default route must fail closed. It names no peer for the same reason again.
 	Tunnel bool
+
+	// DNS marks a change to the network's administrator-entered records, which names no
+	// peer because every device in the network has to be able to resolve them.
+	DNS bool
 }
 
 // PeerUpserted records that a membership's peer state changed.
@@ -69,6 +73,14 @@ func PolicyChanged() Change { return Change{Policy: true} }
 // would acknowledge the new version, the convergence metric would call them current, and
 // every one of them would still be enforcing the old answer.
 func TunnelChanged() Change { return Change{Tunnel: true} }
+
+// DNSRecordsChanged records that an administrator added or removed a name.
+//
+// Names nothing, for the reason the policy kind gives: a record is desired state for every
+// device in the network, since every one of them must resolve it. The arguments are for the
+// log line and the audit trail rather than for the row — a delta carries the whole record
+// set, so which one moved does not change what is sent.
+func DNSRecordsChanged(name, recordType string) Change { return Change{DNS: true} }
 
 // BumpVersion advances a network's state version and records what changed, together.
 //
@@ -124,6 +136,9 @@ func (c Change) kind() (string, error) {
 	}
 	if c.Tunnel {
 		kinds = append(kinds, "tunnel")
+	}
+	if c.DNS {
+		kinds = append(kinds, "dns")
 	}
 	if c.MembershipID != nil {
 		kinds = append(kinds, "peer_upsert")

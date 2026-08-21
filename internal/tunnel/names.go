@@ -2,12 +2,14 @@ package tunnel
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"strings"
 
 	"github.com/meshpnet/meshp/internal/dns"
 	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
+	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
 
 // Names is where this reconciler publishes the names its network can answer for.
@@ -86,7 +88,56 @@ func (r *Reconciler) publishNames(state *peerset.Set) {
 		zone.Hosts = append(zone.Hosts, dns.Host{Name: label, Addrs: addrs})
 	}
 
+	zone.Hosts = withAdminRecords(zone.Hosts, state.DNS().GetRecords(), r.log)
 	r.names.Replace(r.membership.InterfaceName, zone)
+}
+
+// withAdminRecords folds the names an administrator wrote down into the derived ones.
+//
+// An administrator's record wins a collision with a device's name. Both are desired state,
+// but one was typed by a person for this network and the other follows from what a machine
+// happened to be called when it enrolled — and a person who writes `git` and finds it still
+// pointing at somebody's laptop has been ignored by the system they were configuring. The
+// control plane refuses the collision when the record is created, so this is the case where
+// a device arrived afterwards.
+//
+// A record that will not parse is dropped and logged rather than failing the state. It came
+// from a server that has already validated it, so an unparseable one means the two ends
+// disagree about what a record is — worth saying out loud, not worth costing a device its
+// tunnel (ADR-0008).
+func withAdminRecords(hosts []dns.Host, records []*meshpv1.DnsConfig_Record, log *slog.Logger) []dns.Host {
+	if len(records) == 0 {
+		return hosts
+	}
+
+	// Addresses accumulate per name: one name legitimately has both an A and an AAAA, and
+	// keeping only the last would make a dual-stack name resolve for one family at random.
+	byName := make(map[string][]netip.Addr, len(records))
+	order := make([]string, 0, len(records))
+	for _, record := range records {
+		name := strings.ToLower(record.GetName())
+		addr, err := netip.ParseAddr(record.GetValue())
+		if !dns.ValidLabel(name) || err != nil {
+			log.Warn("ignoring a DNS record this agent cannot use",
+				"name", logx.Safe(record.GetName()), "value", logx.Safe(record.GetValue()))
+			continue
+		}
+		if _, seen := byName[name]; !seen {
+			order = append(order, name)
+		}
+		byName[name] = append(byName[name], addr)
+	}
+
+	out := make([]dns.Host, 0, len(hosts)+len(order))
+	for _, host := range hosts {
+		if _, overridden := byName[host.Name]; !overridden {
+			out = append(out, host)
+		}
+	}
+	for _, name := range order {
+		out = append(out, dns.Host{Name: name, Addrs: byName[name]})
+	}
+	return out
 }
 
 // suffixFrom reads the network's DNS suffix out of desired state.

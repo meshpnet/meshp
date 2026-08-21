@@ -162,7 +162,7 @@ func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.G
 		ToVersion:   uint64(membership.StateVersion),
 		UpsertPeers: make([]*meshpv1.Peer, 0, len(peers)),
 		Tunnel:      b.tunnelConfig(membership),
-		Dns:         b.dnsConfig(membership),
+		Dns:         b.dnsConfig(ctx, membership),
 		Relays:      b.relays,
 	}
 	for _, p := range peers {
@@ -258,7 +258,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// Alongside the tunnel configuration and for the same reason: it is small, it
 		// changes rarely, and an agent that missed the snapshot carrying it would have
 		// peers it cannot name.
-		Dns: b.dnsConfig(membership),
+		Dns: b.dnsConfig(ctx, membership),
 	}
 
 	for id := range upserts {
@@ -404,19 +404,37 @@ func failClosedPolicy(enforced bool) meshpv1.TunnelConfig_FailClosed {
 // (ADR-0021).
 const DefaultDNSSuffix = "internal"
 
-// dnsConfig tells a device what its names look like.
+// dnsConfig tells a device what its names look like, and the names nothing can derive.
 //
-// Only the search domain today. `nameservers` is deliberately left empty: the resolver is
-// the agent's own, on a loopback port the kernel picks, so its address is something only
-// the device knows — the server naming one would be inventing an address it cannot see.
+// `nameservers` is deliberately left empty: the resolver is the agent's own, on a loopback
+// port the kernel picks, so its address is something only the device knows — the server
+// naming one would be inventing an address it cannot see.
 //
-// No records either. Admin-entered records live in `dns_records` and reach the agent in a
-// `records` field this message does not have yet; adding it is a change to the proto and
-// belongs with the code that reads it, not ahead of it.
-func (b *StateBuilder) dnsConfig(membership dbgen.GetMembershipForSessionRow) *meshpv1.DnsConfig {
+// Records are read here rather than passed in, and a failure to read them is logged and
+// dropped rather than failing the whole state. A device that gets its peers and loses two
+// administrator-entered names has lost two names; one that gets nothing has lost its
+// tunnel, and the second is much worse than the first (ADR-0008).
+func (b *StateBuilder) dnsConfig(ctx context.Context, membership dbgen.GetMembershipForSessionRow) *meshpv1.DnsConfig {
 	suffix := membership.NetworkSlug + "." + DefaultDNSSuffix
+
+	records, err := b.store.ListDNSRecords(ctx, membership.NetworkID)
+	if err != nil {
+		b.log.Error("could not read this network's DNS records",
+			"network_id", membership.NetworkID, "error", err)
+	}
+	out := make([]*meshpv1.DnsConfig_Record, 0, len(records))
+	for _, record := range records {
+		out = append(out, &meshpv1.DnsConfig_Record{
+			Name:       record.Name,
+			Type:       record.Type,
+			Value:      record.Value,
+			TtlSeconds: uint32(record.TTL),
+		})
+	}
+
 	return &meshpv1.DnsConfig{
 		SearchDomains: []string{suffix},
+		Records:       out,
 		// Split DNS, stated rather than implied: only this suffix goes to the mesh
 		// resolver and everything else keeps using whatever the machine already used. A
 		// resolver that captured every query would break split-horizon corporate DNS on

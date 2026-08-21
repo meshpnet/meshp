@@ -1365,7 +1365,8 @@ type DnsConfig struct {
 	SearchDomains []string               `protobuf:"bytes,2,rep,name=search_domains,json=searchDomains,proto3" json:"search_domains,omitempty"`
 	Routes        []*DnsConfig_Route     `protobuf:"bytes,3,rep,name=routes,proto3" json:"routes,omitempty"`
 	// Block plaintext DNS outside the tunnel while a default route is claimed.
-	PreventLeaks  bool `protobuf:"varint,4,opt,name=prevent_leaks,json=preventLeaks,proto3" json:"prevent_leaks,omitempty"`
+	PreventLeaks  bool                `protobuf:"varint,4,opt,name=prevent_leaks,json=preventLeaks,proto3" json:"prevent_leaks,omitempty"`
+	Records       []*DnsConfig_Record `protobuf:"bytes,5,rep,name=records,proto3" json:"records,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1426,6 +1427,13 @@ func (x *DnsConfig) GetPreventLeaks() bool {
 		return x.PreventLeaks
 	}
 	return false
+}
+
+func (x *DnsConfig) GetRecords() []*DnsConfig_Record {
+	if x != nil {
+		return x.Records
+	}
+	return nil
 }
 
 // Compiled ACL. The control plane owns the policy document; the agent receives
@@ -3043,6 +3051,89 @@ func (x *DnsConfig_Route) GetNameservers() []string {
 	return nil
 }
 
+// A name an administrator wrote down, as opposed to one derived from a device.
+//
+// These cannot be synthesised from the peer list — a name for something that is not a
+// meshp device at all, or a second name for something that is — so they are desired
+// state and travel with everything else, versioned and acknowledged like peers and
+// route groups (ADR-0021 §2).
+type DnsConfig_Record struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The label within this network's zone, without the suffix: "git", not
+	// "git.acme.internal". The suffix is the network's and is already in search_domains,
+	// so repeating it here would let the two disagree.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// "A" or "AAAA". CNAME is in the schema and is not sent yet: the resolver answers
+	// from a flat name-to-address map, and an alias needs chasing or returning as its own
+	// record type. Accepting one here before that exists would be a record that arrives
+	// and does nothing.
+	Type string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	// The address, as text. Parsed by the agent, which refuses the record rather than the
+	// whole state if it will not parse.
+	Value         string `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	TtlSeconds    uint32 `protobuf:"varint,4,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DnsConfig_Record) Reset() {
+	*x = DnsConfig_Record{}
+	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DnsConfig_Record) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DnsConfig_Record) ProtoMessage() {}
+
+func (x *DnsConfig_Record) ProtoReflect() protoreflect.Message {
+	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DnsConfig_Record.ProtoReflect.Descriptor instead.
+func (*DnsConfig_Record) Descriptor() ([]byte, []int) {
+	return file_meshp_v1_control_proto_rawDescGZIP(), []int{10, 1}
+}
+
+func (x *DnsConfig_Record) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DnsConfig_Record) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *DnsConfig_Record) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *DnsConfig_Record) GetTtlSeconds() uint32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
 type PacketFilter_Rule struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SrcPrefixes   []string               `protobuf:"bytes,1,rep,name=src_prefixes,json=srcPrefixes,proto3" json:"src_prefixes,omitempty"`
@@ -3056,7 +3147,7 @@ type PacketFilter_Rule struct {
 
 func (x *PacketFilter_Rule) Reset() {
 	*x = PacketFilter_Rule{}
-	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	mi := &file_meshp_v1_control_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3068,7 +3159,7 @@ func (x *PacketFilter_Rule) String() string {
 func (*PacketFilter_Rule) ProtoMessage() {}
 
 func (x *PacketFilter_Rule) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[34]
+	mi := &file_meshp_v1_control_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3131,7 +3222,7 @@ type RelayConfig_Relay struct {
 
 func (x *RelayConfig_Relay) Reset() {
 	*x = RelayConfig_Relay{}
-	mi := &file_meshp_v1_control_proto_msgTypes[35]
+	mi := &file_meshp_v1_control_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3143,7 +3234,7 @@ func (x *RelayConfig_Relay) String() string {
 func (*RelayConfig_Relay) ProtoMessage() {}
 
 func (x *RelayConfig_Relay) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[35]
+	mi := &file_meshp_v1_control_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3214,7 +3305,7 @@ type RouteGroupAssignment_MappedPrefix struct {
 
 func (x *RouteGroupAssignment_MappedPrefix) Reset() {
 	*x = RouteGroupAssignment_MappedPrefix{}
-	mi := &file_meshp_v1_control_proto_msgTypes[36]
+	mi := &file_meshp_v1_control_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3226,7 +3317,7 @@ func (x *RouteGroupAssignment_MappedPrefix) String() string {
 func (*RouteGroupAssignment_MappedPrefix) ProtoMessage() {}
 
 func (x *RouteGroupAssignment_MappedPrefix) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[36]
+	mi := &file_meshp_v1_control_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3271,7 +3362,7 @@ type PathReport_PeerPath struct {
 
 func (x *PathReport_PeerPath) Reset() {
 	*x = PathReport_PeerPath{}
-	mi := &file_meshp_v1_control_proto_msgTypes[37]
+	mi := &file_meshp_v1_control_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3283,7 +3374,7 @@ func (x *PathReport_PeerPath) String() string {
 func (*PathReport_PeerPath) ProtoMessage() {}
 
 func (x *PathReport_PeerPath) ProtoReflect() protoreflect.Message {
-	mi := &file_meshp_v1_control_proto_msgTypes[37]
+	mi := &file_meshp_v1_control_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3455,15 +3546,22 @@ const file_meshp_v1_control_proto_rawDesc = "" +
 	"FailClosed\x12\x1b\n" +
 	"\x17FAIL_CLOSED_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14FAIL_CLOSED_ENFORCED\x10\x01\x12\x18\n" +
-	"\x14FAIL_CLOSED_DISABLED\x10\x02\"\xef\x01\n" +
+	"\x14FAIL_CLOSED_DISABLED\x10\x02\"\x8e\x03\n" +
 	"\tDnsConfig\x12 \n" +
 	"\vnameservers\x18\x01 \x03(\tR\vnameservers\x12%\n" +
 	"\x0esearch_domains\x18\x02 \x03(\tR\rsearchDomains\x121\n" +
 	"\x06routes\x18\x03 \x03(\v2\x19.meshp.v1.DnsConfig.RouteR\x06routes\x12#\n" +
-	"\rprevent_leaks\x18\x04 \x01(\bR\fpreventLeaks\x1aA\n" +
+	"\rprevent_leaks\x18\x04 \x01(\bR\fpreventLeaks\x124\n" +
+	"\arecords\x18\x05 \x03(\v2\x1a.meshp.v1.DnsConfig.RecordR\arecords\x1aA\n" +
 	"\x05Route\x12\x16\n" +
 	"\x06domain\x18\x01 \x01(\tR\x06domain\x12 \n" +
-	"\vnameservers\x18\x02 \x03(\tR\vnameservers\"\xb8\x02\n" +
+	"\vnameservers\x18\x02 \x03(\tR\vnameservers\x1ag\n" +
+	"\x06Record\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\tR\x05value\x12\x1f\n" +
+	"\vttl_seconds\x18\x04 \x01(\rR\n" +
+	"ttlSeconds\"\xb8\x02\n" +
 	"\fPacketFilter\x125\n" +
 	"\ainbound\x18\x01 \x03(\v2\x1b.meshp.v1.PacketFilter.RuleR\ainbound\x127\n" +
 	"\boutbound\x18\x02 \x03(\v2\x1b.meshp.v1.PacketFilter.RuleR\boutbound\x12!\n" +
@@ -3641,7 +3739,7 @@ func file_meshp_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_meshp_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_meshp_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_meshp_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_meshp_v1_control_proto_goTypes = []any{
 	(TunnelConfig_FailClosed)(0),              // 0: meshp.v1.TunnelConfig.FailClosed
 	(RouteGroupAssignment_Mode)(0),            // 1: meshp.v1.RouteGroupAssignment.Mode
@@ -3682,10 +3780,11 @@ var file_meshp_v1_control_proto_goTypes = []any{
 	(*CollectDiagnostics)(nil),                // 36: meshp.v1.CollectDiagnostics
 	(*AdvertisedRoutes_Group)(nil),            // 37: meshp.v1.AdvertisedRoutes.Group
 	(*DnsConfig_Route)(nil),                   // 38: meshp.v1.DnsConfig.Route
-	(*PacketFilter_Rule)(nil),                 // 39: meshp.v1.PacketFilter.Rule
-	(*RelayConfig_Relay)(nil),                 // 40: meshp.v1.RelayConfig.Relay
-	(*RouteGroupAssignment_MappedPrefix)(nil), // 41: meshp.v1.RouteGroupAssignment.MappedPrefix
-	(*PathReport_PeerPath)(nil),               // 42: meshp.v1.PathReport.PeerPath
+	(*DnsConfig_Record)(nil),                  // 39: meshp.v1.DnsConfig.Record
+	(*PacketFilter_Rule)(nil),                 // 40: meshp.v1.PacketFilter.Rule
+	(*RelayConfig_Relay)(nil),                 // 41: meshp.v1.RelayConfig.Relay
+	(*RouteGroupAssignment_MappedPrefix)(nil), // 42: meshp.v1.RouteGroupAssignment.MappedPrefix
+	(*PathReport_PeerPath)(nil),               // 43: meshp.v1.PathReport.PeerPath
 }
 var file_meshp_v1_control_proto_depIdxs = []int32{
 	7,  // 0: meshp.v1.ClientMessage.hello:type_name -> meshp.v1.ClientHello
@@ -3712,32 +3811,33 @@ var file_meshp_v1_control_proto_depIdxs = []int32{
 	37, // 21: meshp.v1.AdvertisedRoutes.groups:type_name -> meshp.v1.AdvertisedRoutes.Group
 	0,  // 22: meshp.v1.TunnelConfig.fail_closed_policy:type_name -> meshp.v1.TunnelConfig.FailClosed
 	38, // 23: meshp.v1.DnsConfig.routes:type_name -> meshp.v1.DnsConfig.Route
-	39, // 24: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
-	39, // 25: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
-	40, // 26: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
-	1,  // 27: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
-	21, // 28: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
-	22, // 29: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
-	41, // 30: meshp.v1.RouteGroupAssignment.mapped_prefixes:type_name -> meshp.v1.RouteGroupAssignment.MappedPrefix
-	2,  // 31: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
-	24, // 32: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
-	25, // 33: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
-	26, // 34: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
-	28, // 35: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
-	27, // 36: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
-	27, // 37: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
-	27, // 38: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
-	3,  // 39: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
-	42, // 40: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
-	34, // 41: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
-	35, // 42: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
-	36, // 43: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
-	4,  // 44: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
-	45, // [45:45] is the sub-list for method output_type
-	45, // [45:45] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	39, // 24: meshp.v1.DnsConfig.records:type_name -> meshp.v1.DnsConfig.Record
+	40, // 25: meshp.v1.PacketFilter.inbound:type_name -> meshp.v1.PacketFilter.Rule
+	40, // 26: meshp.v1.PacketFilter.outbound:type_name -> meshp.v1.PacketFilter.Rule
+	41, // 27: meshp.v1.RelayConfig.relays:type_name -> meshp.v1.RelayConfig.Relay
+	1,  // 28: meshp.v1.RouteGroupAssignment.mode:type_name -> meshp.v1.RouteGroupAssignment.Mode
+	21, // 29: meshp.v1.RouteGroupAssignment.candidates:type_name -> meshp.v1.RouteCandidate
+	22, // 30: meshp.v1.RouteGroupAssignment.local_failover:type_name -> meshp.v1.LocalFailoverPolicy
+	42, // 31: meshp.v1.RouteGroupAssignment.mapped_prefixes:type_name -> meshp.v1.RouteGroupAssignment.MappedPrefix
+	2,  // 32: meshp.v1.RouteCandidate.server_health:type_name -> meshp.v1.RouteCandidate.Health
+	24, // 33: meshp.v1.SignalEnvelope.offer:type_name -> meshp.v1.IceOffer
+	25, // 34: meshp.v1.SignalEnvelope.answer:type_name -> meshp.v1.IceAnswer
+	26, // 35: meshp.v1.SignalEnvelope.candidates:type_name -> meshp.v1.IceCandidates
+	28, // 36: meshp.v1.SignalEnvelope.give_up:type_name -> meshp.v1.PathGiveUp
+	27, // 37: meshp.v1.IceOffer.candidates:type_name -> meshp.v1.IceCandidate
+	27, // 38: meshp.v1.IceAnswer.candidates:type_name -> meshp.v1.IceCandidate
+	27, // 39: meshp.v1.IceCandidates.candidates:type_name -> meshp.v1.IceCandidate
+	3,  // 40: meshp.v1.IceCandidate.kind:type_name -> meshp.v1.IceCandidate.Kind
+	43, // 41: meshp.v1.PathReport.paths:type_name -> meshp.v1.PathReport.PeerPath
+	34, // 42: meshp.v1.Command.revoke:type_name -> meshp.v1.Revoke
+	35, // 43: meshp.v1.Command.reconnect:type_name -> meshp.v1.Reconnect
+	36, // 44: meshp.v1.Command.collect_diagnostics:type_name -> meshp.v1.CollectDiagnostics
+	4,  // 45: meshp.v1.PathReport.PeerPath.kind:type_name -> meshp.v1.PathReport.PeerPath.Kind
+	46, // [46:46] is the sub-list for method output_type
+	46, // [46:46] is the sub-list for method input_type
+	46, // [46:46] is the sub-list for extension type_name
+	46, // [46:46] is the sub-list for extension extendee
+	0,  // [0:46] is the sub-list for field type_name
 }
 
 func init() { file_meshp_v1_control_proto_init() }
@@ -3779,7 +3879,7 @@ func file_meshp_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_meshp_v1_control_proto_rawDesc), len(file_meshp_v1_control_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   38,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

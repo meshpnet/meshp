@@ -133,6 +133,33 @@ curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
   their job. Returning is expensive — every connection through the tunnel drops again — so
   the policy is deliberately slower in that direction.
 
+## A name does not resolve
+
+Device names come from the peer list and need nothing written down. Names for anything else
+— a machine that is not a meshp device, or a second name for one that is — are records an
+administrator writes:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "git", "type": "A", "value": "10.80.0.30"}' \
+  "https://control.example.com/api/v1/networks/$NETWORK/dns-records"
+```
+
+The response carries the `fqdn` the record will answer to. Records reach devices as desired
+state, so a device applies one on its next state delta rather than immediately — `meshp
+status` on the device shows the version it has applied.
+
+- **`is not a DNS label`**: the name is one label, without the suffix. Write `git`, not
+  `git.acme.internal` — the suffix is the network's and is added for you.
+- **`is not a record type this serves`**: A and AAAA work. CNAME is in the schema and is not
+  served yet, and is refused rather than stored so it cannot sit there doing nothing.
+- **`a device in this network already answers to that name`**: pick another, or rename the
+  device. Both names live in one namespace and one resolver answers for both.
+- **Resolves to the wrong thing**: if a device was enrolled with that name *after* the
+  record was written, the record wins on the device and the device keeps its address. Rename
+  one of them.
+
 ## Why did my outbound IP change?
 
 Ask the audit trail. A device that moves itself between candidates says why, and the control

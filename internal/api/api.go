@@ -124,6 +124,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/networks/{networkID}/devices", s.adminOnly(s.handleListMemberships))
 	mux.Handle("DELETE /api/v1/networks/{networkID}/devices/{membershipID}", s.adminOnly(s.handleRevokeMembership))
 
+	// The names an administrator writes down, which nothing can derive from the peer list
+	// (ADR-0021 §2). Reading is browser-readable like the rest of a network's state;
+	// writing is not, which is the line ADR-0022 §5 draws.
+	mux.Handle("GET /api/v1/networks/{networkID}/dns-records", s.readable(s.handleListDNSRecords))
+	mux.Handle("POST /api/v1/networks/{networkID}/dns-records", s.adminOnly(s.handleCreateDNSRecord))
+	mux.Handle("DELETE /api/v1/networks/{networkID}/dns-records/{recordID}", s.adminOnly(s.handleDeleteDNSRecord))
+
 	mux.Handle("GET /api/v1/networks/{networkID}/acl", s.adminOnly(s.handleGetPolicy))
 	mux.Handle("PUT /api/v1/networks/{networkID}/acl", s.adminOnly(s.handlePublishPolicy))
 	mux.Handle("GET /api/v1/networks/{networkID}/acl/versions", s.adminOnly(s.handleListPolicyVersions))
@@ -257,6 +264,8 @@ var knownFailures = []struct {
 	{enroll.ErrTokenRevoked, failure{http.StatusUnauthorized, "token_revoked", "that enrolment token has been revoked"}},
 	{enroll.ErrTokenExhausted, failure{http.StatusConflict, "token_exhausted", "that enrolment token has already been used"}},
 	{enroll.ErrChallengeInvalid, failure{http.StatusBadRequest, "challenge_invalid", "the challenge is not valid for this token and key"}},
+	{store.ErrRecordExists, failure{http.StatusConflict, "record_exists", "that record already exists"}},
+	{store.ErrNoSuchRecord, failure{http.StatusNotFound, "no_such_record", "no such record in this network"}},
 	{enroll.ErrChallengeExpired, failure{http.StatusBadRequest, "challenge_expired", "the challenge has expired; request another"}},
 	{enroll.ErrProofFailed, failure{http.StatusUnauthorized, "proof_failed", "the signature over the challenge did not verify"}},
 	{enroll.ErrAlreadyInNetwork, failure{http.StatusConflict, "already_enrolled", "this device is already enrolled in that network"}},
