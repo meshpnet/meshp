@@ -159,6 +159,21 @@ discovers direct paths yet, so everything is relayed — that is relay-first wor
 designed rather than a gap (ADR-0002), and a direct path is an optimisation layered on
 later rather than a prerequisite for connectivity.
 
+## Look at it
+
+Open <http://localhost:8080> and sign in with the same `MESHP_ADMIN_TOKEN` you set in step 1.
+
+The page shows one network: every device and whether its control session is up, every
+route group and which devices are offering to carry it, and anything a device reported it
+could not apply. It says at the top whether anything needs attention, and it says in the
+corner how old what you are looking at is — a poll that fails leaves the last answer on
+screen and marks it stale rather than letting old numbers pass for current.
+
+The token is exchanged once for a session cookie that may read and may not write, so the
+page cannot mint a token or revoke a device even if somebody else is sitting at it
+(ADR-0022). Signing in needs TLS anywhere that is not loopback; `localhost` is the
+exception that keeps this quickstart working without a certificate.
+
 ## Where to go next
 
 - [Self-hosting](self-hosting.md) — TLS, systemd, backups: the version you would actually run.

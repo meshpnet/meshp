@@ -1,0 +1,188 @@
+/* One page, two themes, no build step.
+ *
+ * Colour is load-bearing here and cannot be the only signal: a route group nothing is
+ * carrying says so in words as well as in red, because the reader may not see the red. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #16191d;
+  --muted: #5b6472;
+  --line: #dfe3e8;
+
+  --ok: #1a7f4b;
+  --warn: #96631a;
+  --bad: #b3261e;
+  --unknown: #5b6472;
+
+  --radius: 10px;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b;
+    --panel: #1c2025;
+    --ink: #e8eaed;
+    --muted: #98a2b1;
+    --line: #2b313a;
+
+    --ok: #4ec98a;
+    --warn: #e0b055;
+    --bad: #ff8a80;
+    --unknown: #98a2b1;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.wordmark { font-weight: 600; letter-spacing: 0.02em; }
+.freshness { color: var(--muted); font-size: 13px; margin-left: auto; }
+.freshness.stale { color: var(--warn); font-weight: 600; }
+
+.linkish {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 24px 0 10px; color: var(--muted); font-weight: 600; }
+p { margin: 0 0 12px; }
+
+code, .mono { font-family: var(--mono); font-size: 13px; }
+
+/* The headline. The whole question the page exists to answer, before any scrolling. */
+.verdict {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-left: 4px solid var(--ok);
+}
+.verdict.problems { border-left-color: var(--bad); }
+.verdict h1 { font-size: 22px; }
+.verdict .sub { color: var(--muted); font-size: 14px; }
+
+/* A route group and the devices offering to carry it, side by side, because which
+ * device carries which prefixes is a relationship and reads badly as rows. */
+.group {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 700px) {
+  .group { grid-template-columns: 1fr; }
+}
+
+.group-id .name { font-weight: 600; }
+.group-id .meta { color: var(--muted); font-size: 13px; }
+.prefixes { margin: 8px 0 0; padding: 0; list-style: none; }
+.prefixes li { font-family: var(--mono); font-size: 13px; }
+
+.carriers { margin: 0; padding: 0; list-style: none; }
+.carrier {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+.carrier:first-child { border-top: none; }
+.carrier .who { font-weight: 500; }
+.carrier .why { color: var(--muted); font-size: 13px; }
+.carrier.not-viable .who { text-decoration: line-through; }
+
+.nobody {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.scroll { overflow-x: auto; }
+.devices { width: 100%; min-width: 480px; border-collapse: collapse; }
+.devices th {
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+}
+.devices td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.devices tr.attention td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
+.devices .addr { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+.dot { font-size: 11px; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.bad { color: var(--bad); }
+.unknown { color: var(--unknown); }
+
+.note { color: var(--muted); font-size: 13px; }
+.faults { margin: 4px 0 0; padding-left: 18px; }
+.faults li { color: var(--bad); font-size: 13px; }
+
+/* Sign-in and the network picker. */
+form.signin { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+input[type="password"], select {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  min-width: 260px;
+}
+button.primary {
+  font: inherit;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--panel);
+  cursor: pointer;
+}
+.error { color: var(--bad); }
+
+.picker { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picker label { color: var(--muted); font-size: 13px; }
