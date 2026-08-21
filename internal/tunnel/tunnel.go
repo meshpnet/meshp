@@ -175,6 +175,11 @@ type Reconciler struct {
 	lastErr  string
 	appliedV uint64
 	port     int
+
+	// relayed is the peers this membership reaches through a relay, by public key, as of
+	// the last state applied. Kept so a path report can say how a peer is reached without
+	// inferring it from the endpoint address (see notePaths).
+	relayed map[string]bool
 }
 
 // Filter enforces a packet filter on this host.
@@ -391,8 +396,13 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 	// The port is only knowable here too. A device that has just joined asks the kernel for
 	// any port, so until the interface exists there is no answer to give and inbound
 	// relayed packets have nowhere to be delivered.
+	relayedNow := relayedKeys(want)
+	// Recorded whether or not there is a relay implementation behind it, because the
+	// report describes what this state asked for and a build with no relay simply asks
+	// for none.
+	r.notePaths(relayedNow)
 	if r.relay != nil {
-		r.relay.Retain(relayedKeys(want))
+		r.relay.Retain(relayedNow)
 		r.relay.SetWireGuardPort(port)
 	}
 

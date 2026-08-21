@@ -359,16 +359,18 @@ func (s *Server) readLoop(ctx context.Context, conn *websocket.Conn, sess *Sessi
 		case *meshpv1.ClientMessage_Heartbeat:
 			s.handleHeartbeat(ctx, sess, payload.Heartbeat)
 
+		case *meshpv1.ClientMessage_PathReport:
+			s.handlePathReport(sess, payload.PathReport)
+
 		case *meshpv1.ClientMessage_Hello:
 			// One hello per connection. A second is either a confused agent or somebody
 			// trying to change identity mid-session.
 			return errors.New("received a second hello on an established session")
 
 		default:
-			// Path reports, reachability reports and signalling arrive here once the
-			// subsystems that consume them exist. Ignoring an unknown payload rather than
-			// closing is deliberate: a newer agent must be able to send something this
-			// server has never heard of (ADR-0008).
+			// Signalling arrives here once the subsystem that consumes it exists.
+			// Ignoring an unknown payload rather than closing is deliberate: a newer agent
+			// must be able to send something this server has never heard of (ADR-0008).
 			s.log.Debug("ignoring an unhandled client message",
 				"session", sess.ID, "type", fmt.Sprintf("%T", msg.Payload))
 		}

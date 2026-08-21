@@ -97,6 +97,23 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 			// acknowledgement is in flight, and a reader chasing a device that looks stuck
 			// needs to see which of the two is behind.
 			device["reported_version"] = c.AppliedVersion
+
+			// What the device says about its own data plane, absent until it has said
+			// something. Absent and "no peers" are different answers and only one of them
+			// is worth rendering, so the field is omitted rather than zeroed: a device that
+			// has not reported yet must not read as a device with nothing configured.
+			//
+			// Counts rather than a verdict. Whether this adds up to a problem is #116's
+			// question, and answering it here would settle that by accident.
+			if !c.Tunnel.ReportedAt.IsZero() {
+				device["tunnel"] = map[string]any{
+					"reported_at": c.Tunnel.ReportedAt.UTC(),
+					"peers":       c.Tunnel.Peers,
+					"handshaked":  c.Tunnel.Handshaked,
+					"talking":     c.Tunnel.Talking,
+					"relayed":     c.Tunnel.Relayed,
+				}
+			}
 		}
 		if d.AddressV4 != nil {
 			device["address_v4"] = d.AddressV4.String()

@@ -304,6 +304,18 @@ type sessionHandle struct {
 // Explicitly, because a nil *relaylink.Link assigned straight to an interface produces a
 // non-nil interface holding a nil pointer: every `if relay != nil` downstream would be true
 // and the first call would panic. Platforms with no data plane take exactly that path.
+// pathsOrNil hands over the reconciler as a path reporter, or nothing.
+//
+// A typed nil would satisfy the interface and be called, so the nil check has to happen
+// here rather than at the call site — the same trap the control plane's presence hook
+// documents.
+func pathsOrNil(r *tunnel.Reconciler) sessionclient.PathReports {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
 func relayOrNil(l *relaylink.Link) tunnel.Relay {
 	if l == nil {
 		return nil
@@ -458,7 +470,11 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 		CanFilter:    a.ensureFilter() != nil,
 		Revoked:      &membershipRevoker{agent: a, membershipID: m.MembershipID},
 		Reachability: chooser,
-		Log:          log,
+		// The same reconciler, asked a different question: what the tunnel it configured
+		// actually looks like. Nil on a platform with no data plane, where there is
+		// nothing to observe (#117).
+		Paths: pathsOrNil(applier.reconciler),
+		Log:   log,
 	})
 	a.running[m.MembershipID] = &sessionHandle{
 		cancel: cancel, client: client, applier: applier, relay: relay, started: time.Now().UTC(),

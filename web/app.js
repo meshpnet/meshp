@@ -125,8 +125,18 @@ function groupFaults(group) {
   return faults;
 }
 
-/** What is wrong with a device, in words. */
-function deviceFaults(device) {
+/**
+ * How long a control session must have been up before a tunnel with no handshakes counts
+ * as broken rather than as new.
+ *
+ * A device reports its data plane the moment it applies state, and at that point there
+ * have been no handshakes because there has not been time for any. Without this, every
+ * join would flash "has never carried anything" for as long as it took to be wrong.
+ */
+const TUNNEL_GRACE_SECONDS = 120;
+
+/** What is wrong with a device, in words. `asOf` is the server's clock, not this one's. */
+function deviceFaults(device, asOf) {
   const faults = [];
   if (device.state !== "active") return faults;
 
@@ -141,7 +151,40 @@ function deviceFaults(device) {
     // an installation that did not finish rather than a device that has gone away.
     faults.push("has never applied any configuration");
   }
+  // The one thing a path report is allowed to call a fault. A device can apply every
+  // version it is sent and pass no traffic at all, and until it reported its peers nothing
+  // could tell the difference (#117).
+  //
+  // "Never handshaked", not "handshaked a while ago". WireGuard renews a handshake when
+  // traffic flows, so a quiet peer looks stale while being perfectly healthy — but a peer
+  // that has never completed one has never carried a packet, and that is unambiguous.
+  if (device.tunnel && device.tunnel.peers > 0 && device.tunnel.handshaked === 0 && settled(device, asOf)) {
+    faults.push("tunnel has never carried anything: no peer has completed a handshake");
+  }
   return faults;
+}
+
+/**
+ * Whether this device has been connected long enough for "no handshakes" to mean anything.
+ *
+ * Both timestamps come from the server, so this survives a browser whose clock is wrong —
+ * which is the machine somebody is reading this on, and the one whose clock nobody checks.
+ */
+function settled(device, asOf) {
+  if (!device.connected_since || !asOf) return false;
+  const up = (Date.parse(asOf) - Date.parse(device.connected_since)) / 1000;
+  return Number.isFinite(up) && up > TUNNEL_GRACE_SECONDS;
+}
+
+/** How a device's data plane reads, in words. */
+function tunnelSummary(device) {
+  // Absent because the device has not said, which is not the same as having nothing.
+  if (!device.tunnel) return device.connected ? "not reported yet" : "—";
+  const { peers, talking, relayed } = device.tunnel;
+  if (peers === 0) return "no peers";
+  const bits = [`${talking} of ${peers} talking`];
+  if (relayed) bits.push(`${relayed} relayed`);
+  return bits.join(" · ");
 }
 
 // --- rendering ------------------------------------------------------------------------
@@ -238,9 +281,9 @@ function renderGroup(group) {
   );
 }
 
-function renderDevices(devices) {
+function renderDevices(devices, asOf) {
   const rows = devices.map((device) => {
-    const faults = deviceFaults(device);
+    const faults = deviceFaults(device, asOf);
     const addresses = [device.address_v4, device.address_v6].filter(Boolean);
 
     let stateLabel;
@@ -274,6 +317,7 @@ function renderDevices(devices) {
         addresses.length ? el("div", { class: "addr" }, addresses.join("  ")) : null,
       ),
       el("td", {}, dot(stateClass, stateLabel), " ", stateLabel),
+      el("td", { class: "note" }, tunnelSummary(device)),
       el("td", { class: "mono" }, versions),
       el(
         "td",
@@ -302,6 +346,7 @@ function renderDevices(devices) {
         {},
         el("th", {}, "Device"),
         el("th", {}, "Control session"),
+        el("th", {}, "Tunnel"),
         el("th", {}, "Applied version"),
         el("th", {}, "Reported faults"),
       ),
@@ -313,12 +358,12 @@ function renderDevices(devices) {
 
 function renderOverview(data, networks) {
   const groupFaultCount = data.route_groups.reduce((n, g) => n + groupFaults(g).length, 0);
-  const deviceFaultCount = data.devices.reduce((n, d) => n + deviceFaults(d).length, 0);
+  const deviceFaultCount = data.devices.reduce((n, d) => n + deviceFaults(d, data.as_of).length, 0);
 
   // Devices with something wrong first. A list sorted by name buries the one device the
   // page exists to surface somewhere in the middle of forty that are fine.
   const devices = [...data.devices].sort((a, b) => {
-    const byFault = (deviceFaults(b).length > 0) - (deviceFaults(a).length > 0);
+    const byFault = (deviceFaults(b, data.as_of).length > 0) - (deviceFaults(a, data.as_of).length > 0);
     if (byFault) return byFault;
     return a.device_name.localeCompare(b.device_name);
   });
@@ -334,7 +379,7 @@ function renderOverview(data, networks) {
     el(
       "div",
       { class: "panel" },
-      renderDevices(devices),
+      renderDevices(devices, data.as_of),
       data.devices_truncated
         ? el(
             "p",
