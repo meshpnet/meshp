@@ -133,6 +133,26 @@ curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
   their job. Returning is expensive — every connection through the tunnel drops again — so
   the policy is deliberately slower in that direction.
 
+## Why did my outbound IP change?
+
+Ask the audit trail. A device that moves itself between candidates says why, and the control
+plane records it (ADR-0003):
+
+```bash
+curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  "https://control.example.com/api/v1/networks/$NETWORK/audit?limit=20"
+```
+
+Look for `route.switched`. The `metadata` carries the agent's own words in `reason`, the
+candidate it left in `switched_from`, and the one it moved to. `actor_label` is the device
+that decided — the choice is the agent's, not the control plane's, so the trail names the
+machine that made it.
+
+The same endpoint holds enrolments, revocations and policy publications. It pages newest
+first: pass the `next_before` from one response as `?before=` to get the next page. There is
+no page number on purpose — events are only ever appended, so an offset would shift under
+you while you read.
+
 ## An API call is refused and I do not know why
 
 Refusals caused by what you sent carry the reason:
