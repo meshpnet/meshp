@@ -114,14 +114,31 @@ cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, short-lived, revocable server-s
 `DELETE` on the same path logs out. The token itself never reaches JavaScript and is never
 stored in the browser.
 
-**The cookie authorises the read endpoints in Decision 1 and nothing else.** It is a
-strictly weaker credential derived from the administrative one. Every existing route keeps
-requiring the bearer token.
+**The cookie authorises reads scoped to a network, and nothing else.** It is a strictly
+weaker credential derived from the administrative one. Every route that creates or changes
+something keeps requiring the bearer token, and so does anything that reads across networks
+or across organisations.
 
 That is what makes shipping this before real user accounts defensible, and it is the whole
 of the justification: a stolen browser session reads one network. The moment the UI grows
 a write path, per-user accounts stop being a follow-up and become a prerequisite — the
 tables are already in the schema waiting for a reader.
+
+*Amended 2026-08-21.* This originally named the endpoints in Decision 1 and nothing else,
+which was the wrong granularity and showed it the first time another read arrived: the
+audit trail (#125) shipped behind the administrative token purely because it was not on a
+list, leaving the page unable to answer "why did my outbound IP change?" while the record
+that answers it sat one route away. The boundary that carries the argument is read against
+write, not which reads — a list makes every future read endpoint an ADR amendment, and an
+amendment made to unblock a feature is one nobody weighs properly. Scoping by kind keeps
+the property that matters, which is that this credential cannot change anything and cannot
+see past the network it was opened on.
+
+What that admits: the audit trail carries more than the overview does — actor labels,
+source addresses, the reasons administrators typed. A stolen session now reads one
+network's history as well as its state. That is a real widening, accepted because it is the
+same kind of exposure rather than a new one, and because the alternative was a product that
+cannot show an operator why their traffic moved.
 
 The login endpoint refuses to mint a cookie over plaintext to anything but loopback. TLS
 is already supported both ways (`MESHP_TLS_CERT`, or `MESHP_TLS_DOMAINS` for automatic

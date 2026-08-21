@@ -287,7 +287,7 @@ function renderDevices(devices) {
   return el("div", { class: "scroll" }, table);
 }
 
-function renderOverview(data, networks) {
+function renderOverview(data, networks, history) {
 
   // Devices with something wrong first. A list sorted by name buries the one device the
   // page exists to surface somewhere in the middle of forty that are fine.
@@ -316,6 +316,56 @@ function renderOverview(data, networks) {
             "This network holds more devices than are shown. The list above is cut, not short.",
           )
         : null,
+    ),
+    el("h2", {}, "What has happened"),
+    renderHistory(history),
+  );
+}
+
+// What an action is, in words. Unknown codes render as themselves rather than being hidden
+// or guessed at: a new one is a line somebody should see, not a line that quietly vanishes.
+const ACTIONS = {
+  "device.enrolled": "joined the network",
+  "device.revoked": "was removed from the network",
+  "policy.published": "published a policy",
+  "route.switched": "moved to another candidate",
+};
+
+/** The audit trail, newest first. */
+function renderHistory(history) {
+  if (history === null) {
+    return el("div", { class: "panel note" }, "The history could not be read just now.");
+  }
+  if (!history.length) {
+    return el("div", { class: "panel note" }, "Nothing has been recorded for this network yet.");
+  }
+
+  const rows = history.map((event) => {
+    const metadata = event.metadata || {};
+    const bits = [];
+    // The agent's own account of why it moved, which is the whole reason this record
+    // exists — the schema describes it as what answers "why did my outbound IP change?".
+    if (metadata.reason) bits.push(metadata.reason);
+    if (metadata.switched_from) bits.push("was on another candidate");
+
+    return el(
+      "li",
+      { class: "event" },
+      el("span", { class: "when mono" }, new Date(event.at).toLocaleString()),
+      el("span", { class: "who" }, event.actor_label || event.actor_kind),
+      el("span", {}, ACTIONS[event.action] || event.action),
+      bits.length ? el("span", { class: "why" }, bits.join(" · ")) : null,
+    );
+  });
+
+  return el(
+    "div",
+    { class: "panel" },
+    el("ul", { class: "events" }, rows),
+    el(
+      "p",
+      { class: "note" },
+      "The ten most recent. The whole trail is at /api/v1/networks/{id}/audit, newest first.",
     ),
   );
 }
@@ -432,12 +482,35 @@ function stopPolling() {
   pollTimer = null;
 }
 
+/**
+ * The audit trail is read separately from the overview, and that is not the mistake
+ * ADR-0022 §1 rules out.
+ *
+ * That rule is about current state: devices from one instant beside route groups from
+ * another render a network that never existed. History cannot do that. Events are appended
+ * and never change, so a page of them read a moment later than the state beside it says the
+ * same thing it would have said a moment earlier — the two panels do not describe one
+ * instant and are not presented as though they do.
+ *
+ * Failing is not fatal. The question this page exists to answer is in the overview; the
+ * history is context, and losing it should not blank a screen somebody is reading during an
+ * outage.
+ */
+async function fetchHistory(networkID) {
+  try {
+    const body = await api(`/api/v1/networks/${encodeURIComponent(networkID)}/audit?limit=10`);
+    return body.events || [];
+  } catch {
+    return null;
+  }
+}
+
 async function poll(networkID, networks) {
   try {
     const data = await api(`/api/v1/networks/${encodeURIComponent(networkID)}/overview`);
     lastGood = data;
     lastGoodAt = Date.now();
-    renderOverview(data, networks);
+    renderOverview(data, networks, await fetchHistory(networkID));
     renderFreshness(null);
     // The server decides how often it is asked, so a deployment under load can slow its
     // pages down without shipping a new one.

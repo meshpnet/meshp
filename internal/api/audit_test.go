@@ -165,10 +165,9 @@ func TestABadCursorIsRefused(t *testing.T) {
 	}
 }
 
-// The browser's cookie does not reach this. ADR-0022 §5 scopes it to the endpoints it names,
-// and an audit trail carries more than the overview does — actor labels, source addresses,
-// and the reasons an administrator gave.
-func TestTheAuditTrailNeedsTheAdministrativeToken(t *testing.T) {
+// Some credential is required. The trail carries actor labels, source addresses and the
+// reasons administrators typed, and none of that is public.
+func TestTheAuditTrailNeedsACredential(t *testing.T) {
 	h := newHarness(t)
 
 	resp, err := http.Get(h.server.URL + "/api/v1/networks/" + h.netID.String() + "/audit")
@@ -178,6 +177,43 @@ func TestTheAuditTrailNeedsTheAdministrativeToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status without a credential = %d, want 401", resp.StatusCode)
+	}
+}
+
+// And the browser's cookie is one of them, as of the amendment to ADR-0022 §5: that cookie
+// is scoped to reads within one network, and this is one. It shipped behind the
+// administrative token in #125 purely because §5 named endpoints rather than a kind, which
+// left the page unable to answer "why did my outbound IP change?" while the record that
+// answers it sat one route away.
+func TestABrowserSessionReachesTheAuditTrail(t *testing.T) {
+	h := newHarness(t)
+	writeAuditEvents(t, h, 1)
+
+	resp := h.withCookie(http.MethodGet, "/api/v1/networks/"+h.netID.String()+"/audit", h.login())
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a browser session reading the audit trail = %d, want 200", resp.StatusCode)
+	}
+
+	var page auditPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 {
+		t.Errorf("%d events, want 1", len(page.Events))
+	}
+}
+
+// The widening is to reads within one network and no further. Everything that changes
+// something still needs the bearer token, which is the property the whole of §5 rests on.
+func TestABrowserSessionStillCannotWrite(t *testing.T) {
+	h := newHarness(t)
+
+	resp := h.withCookie(http.MethodPost,
+		"/api/v1/networks/"+h.netID.String()+"/enrollment-tokens", h.login())
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a browser session minting an enrolment token = %d, want 401", resp.StatusCode)
 	}
 }
 
