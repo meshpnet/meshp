@@ -162,7 +162,7 @@ FROM route_advertisers a
 JOIN route_groups g ON g.id = a.route_group_id
 WHERE a.id = $1 AND g.network_id = $2;
 
--- name: UpsertRouteAssignment :execrows
+-- name: UpsertRouteAssignment :one
 -- Record which candidate a device says it is currently using.
 --
 -- An observation, never an instruction. ADR-0003 gives the server authorisation and order
@@ -180,7 +180,12 @@ WHERE a.id = $1 AND g.network_id = $2;
 -- on every heartbeat, and an UPDATE that ran each time would write a row per device per
 -- group every twenty-five seconds — the write rate ADR-0012 exists to keep away from the
 -- tables holding desired state. Unchanged reports now cost a conflict check and nothing
--- else, and the row count tells the caller whether anything actually moved.
+-- else, and no row comes back at all when nothing moved.
+--
+-- The version is returned because it says which kind of change this was without a second
+-- query: 1 is a device recording a choice for the first time, and anything higher is a
+-- device that moved. Only the second is worth an audit event — the first happens on every
+-- enrolment and describes nothing going wrong.
 INSERT INTO route_assignments (
     membership_id, route_group_id, advertiser_id, reason, decided_locally
 ) VALUES ($1, $2, $3, $4, true)
@@ -190,7 +195,8 @@ SET advertiser_id   = EXCLUDED.advertiser_id,
     decided_locally = true,
     version         = route_assignments.version + 1,
     assigned_at     = now()
-WHERE route_assignments.advertiser_id IS DISTINCT FROM EXCLUDED.advertiser_id;
+WHERE route_assignments.advertiser_id IS DISTINCT FROM EXCLUDED.advertiser_id
+RETURNING version;
 
 -- name: CountRouteAssignments :many
 -- How many devices report currently using each candidate, per group.
