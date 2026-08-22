@@ -23,9 +23,19 @@ table:role_bindings    — as above
 table:groups           — as above
 table:group_members    — as above
 
-# --- configuration overtook the table ------------------------------------------------------
+# --- deferred with a stated trigger --------------------------------------------------------
 #
-table:relays           — relays come from MESHP_RELAYS; whether this table should exist at all is an open question
+# Not forgotten and not an open question, which is what this entry used to claim. The
+# decision is recorded where the code makes it, in ParseRelays: "Configuration rather than a
+# database table for now. A table is right eventually — relays will have regions and health —
+# but a deployment with one relay should not need a migration to name it."
+#
+# Neither half of that trigger exists: nothing reads a relay's region, and there is no relay
+# health at all, which is why last_seen_at has no writer either. What the deferral costs is
+# worth knowing before somebody picks this up: taking a relay out of service means editing
+# MESHP_RELAYS and restarting the control plane, all-or-nothing, because 'draining' lives in
+# this table and nothing reads it. Tracked in #128.
+table:relays           — configuration overtook it, deliberately; see ParseRelays and #128
 
 
 # --- direct paths -------------------------------------------------------------------------
