@@ -11,9 +11,9 @@ import (
 func (f *fixture) publish(rules ...acl.Rule) {
 	f.t.Helper()
 	if _, err := f.store.PublishPolicy(f.ctx, store.PublishPolicyRequest{
-		NetworkID:  f.netID,
-		Document:   acl.Document{Version: acl.Version, Rules: rules},
-		ActorLabel: "test",
+		NetworkID: f.netID,
+		Document:  acl.Document{Version: acl.Version, Rules: rules},
+		Actor:     store.BootstrapActor(),
 	}); err != nil {
 		f.t.Fatalf("publishing a policy: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestARevokedDeviceLeavesEveryFilter(t *testing.T) {
 	}
 
 	if _, err := f.store.RevokeMembership(f.ctx, store.RevokeRequest{
-		NetworkID: f.netID, MembershipID: bob.membershipID,
+		NetworkID: f.netID, MembershipID: bob.membershipID, Actor: store.BootstrapActor(),
 	}); err != nil {
 		t.Fatal(err)
 	}

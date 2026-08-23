@@ -111,18 +111,16 @@ func (s *Store) PublishPolicy(ctx context.Context, req PublishPolicyRequest) (Po
 			"rules":          len(req.Document.Rules),
 		})
 		networkID := req.NetworkID
-		if _, err := q.CreateAuditEvent(ctx, dbgen.CreateAuditEventParams{
+		if err := WriteAudit(ctx, q, req.Actor, dbgen.CreateAuditEventParams{
 			OrganizationID: req.OrganizationID,
 			NetworkID:      &networkID,
-			ActorKind:      "api_token",
-			ActorLabel:     req.ActorLabel,
 			Action:         "policy.published",
 			ResourceKind:   "acl_policy",
 			ResourceID:     &row.ID,
 			SourceIp:       req.SourceIP,
 			Metadata:       metadata,
 		}); err != nil {
-			return fmt.Errorf("store: writing the policy audit event: %w", err)
+			return err
 		}
 
 		out = Policy{
@@ -147,8 +145,9 @@ type PublishPolicyRequest struct {
 
 	OrganizationID  *uuid.UUID
 	CreatedByUserID *uuid.UUID
-	ActorLabel      string
-	SourceIP        *netip.Addr
+	// Actor is who is publishing. Required, like every audited action here.
+	Actor    Actor
+	SourceIP *netip.Addr
 }
 
 // PolicyDevices returns everything the compiler needs about a network's members.

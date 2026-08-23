@@ -204,3 +204,59 @@ func requestAddr(r *http.Request) *netip.Addr {
 	addr := addrPort.Addr().Unmap()
 	return &addr
 }
+
+// actor is who this request is, for the audit trail.
+//
+// A signed-in person where there is one; the bootstrap secret otherwise. There is no third
+// answer: a request that reached an audited handler got past adminOnly, which accepts
+// exactly those two things.
+//
+// The label for a person is their email rather than their display name, because an audit
+// line is read months later by somebody trying to reach whoever did it, and a display name
+// is not a way to reach anyone.
+func (s *Server) actor(r *http.Request) store.Actor {
+	if user := s.sessionUser(r); user != nil {
+		return store.UserActor(*user)
+	}
+	return store.BootstrapActor()
+}
+
+// warnBootstrapTokenUsed says, at most occasionally, that the administrative token was used
+// on a deployment that has accounts.
+//
+// ADR-0024 §5 keeps the token working — a deployment locked out of its own control plane has
+// no other way back — and asks that using it stop being invisible. Once an account exists,
+// reaching for the shared secret means somebody is using it *instead of* an account, and
+// that is a fact an operator should be able to see in a log rather than infer.
+//
+// Throttled hard, and for two reasons rather than one. The obvious one is log noise: the
+// commercial layer polls with a bearer token and would otherwise write a line per request.
+// The less obvious one is the query behind it — "does this deployment have accounts" is a
+// count, and asking it per request would put a scan of the users table in front of every
+// administrative call to save a message nobody reads more than once an hour.
+func (s *Server) warnBootstrapTokenUsed(r *http.Request) {
+	const every = time.Hour
+
+	now := s.cfg.Clock.Now()
+	last := s.bootstrapWarnedAt.Load()
+	if last != nil && now.Sub(*last) < every {
+		return
+	}
+	if !s.bootstrapWarnedAt.CompareAndSwap(last, &now) {
+		// Another request got there first. One of us logs; it does not matter which.
+		return
+	}
+
+	accounts, err := s.store.AnyUsers(r.Context())
+	if err != nil || !accounts {
+		// No accounts is the ordinary bootstrap state and says nothing worth logging. A
+		// failed count is not worth a second message either — whatever is wrong with the
+		// database will be reported by the request that actually needed it.
+		return
+	}
+	s.log.Warn("the bootstrap administrative token was used on a deployment that has accounts",
+		"path", logx.Safe(r.URL.Path),
+		"remote", logx.Safe(clientKey(r)),
+		"hint", "sign in as a user instead; this token is the way back in when nobody can, "+
+			"and every use of it is recorded as nobody in particular")
+}

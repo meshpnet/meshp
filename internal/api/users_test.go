@@ -266,3 +266,81 @@ func TestSigningOutEndsTheSession(t *testing.T) {
 		t.Errorf("the cookie still works after signing out: %d", status)
 	}
 }
+
+// The point of the slice: an administrative action done by a signed-in person names them.
+//
+// Four subsystems have written audit events since the first migration, and every one landed
+// as `api_token` with no id — the trail could say what happened and never who.
+func TestAnActionByAPersonNamesThem(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "alice@example.com")
+	cookie := signIn(t, h, "alice@example.com", testPassword)
+
+	// Publishing a policy is an audited administrative act, done here as Alice.
+	status, _, body := doJSON(t, http.MethodPut,
+		h.server.URL+"/api/v1/networks/"+h.netID.String()+"/acl",
+		map[string]any{"version": 1, "rules": []any{}}, cookie, false)
+	if status != http.StatusOK && status != http.StatusCreated {
+		t.Fatalf("publishing a policy as a signed-in person = %d: %v", status, body)
+	}
+
+	events := auditFor(t, h, "policy.published")
+	if len(events) == 0 {
+		t.Fatal("publishing a policy wrote no audit event")
+	}
+	event := events[0]
+	if event["actor_kind"] != "user" {
+		t.Errorf("actor_kind = %v, want user", event["actor_kind"])
+	}
+	if event["actor_label"] != "alice@example.com" {
+		t.Errorf("actor_label = %v, want the address", event["actor_label"])
+	}
+	if event["actor_id"] == nil {
+		t.Error("the event names no actor id, so the trail cannot be joined to a person")
+	}
+}
+
+// The same action done with the bootstrap secret says that it was the bootstrap secret. It
+// still cannot name a person — a shared secret has no identity — but "somebody used the root
+// credential" stops being something you infer from an empty column.
+func TestAnActionByTheBootstrapSecretSaysSo(t *testing.T) {
+	h := newHarness(t)
+
+	status, _, body := doJSON(t, http.MethodPut,
+		h.server.URL+"/api/v1/networks/"+h.netID.String()+"/acl",
+		map[string]any{"version": 1, "rules": []any{}}, nil, true)
+	if status != http.StatusOK && status != http.StatusCreated {
+		t.Fatalf("publishing a policy with the token = %d: %v", status, body)
+	}
+
+	events := auditFor(t, h, "policy.published")
+	if len(events) == 0 {
+		t.Fatal("publishing a policy wrote no audit event")
+	}
+	if events[0]["actor_kind"] != "api_token" {
+		t.Errorf("actor_kind = %v, want api_token", events[0]["actor_kind"])
+	}
+	label, _ := events[0]["actor_label"].(string)
+	if label == "" {
+		t.Error("the bootstrap secret is still anonymous in the trail")
+	}
+}
+
+// auditFor reads the trail and returns the events of one kind, newest first.
+func auditFor(t *testing.T, h *harness, action string) []map[string]any {
+	t.Helper()
+	status, _, body := doJSON(t, http.MethodGet,
+		h.server.URL+"/api/v1/networks/"+h.netID.String()+"/audit?limit=50", nil, nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("reading the audit trail = %d: %v", status, body)
+	}
+	raw, _ := body["events"].([]any)
+	var out []map[string]any
+	for _, item := range raw {
+		event, _ := item.(map[string]any)
+		if event["action"] == action {
+			out = append(out, event)
+		}
+	}
+	return out
+}

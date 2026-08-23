@@ -13,6 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const countUsers = `-- name: CountUsers :one
+SELECT count(*)::bigint FROM users WHERE deleted_at IS NULL
+`
+
+// scope: global whether this deployment has any accounts at all is a property of the
+// deployment, not of a tenant. It is asked so the control plane can say, when somebody uses
+// the bootstrap secret, that there is now an account they could be using instead — a
+// question no organisation owns.
+func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsers)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createUser = `-- name: CreateUser :one
 
 INSERT INTO users (organization_id, email, name, password_hash)

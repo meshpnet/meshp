@@ -228,23 +228,16 @@ func auditRouteSwitch(ctx context.Context, q *dbgen.Queries, req ObserveRequest,
 	})
 
 	networkID := req.NetworkID
-	actorID := req.DeviceID
 	orgID := network.OrganizationID
-	if _, err := q.CreateAuditEvent(ctx, dbgen.CreateAuditEventParams{
+	// Not "system". The schema's comment on that value predates ADR-0003, which moved the
+	// choice to the agent: this is a device reporting something it did, and filing it under
+	// the control plane would credit the wrong actor.
+	return WriteAudit(ctx, q, DeviceActor(req.DeviceID, label), dbgen.CreateAuditEventParams{
 		OrganizationID: &orgID,
 		NetworkID:      &networkID,
-		// Not "system". The schema's comment on that value predates ADR-0003, which moved
-		// the choice to the agent: this is a device reporting something it did, and filing
-		// it under the control plane would credit the wrong actor.
-		ActorKind:    "device",
-		ActorID:      &actorID,
-		ActorLabel:   label,
-		Action:       "route.switched",
-		ResourceKind: "route_group",
-		ResourceID:   &groupID,
-		Metadata:     metadata,
-	}); err != nil {
-		return fmt.Errorf("store: writing the route switch audit event: %w", err)
-	}
-	return nil
+		Action:         "route.switched",
+		ResourceKind:   "route_group",
+		ResourceID:     &groupID,
+		Metadata:       metadata,
+	})
 }
