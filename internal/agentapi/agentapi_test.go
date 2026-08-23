@@ -24,11 +24,20 @@ type fakeHandler struct {
 	joinResp JoinResponse
 	joinErr  error
 	joined   []JoinRequest
+	running  []bool
 }
 
 func (h *fakeHandler) Status(context.Context) (Status, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.status, nil
+}
+
+func (h *fakeHandler) SetRunning(_ context.Context, running bool) (Status, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.status.Paused = !running
+	h.running = append(h.running, running)
 	return h.status, nil
 }
 
@@ -348,4 +357,35 @@ func structFieldNames(v any) string {
 		b.WriteString(" ")
 	}
 	return b.String()
+}
+
+// `meshp down` and `meshp up` reach the daemon, and both come back with what the device is
+// doing now rather than an empty body — so whoever asked can say what happened instead of
+// assuming it worked.
+func TestUpAndDownReachTheDaemonAndReportBack(t *testing.T) {
+	h := &fakeHandler{status: Status{Enrolled: true}}
+	_, path := serve(t, h, ServerConfig{})
+	client := NewClient(path, 5*time.Second)
+
+	down, err := client.SetRunning(context.Background(), false)
+	if err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if !down.Paused {
+		t.Error("the status after down does not say the device is paused")
+	}
+
+	up, err := client.SetRunning(context.Background(), true)
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if up.Paused {
+		t.Error("the status after up still says the device is paused")
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.running) != 2 || h.running[0] || !h.running[1] {
+		t.Errorf("the daemon was asked for %v, want [false true]", h.running)
+	}
 }
