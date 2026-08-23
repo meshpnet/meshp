@@ -70,6 +70,19 @@ func (c *Client) Join(ctx context.Context, req JoinRequest) (JoinResponse, error
 	return out, err
 }
 
+// SetRunning takes this device off the mesh, or puts it back.
+func (c *Client) SetRunning(ctx context.Context, running bool) (Status, error) {
+	path := "/v1/down"
+	if running {
+		path = "/v1/up"
+	}
+	var out Status
+	// No body. The path says which way, and a body saying it again is a second place for
+	// the two to disagree.
+	err := c.do(ctx, http.MethodPost, path, nil, &out)
+	return out, err
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {

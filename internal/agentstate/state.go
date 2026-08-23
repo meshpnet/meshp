@@ -53,6 +53,13 @@ type State struct {
 
 	Memberships []Membership `json:"memberships"`
 
+	// Paused is set when somebody ran `meshp down`.
+	//
+	// Persisted, because a reboot must not undo it. A device that came back up carrying
+	// traffic its owner had deliberately taken off the mesh would be the opposite of what
+	// they asked for, and they would have no reason to check.
+	Paused bool `json:"paused,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

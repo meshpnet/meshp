@@ -400,6 +400,15 @@ func (a *agent) load() error {
 
 // startAll supervises a session for every membership.
 func (a *agent) startAll() {
+	// Nothing starts while this device is deliberately off the mesh. Checked here rather
+	// than at each call site, because the call sites are "the daemon started" and "somebody
+	// ran meshp up", and only one of them knows about pausing.
+	if a.paused() {
+		a.log.Info("staying off the mesh; this device was taken down deliberately",
+			"restore", "meshp up")
+		return
+	}
+
 	a.mu.Lock()
 	memberships := a.membershipsLocked()
 	a.mu.Unlock()
@@ -589,6 +598,7 @@ func (a *agent) Status(_ context.Context) (agentapi.Status, error) {
 		Version:   version.Version(),
 		StartedAt: a.startedAt,
 		Enrolled:  a.state != nil,
+		Paused:    a.state != nil && a.state.Paused,
 	}
 	// Before the enrolment check, because a resolver that is up on a device with no
 	// memberships is still a fact worth reporting — and its absence on a device that has

@@ -303,3 +303,42 @@ func TestRemoveMembershipKeepsTheIdentity(t *testing.T) {
 		t.Error("a forgotten identity still loads")
 	}
 }
+
+// Being taken off the mesh survives a restart.
+//
+// The whole point of `meshp down`: a device that came back up carrying traffic its owner
+// had deliberately taken off the mesh would be the opposite of what they asked for, and
+// they would have no reason to check.
+func TestPausedSurvivesARoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	state := &State{IdentityPublicKey: "pub", IdentityPrivateKey: "priv", Paused: true}
+	if err := Save(dir, state); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Paused {
+		t.Error("a device taken off the mesh came back on it after a restart")
+	}
+}
+
+// And the ordinary case stays ordinary: a state written before this field existed loads as
+// running, not as paused. `omitempty` keeps it out of the file entirely.
+func TestAStateWithoutTheFieldIsNotPaused(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := Save(dir, &State{IdentityPublicKey: "pub", IdentityPrivateKey: "priv"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Paused {
+		t.Error("a device that was never taken down loaded as paused")
+	}
+}

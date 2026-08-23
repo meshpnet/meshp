@@ -29,6 +29,14 @@ type Status struct {
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
 
+	// Paused is true when somebody ran `meshp down`.
+	//
+	// Reported because it is the difference between "nothing is connected because
+	// something is broken" and "nothing is connected because you asked for that", and a
+	// status that could not tell them apart would send people debugging their own
+	// decision.
+	Paused bool `json:"paused"`
+
 	// Enrolled is false when there is no local state at all, which is a normal
 	// condition rather than an error: the agent may be installed before anyone has a
 	// token.

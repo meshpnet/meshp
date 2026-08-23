@@ -105,6 +105,12 @@ func main() {
 	case "doctor":
 		runOrDie(cmdDoctor, args[1:])
 		return
+	case "up":
+		runOrDie(cmdUp, args[1:])
+		return
+	case "down":
+		runOrDie(cmdDown, args[1:])
+		return
 	}
 
 	if contains(bareVerbs, args[0]) {
@@ -230,6 +236,16 @@ func cmdStatus(ctx context.Context, args []string) error {
 		// bound should not have to enrol first to find out.
 		printResolver(status)
 		return nil
+	}
+
+	if status.Paused {
+		// First, and before anything else is described. Somebody reading a status full of
+		// disconnected sessions needs to know they asked for that — otherwise they debug
+		// their own decision, which is the most frustrating kind of outage.
+		fmt.Println("DOWN      this device was taken off the mesh with 'meshp down'")
+		fmt.Println("          traffic is using this machine's ordinary network")
+		fmt.Println("          run 'sudo meshp up' to put it back")
+		fmt.Println()
 	}
 
 	fmt.Printf("enrolled  %d network(s)\n", len(status.Memberships))

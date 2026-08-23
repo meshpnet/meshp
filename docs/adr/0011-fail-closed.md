@@ -44,6 +44,19 @@ can ship (Invariant 20).
 
 ## Consequences
 
+*Amended 2026-08-22.* `meshp down` releases the lock. This decision is about what happens
+when a tunnel **fails**: a device that loses one stops passing traffic rather than putting
+the user's real address back on the wire. It is not about what happens when somebody asks
+for their ordinary network back. A command called "down" that left a machine unable to
+reach anything, with no obvious way to undo it, would manufacture the very support ticket
+this record predicts out of a deliberate act — and the person at the keyboard would have
+been told, by the tool, that taking the tunnel down was a thing they could do.
+
+So it is released, and `meshp down` says plainly that traffic is no longer going through
+the mesh, because somebody who forgets is somebody leaking. The state is persisted: a
+reboot does not put a device back on the mesh that its owner took off.
+
+
 Users get the property they actually bought, including across sleep, network
 changes and crashes. Administrators can guarantee it for a fleet.
 

@@ -23,6 +23,13 @@ import (
 type Handler interface {
 	Status(ctx context.Context) (Status, error)
 	Join(ctx context.Context, req JoinRequest) (JoinResponse, error)
+
+	// SetRunning takes this device off the mesh, or puts it back.
+	//
+	// One method rather than two, because the two are the same decision with opposite
+	// answers and a pair would let a caller ask for both. Idempotent: asking for a state
+	// the device is already in is success, since that is what the caller wanted.
+	SetRunning(ctx context.Context, running bool) (Status, error)
 }
 
 // ServerConfig configures the local listener.
@@ -86,6 +93,8 @@ func (s *Server) Listen() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
+	mux.HandleFunc("POST /v1/up", s.handleUp)
+	mux.HandleFunc("POST /v1/down", s.handleDown)
 	s.http = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -228,6 +237,24 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.respond(w, http.StatusCreated, res)
+}
+
+// handleUp and handleDown put this device on or off the mesh.
+//
+// Both answer with the resulting status rather than an empty body, so whoever asked can say
+// what the machine is doing now instead of assuming it worked.
+func (s *Server) handleUp(w http.ResponseWriter, r *http.Request)   { s.setRunning(w, r, true) }
+func (s *Server) handleDown(w http.ResponseWriter, r *http.Request) { s.setRunning(w, r, false) }
+
+func (s *Server) setRunning(w http.ResponseWriter, r *http.Request, running bool) {
+	status, err := s.handler.SetRunning(r.Context(), running)
+	if err != nil {
+		s.log.Error("could not change whether this device is on the mesh",
+			"running", running, "error", logx.SafeError(err))
+		s.fail(w, http.StatusInternalServerError, "failed", err.Error())
+		return
+	}
+	s.respond(w, http.StatusOK, status)
 }
 
 func (s *Server) respond(w http.ResponseWriter, status int, body any) {
