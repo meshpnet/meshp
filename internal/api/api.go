@@ -140,6 +140,20 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/organizations", s.adminOnly(s.handleCreateOrganization))
 	mux.Handle("GET /api/v1/organizations", s.adminOnly(s.handleListOrganizations))
 
+	// People (ADR-0024). Every account these make is an administrator account until roles
+	// land, which adminOnly says at more length.
+	mux.Handle("POST /api/v1/organizations/{organizationID}/users", s.adminOnly(s.handleCreateUser))
+	mux.Handle("GET /api/v1/organizations/{organizationID}/users", s.adminOnly(s.handleListUsers))
+	mux.Handle("PUT /api/v1/organizations/{organizationID}/users/{userID}/suspended", s.adminOnly(s.handleSetUserSuspended))
+	mux.Handle("PUT /api/v1/organizations/{organizationID}/users/{userID}/password", s.adminOnly(s.handleSetUserPassword))
+	mux.Handle("DELETE /api/v1/organizations/{organizationID}/users/{userID}", s.adminOnly(s.handleDeleteUser))
+
+	// Who this request is, and the one password a session may change without help. Neither
+	// is behind adminOnly: they are about the caller rather than about the deployment, and
+	// gating "who am I" on being an administrator would make the sign-in page unable to ask.
+	mux.Handle("GET /api/v1/me", http.HandlerFunc(s.handleWhoAmI))
+	mux.Handle("POST /api/v1/me/password", http.HandlerFunc(s.handleChangeOwnPassword))
+
 	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
 	mux.Handle("GET /api/v1/networks", s.readable(s.handleListNetworks))
 
@@ -192,12 +206,22 @@ func (s *Server) rateLimited(next http.HandlerFunc) http.Handler {
 	})
 }
 
-// adminOnly gates a handler behind the bootstrap secret.
+// adminOnly gates a handler behind the bootstrap secret, or a signed-in person.
+//
+// A signed-in person passes, and that is the whole permission model for now: ADR-0024 §4
+// puts roles in a later slice, so **every user account is an administrator account**. It
+// cannot be otherwise — there are no limits to apply — and it is written here rather than
+// left to be discovered, because an endpoint that creates users looks like one that could
+// create a limited one.
 func (s *Server) adminOnly(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.sessionUser(r) != nil {
+			next(w, r)
+			return
+		}
 		if s.cfg.AdminToken == "" {
 			httpx.Error(w, s.log, http.StatusServiceUnavailable, "admin_disabled",
-				"the administrative API is not configured; set MESHP_ADMIN_TOKEN")
+				"sign in, or set MESHP_ADMIN_TOKEN to bootstrap the first account")
 			return
 		}
 
@@ -271,6 +295,8 @@ var knownFailures = []struct {
 	{enroll.ErrChallengeInvalid, failure{http.StatusBadRequest, "challenge_invalid", "the challenge is not valid for this token and key"}},
 	{store.ErrRecordExists, failure{http.StatusConflict, "record_exists", "that record already exists"}},
 	{store.ErrOrganizationExists, failure{http.StatusConflict, "organization_exists", "an organisation with that name already exists"}},
+	{store.ErrUserExists, failure{http.StatusConflict, "user_exists", "a user with that address already exists in this organisation"}},
+	{store.ErrNoSuchUser, failure{http.StatusNotFound, "no_such_user", "no such user in this organisation"}},
 	{store.ErrNoSuchRecord, failure{http.StatusNotFound, "no_such_record", "no such record in this network"}},
 	{enroll.ErrChallengeExpired, failure{http.StatusBadRequest, "challenge_expired", "the challenge has expired; request another"}},
 	{enroll.ErrProofFailed, failure{http.StatusUnauthorized, "proof_failed", "the signature over the challenge did not verify"}},

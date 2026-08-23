@@ -14,10 +14,10 @@
 
 # --- waiting for the authentication work ---------------------------------------------------
 #
-# ADR-0022 §5 ships the browser view on a cookie derived from the single admin token, and is
-# explicit that per-user accounts become a prerequisite the moment the UI grows a write path.
-# These are the tables that work will read. They have been in the schema since migration 0001.
-table:users            — no accounts exist yet; ADR-0022 §5 defers them and says when they stop being deferrable
+# Users and sessions exist as of ADR-0024's first slice; what is left here is authorisation.
+# Every authenticated caller is currently equivalent, so there is nothing yet that reads a
+# role or a binding — and nothing should pretend to. These graduate with the permission
+# slice, which is the one that gives them a reader.
 table:roles            — as above
 table:role_bindings    — as above
 table:groups           — as above

@@ -307,6 +307,17 @@ type User struct {
 	DeletedAt      *time.Time
 }
 
+type UserSession struct {
+	TokenHash     []byte
+	UserID        uuid.UUID
+	CreatedAt     time.Time
+	IdleExpiresAt time.Time
+	ExpiresAt     time.Time
+	LastSeenAt    *time.Time
+	UserAgent     string
+	SourceIp      *netip.Addr
+}
+
 type WireguardKey struct {
 	ID           uuid.UUID
 	MembershipID uuid.UUID
