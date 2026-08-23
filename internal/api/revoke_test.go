@@ -211,6 +211,7 @@ func TestARevokedDeviceIsStillListed(t *testing.T) {
 func TestRevokingAnUnknownMembership(t *testing.T) {
 	h := newHarness(t)
 	_, err := h.store.RevokeMembership(h.ctx, store.RevokeRequest{
+		Actor:        store.BootstrapActor(),
 		NetworkID:    h.netID,
 		MembershipID: uuid.New(),
 	})

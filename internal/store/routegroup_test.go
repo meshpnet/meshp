@@ -108,6 +108,7 @@ func TestARevokedAdvertiserIsNotOffered(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, MembershipID: membershipID,
 	}); err != nil {
 		t.Fatal(err)

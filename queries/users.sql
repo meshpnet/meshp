@@ -95,3 +95,10 @@ DELETE FROM user_sessions WHERE user_id = $1;
 -- nobody and is removed on everybody's behalf, so scoping this to one organisation would
 -- leave every other organisation's dead rows behind and make the sweep a per-tenant chore.
 DELETE FROM user_sessions WHERE expires_at < now() OR idle_expires_at < now();
+
+-- name: CountUsers :one
+-- scope: global whether this deployment has any accounts at all is a property of the
+-- deployment, not of a tenant. It is asked so the control plane can say, when somebody uses
+-- the bootstrap secret, that there is now an account they could be using instead — a
+-- question no organisation owns.
+SELECT count(*)::bigint FROM users WHERE deleted_at IS NULL;

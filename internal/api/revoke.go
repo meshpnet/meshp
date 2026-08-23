@@ -48,7 +48,7 @@ func (s *Server) handleRevokeMembership(w http.ResponseWriter, r *http.Request) 
 		NetworkID:    networkID,
 		MembershipID: membershipID,
 		Reason:       body.Reason,
-		ActorLabel:   "admin token",
+		Actor:        s.actor(r),
 		SourceIP:     sourceAddr(r),
 	}
 	// Best effort: the organisation only labels the audit row, and failing to read it is

@@ -185,6 +185,7 @@ func TestARevokedAdvertiserLeavesTheCandidates(t *testing.T) {
 	f.advertise("branch-lan", backup, 2)
 
 	if _, err := f.store.RevokeMembership(f.ctx, store.RevokeRequest{
+		Actor:     store.BootstrapActor(),
 		NetworkID: f.netID, MembershipID: primary.membershipID,
 	}); err != nil {
 		t.Fatal(err)

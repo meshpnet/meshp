@@ -408,3 +408,17 @@ func hashSessionToken(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
 }
+
+// AnyUsers reports whether this deployment has any accounts.
+//
+// Asked so the control plane can tell somebody using the bootstrap secret that there is now
+// an account they could be using instead (ADR-0024 §5). It is a count rather than a flag on
+// the server because a second replica, or a user created by hand, must change the answer
+// without a restart.
+func (s *Store) AnyUsers(ctx context.Context) (bool, error) {
+	n, err := s.Queries().CountUsers(ctx)
+	if err != nil {
+		return false, fmt.Errorf("store: counting users: %w", err)
+	}
+	return n > 0, nil
+}

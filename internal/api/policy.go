@@ -76,10 +76,10 @@ func (s *Server) handlePublishPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := store.PublishPolicyRequest{
-		NetworkID:  networkID,
-		Document:   doc,
-		ActorLabel: "admin token",
-		SourceIP:   sourceAddr(r),
+		NetworkID: networkID,
+		Document:  doc,
+		Actor:     s.actor(r),
+		SourceIP:  sourceAddr(r),
 	}
 	if network, err := s.store.Queries().GetNetwork(r.Context(), networkID); err == nil {
 		req.OrganizationID = &network.OrganizationID

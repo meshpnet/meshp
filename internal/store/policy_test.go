@@ -89,6 +89,7 @@ func TestPublishAndReadBack(t *testing.T) {
 	ctx := testContext(t)
 
 	published, err := s.PublishPolicy(ctx, PublishPolicyRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, Document: simplePolicy(), OrganizationID: &s.orgID,
 	})
 	if err != nil {
@@ -118,6 +119,7 @@ func TestVersionsAlwaysMoveForward(t *testing.T) {
 
 	for want := int32(1); want <= 3; want++ {
 		got, err := s.PublishPolicy(ctx, PublishPolicyRequest{
+			Actor:     BootstrapActor(),
 			NetworkID: s.netID, Document: simplePolicy(),
 		})
 		if err != nil {
@@ -143,6 +145,7 @@ func TestVersionsAlwaysMoveForward(t *testing.T) {
 func TestPublishingRefusesAnInvalidDocument(t *testing.T) {
 	s, _ := seedNetwork(t)
 	_, err := s.PublishPolicy(testContext(t), PublishPolicyRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID,
 		Document:  acl.Document{Version: 99},
 	})
@@ -198,6 +201,7 @@ func TestPolicyDevicesResolvesMembers(t *testing.T) {
 	// A revoked member leaves the list, or its address would stay in every other device's
 	// filter granting access to something no longer in the network.
 	if _, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, MembershipID: first,
 	}); err != nil {
 		t.Fatal(err)
@@ -250,18 +254,21 @@ func TestRevokingWhatIsNotThere(t *testing.T) {
 	membershipID := addDevice()
 
 	if _, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, MembershipID: uuid.New(),
 	}); !errors.Is(err, ErrNotAMember) {
 		t.Errorf("unknown membership: error = %v, want ErrNotAMember", err)
 	}
 
 	if _, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: uuid.New(), MembershipID: membershipID,
 	}); !errors.Is(err, ErrNotAMember) {
 		t.Errorf("wrong network: error = %v, want ErrNotAMember", err)
 	}
 
 	revoked, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, MembershipID: membershipID,
 	})
 	if err != nil {
@@ -272,6 +279,7 @@ func TestRevokingWhatIsNotThere(t *testing.T) {
 	}
 
 	if _, err := s.RevokeMembership(ctx, RevokeRequest{
+		Actor:     BootstrapActor(),
 		NetworkID: s.netID, MembershipID: membershipID,
 	}); !errors.Is(err, ErrNotAMember) {
 		t.Errorf("revoking twice: error = %v, want ErrNotAMember", err)

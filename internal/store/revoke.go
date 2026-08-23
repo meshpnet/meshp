@@ -72,18 +72,16 @@ func (s *Store) RevokeMembership(ctx context.Context, req RevokeRequest) (Revoke
 		})
 		networkID := req.NetworkID
 		membershipID := row.MembershipID
-		if _, err := q.CreateAuditEvent(ctx, dbgen.CreateAuditEventParams{
+		if err := WriteAudit(ctx, q, req.Actor, dbgen.CreateAuditEventParams{
 			OrganizationID: req.OrganizationID,
 			NetworkID:      &networkID,
-			ActorKind:      "api_token",
-			ActorLabel:     req.ActorLabel,
 			Action:         "device.revoked",
 			ResourceKind:   "membership",
 			ResourceID:     &membershipID,
 			SourceIp:       req.SourceIP,
 			Metadata:       metadata,
 		}); err != nil {
-			return fmt.Errorf("store: writing the revocation audit event: %w", err)
+			return err
 		}
 
 		out = Revoked{
@@ -110,7 +108,9 @@ type RevokeRequest struct {
 
 	// Reason is recorded and also sent to the device, so it is written by an administrator
 	// and read by whoever finds the machine. Optional.
-	Reason     string
-	ActorLabel string
-	SourceIP   *netip.Addr
+	Reason string
+	// Actor is who is doing this. Required: writeAudit refuses a zero one rather than
+	// recording a revocation nobody can be asked about.
+	Actor    Actor
+	SourceIP *netip.Addr
 }

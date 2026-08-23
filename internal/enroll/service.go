@@ -309,19 +309,19 @@ func (s *Service) Redeem(ctx context.Context, req RedeemRequest) (RedeemResult, 
 			"agent_version":  req.AgentVersion,
 			"token_id":       tok.ID,
 		})
-		if _, err := q.CreateAuditEvent(ctx, dbgen.CreateAuditEventParams{
+		// The device is the actor: it presented a token and enrolled itself. Through the
+		// store's helper rather than the query directly, so this shares the refusal that
+		// stops any audited action being written without saying who acted.
+		if err := store.WriteAudit(ctx, q, store.DeviceActor(device.ID, device.Name), dbgen.CreateAuditEventParams{
 			OrganizationID: &tok.OrganizationID,
 			NetworkID:      &tok.NetworkID,
-			ActorKind:      "device",
-			ActorID:        &device.ID,
-			ActorLabel:     device.Name,
 			Action:         "device.enrolled",
 			ResourceKind:   "membership",
 			ResourceID:     &membership.ID,
 			SourceIp:       req.SourceIP,
 			Metadata:       metadata,
 		}); err != nil {
-			return fmt.Errorf("enroll: writing audit event: %w", err)
+			return err
 		}
 
 		result = RedeemResult{

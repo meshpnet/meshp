@@ -17,6 +17,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
+	"time"
 
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
@@ -68,6 +70,10 @@ type Server struct {
 
 	// ui holds the browser sessions minted from the administrative token (ADR-0022 §5).
 	ui *uiSessions
+
+	// bootstrapWarnedAt is when the administrative token was last complained about, so the
+	// complaint is occasional rather than per request. See warnBootstrapTokenUsed.
+	bootstrapWarnedAt atomic.Pointer[time.Time]
 }
 
 // New builds a Server. store and svc may not be nil; the caller waits until the
@@ -235,6 +241,7 @@ func (s *Server) adminOnly(next http.HandlerFunc) http.Handler {
 				"a valid administrative token is required")
 			return
 		}
+		s.warnBootstrapTokenUsed(r)
 		next(w, r)
 	})
 }
