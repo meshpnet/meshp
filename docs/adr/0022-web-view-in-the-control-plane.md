@@ -109,6 +109,12 @@ that a tunnel silently failing open is worse than one that refuses traffic (ADR-
 
 ### 5. A browser gets a cookie, and the cookie can only read
 
+> **Superseded in substance by ADR-0024.** That record gives the browser a real user
+> session with a real identity, at which point the read-only restriction below stops being
+> necessary — it exists only because a credential derived from a shared secret has nothing
+> to attach permissions to. This section describes what ships today and should be rewritten
+> rather than amended again when users land.
+
 `POST /api/v1/ui/session` takes the administrative token once and returns a session
 cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, short-lived, revocable server-side.
 `DELETE` on the same path logs out. The token itself never reaches JavaScript and is never

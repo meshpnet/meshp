@@ -32,6 +32,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0021](0021-names-resolve-on-the-device.md) | Names resolve on the device, from desired state |
 | [0022](0022-web-view-in-the-control-plane.md) | The web view ships inside the control plane and polls one snapshot |
 | [0023](0023-the-overview-says-what-is-wrong.md) | The overview says what is wrong, not only what is true |
+| [0024](0024-users-and-the-admin-token.md) | Local user accounts, scoped API tokens, and what becomes of the admin token |
 
 ## Format
 
