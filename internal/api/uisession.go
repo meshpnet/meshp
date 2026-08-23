@@ -175,11 +175,6 @@ func (u *uiSessions) sweepLocked(now time.Time) {
 // What reaches the browser afterwards is HttpOnly, so no script on the page can read it
 // back out, and the token itself never becomes something JavaScript holds between requests.
 func (s *Server) handleUILogin(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.AdminToken == "" {
-		httpx.Error(w, s.log, http.StatusServiceUnavailable, "admin_disabled",
-			"the administrative API is not configured; set MESHP_ADMIN_TOKEN")
-		return
-	}
 	if !s.canSetSecureCookie(r) {
 		// Refused rather than downgraded. A cookie without Secure over a plaintext hop is
 		// a credential on the wire, and one that silently worked would make configuring TLS
@@ -193,9 +188,30 @@ func (s *Server) handleUILogin(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Token string `json:"token"`
+
+		// A person signing in with their own account (ADR-0024). Which path this request
+		// takes is decided by whether it carries an email rather than by a separate
+		// endpoint: one cookie, one sign-in URL, one thing a browser has to know about.
+		Email        string `json:"email"`
+		Password     string `json:"password"`
+		Organization string `json:"organization"`
 	}
 	if err := decode(w, r, &body); err != nil {
 		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	if body.Email != "" {
+		s.signInWithPassword(w, r, body.Email, body.Password, body.Organization)
+		return
+	}
+
+	// The administrative token, which is the bootstrap path and is on its way out. ADR-0024
+	// §5 keeps it working — a deployment that has locked itself out has no other way back —
+	// and stops teaching it.
+	if s.cfg.AdminToken == "" {
+		httpx.Error(w, s.log, http.StatusServiceUnavailable, "admin_disabled",
+			"sign in with an email address and password, or set MESHP_ADMIN_TOKEN to bootstrap the first account")
 		return
 	}
 	// Constant time, for the reason adminOnly gives: otherwise the secret can be learned
@@ -238,7 +254,14 @@ func (s *Server) handleUILogin(w http.ResponseWriter, r *http.Request) {
 // handleUILogout ends the session and clears the cookie.
 func (s *Server) handleUILogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(uiCookieName); err == nil {
+		// Both stores, because one cookie now names either kind of session and this end
+		// cannot tell which without asking. Ending one that does not exist is free.
 		s.ui.revoke(cookie.Value)
+		if err := s.store.SignOut(r.Context(), cookie.Value); err != nil {
+			// Logged and not returned: the cookie is cleared below either way, and telling
+			// a browser its sign-out failed would leave somebody clicking it again.
+			s.log.Error("could not end a signed-in session", "error", err)
+		}
 	}
 	// Cleared whether or not there was a session to end, so a browser holding a cookie this
 	// process has forgotten does not keep presenting it.
@@ -261,9 +284,17 @@ func (s *Server) handleUILogout(w http.ResponseWriter, r *http.Request) {
 // is what keeps the browser's credential strictly weaker than the one it came from.
 func (s *Server) readable(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A signed-in person first, and without reference to the administrative token: a
+		// deployment that has created accounts and unset MESHP_ADMIN_TOKEN is the end state
+		// ADR-0024 is heading towards, and it must not be one where nobody can read
+		// anything.
+		if s.sessionUser(r) != nil {
+			next(w, r)
+			return
+		}
 		if s.cfg.AdminToken == "" {
-			httpx.Error(w, s.log, http.StatusServiceUnavailable, "admin_disabled",
-				"the administrative API is not configured; set MESHP_ADMIN_TOKEN")
+			httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
+				"sign in, or set MESHP_ADMIN_TOKEN to bootstrap the first account")
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) == 1 {
