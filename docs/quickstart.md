@@ -62,12 +62,15 @@ echo "control plane is ready"
 
 ## 2. Make a network
 
-A network needs an organisation to belong to, and there is no API for creating one yet —
-so this step reaches for `psql`. Everything after it is API calls.
+A network needs an organisation to belong to, so make one. The slug is what appears in
+URLs and in the page's network picker; the name is what people read.
 
 ```bash
-ORG=$(docker compose exec -T postgres psql -U meshp -d meshp -tAqc \
-  "INSERT INTO organizations (slug,name) VALUES ('acme','Acme') RETURNING id")
+ORG=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"acme","name":"Acme"}' \
+  http://localhost:8080/api/v1/organizations | jq -r .organization_id)
 ```
 
 Now the network, with the addresses its devices will be given. A network with no address

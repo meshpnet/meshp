@@ -168,12 +168,14 @@ make build
 docker compose up -d
 ```
 
-Then enrol a device. An organisation still has to be seeded with SQL — there is no API for
-creating one yet — and everything after that is API calls:
+Then enrol a device. All of it is API calls:
 
 ```bash
-ORG=$(docker compose exec -T postgres psql -U meshp -d meshp -tAqc \
-  "INSERT INTO organizations (slug,name) VALUES ('acme','Acme') RETURNING id")
+ORG=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"acme","name":"Acme"}' \
+  http://localhost:8080/api/v1/organizations | jq -r .organization_id)
 
 NETWORK=$(curl -fsS -X POST \
   -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \

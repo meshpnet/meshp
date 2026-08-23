@@ -114,10 +114,17 @@ cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, short-lived, revocable server-s
 `DELETE` on the same path logs out. The token itself never reaches JavaScript and is never
 stored in the browser.
 
-**The cookie authorises reads scoped to a network, and nothing else.** It is a strictly
-weaker credential derived from the administrative one. Every route that creates or changes
-something keeps requiring the bearer token, and so does anything that reads across networks
-or across organisations.
+**The cookie authorises reads, and nothing else.** It is a strictly weaker credential
+derived from the administrative one: every route that creates or changes something keeps
+requiring the bearer token.
+
+Two reads it deliberately does not reach, because they are not about a network at all: the
+organisation endpoints, which describe tenants rather than anything inside one. The network
+*list* it does reach, and that is a cross-tenant read — names, slugs and device counts for
+every network this control plane holds. It is there because a page reachable only by pasting
+a UUID is not a product, and it is the one place this credential sees past a single network.
+Worth stating rather than leaving to be discovered, because it is the seam where a
+future per-user scope will have to bite first.
 
 That is what makes shipping this before real user accounts defensible, and it is the whole
 of the justification: a stolen browser session reads one network. The moment the UI grows

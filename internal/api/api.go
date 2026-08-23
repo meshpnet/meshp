@@ -135,6 +135,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/v1/networks/{networkID}/acl", s.adminOnly(s.handlePublishPolicy))
 	mux.Handle("GET /api/v1/networks/{networkID}/acl/versions", s.adminOnly(s.handleListPolicyVersions))
 
+	// The tenant networks belong to. Administrative both ways: an organisation is not
+	// scoped to a network, so the browser's credential does not reach it (ADR-0022 §5).
+	mux.Handle("POST /api/v1/organizations", s.adminOnly(s.handleCreateOrganization))
+	mux.Handle("GET /api/v1/organizations", s.adminOnly(s.handleListOrganizations))
+
 	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
 	mux.Handle("GET /api/v1/networks", s.readable(s.handleListNetworks))
 
@@ -265,6 +270,7 @@ var knownFailures = []struct {
 	{enroll.ErrTokenExhausted, failure{http.StatusConflict, "token_exhausted", "that enrolment token has already been used"}},
 	{enroll.ErrChallengeInvalid, failure{http.StatusBadRequest, "challenge_invalid", "the challenge is not valid for this token and key"}},
 	{store.ErrRecordExists, failure{http.StatusConflict, "record_exists", "that record already exists"}},
+	{store.ErrOrganizationExists, failure{http.StatusConflict, "organization_exists", "an organisation with that name already exists"}},
 	{store.ErrNoSuchRecord, failure{http.StatusNotFound, "no_such_record", "no such record in this network"}},
 	{enroll.ErrChallengeExpired, failure{http.StatusBadRequest, "challenge_expired", "the challenge has expired; request another"}},
 	{enroll.ErrProofFailed, failure{http.StatusUnauthorized, "proof_failed", "the signature over the challenge did not verify"}},
