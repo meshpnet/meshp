@@ -36,9 +36,20 @@ ORDER BY network_id, prefix;
 -- a mapped range on top of one would be the same collision a level up with nothing left to
 -- resolve it. Existing mapped ranges are the obvious other half.
 --
--- The customers' own prefixes are deliberately absent: they are the thing being mapped away
--- from, they already collide with each other, and refusing to allocate near them would rule
--- out the whole of RFC 1918 for no gain.
+-- The customers' own prefixes are mostly absent, and that is still deliberate: they are the
+-- thing being mapped away from, they already collide with each other, and refusing to
+-- allocate near them would rule out the whole of RFC 1918 for no gain.
+--
+-- Mostly. A carried prefix that overlaps the mapped block itself is the exception, and it
+-- was missed: the block is in CGNAT space (RFC 6598), so no RFC 1918 prefix can overlap it
+-- and the argument above is untouched — but a customer already running something that uses
+-- 100.64.0.0/10 has LANs exactly there. Allocating on top of one produces a mapped range
+-- that shadows a network the device can genuinely reach, and the device cannot tell the
+-- difference: both are prefixes it was told to route.
+--
+-- Filtered by overlap rather than reserved wholesale, which is what keeps the first
+-- paragraph true. A 10.0.0.0/8 carried by every customer in the organisation never reaches
+-- this list.
 SELECT p.prefix
 FROM address_pools p
 JOIN networks n ON n.id = p.network_id
@@ -46,7 +57,19 @@ WHERE n.organization_id = $1 AND n.deleted_at IS NULL
 UNION ALL
 SELECT mapped_prefix AS prefix
 FROM prefix_mappings
-WHERE organization_id = $1;
+WHERE organization_id = $1
+UNION ALL
+SELECT DISTINCT rgp.prefix
+FROM route_group_prefixes rgp
+JOIN route_groups rg ON rg.id = rgp.route_group_id
+JOIN networks n ON n.id = rg.network_id
+WHERE n.organization_id = $1
+  AND n.deleted_at IS NULL
+  -- Egress groups excluded for the reason CarriedPrefixesForDevice gives: the default route
+  -- overlaps everything, so counting it here would reserve the whole block and leave nothing
+  -- to allocate.
+  AND rg.kind <> 'egress'
+  AND rgp.prefix && sqlc.arg(block)::cidr;
 
 -- name: InsertPrefixMapping :one
 -- Records where a colliding prefix is reached.
