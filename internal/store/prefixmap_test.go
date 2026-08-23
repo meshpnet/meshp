@@ -248,3 +248,60 @@ func TestAnInactiveMembershipDoesNotCollide(t *testing.T) {
 		t.Errorf("mappings = %+v; only one network is live", got)
 	}
 }
+
+// A mapped range must not land on a network somebody can genuinely reach.
+//
+// The block is in CGNAT space, which is fine until a customer uses CGNAT space too — a
+// customer already running something built on 100.64.0.0/10 has LANs exactly there. A
+// mapped range allocated on top of one shadows a reachable network, and the device cannot
+// tell the two apart: both are prefixes it was told to route, and the mapping wins.
+//
+// RFC 1918 is deliberately not reserved, which the second half of this test holds in place:
+// reserving every carried prefix would rule out the whole private space for no gain.
+func TestAMappedRangeAvoidsACarriedPrefixInsideTheBlock(t *testing.T) {
+	w := seedMapWorld(t)
+	w.join(t, w.device, w.netA, "meshp0", "tech", "100.90.0.10/32")
+	w.join(t, w.device, w.netB, "meshp1", "tech", "100.90.1.10/32")
+
+	// The collision that needs mapping, in ordinary private space.
+	w.carry(t, w.netA, "lan-a", "192.168.1.0/24")
+	w.carry(t, w.netB, "lan-b", "192.168.1.0/24")
+
+	// And a third network in the same organisation whose LAN is inside the mapped block.
+	// Nothing about it collides; it is simply somewhere a mapped range must not go.
+	netC := w.network(t, "customer-c")
+	w.carry(t, netC, "lan-c", "100.71.0.0/24")
+
+	for _, mapping := range w.ensure(t) {
+		if mapping.Mapped.Overlaps(netip.MustParsePrefix("100.71.0.0/24")) {
+			t.Errorf("allocated %s, which lands on a customer LAN that is genuinely reachable",
+				mapping.Mapped)
+		}
+	}
+}
+
+// The RFC 1918 half of the same rule: a carried prefix that cannot overlap the block is not
+// reserved, so the allocator is not slowly starved by every customer LAN in the deployment.
+func TestPrivatePrefixesDoNotNarrowTheBlock(t *testing.T) {
+	w := seedMapWorld(t)
+	w.join(t, w.device, w.netA, "meshp0", "tech", "100.90.0.10/32")
+	w.join(t, w.device, w.netB, "meshp1", "tech", "100.90.1.10/32")
+	w.carry(t, w.netA, "lan-a", "192.168.1.0/24")
+	w.carry(t, w.netB, "lan-b", "192.168.1.0/24")
+
+	// A third customer carrying a very large private range. If this were reserved, it would
+	// take out nothing here — but the query that reserves it would be the wrong shape, and
+	// the assertion below is what says the filter is by overlap rather than wholesale.
+	netC := w.network(t, "customer-c")
+	w.carry(t, netC, "lan-c", "10.0.0.0/8")
+
+	got := w.ensure(t)
+	if len(got) == 0 {
+		t.Fatal("nothing was allocated for a real collision")
+	}
+	for _, mapping := range got {
+		if !DefaultMappedBlock.Overlaps(mapping.Mapped) {
+			t.Errorf("allocated %s, which is outside the block", mapping.Mapped)
+		}
+	}
+}

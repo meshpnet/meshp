@@ -109,7 +109,14 @@ func (s *Store) EnsureMappings(ctx context.Context, deviceID uuid.UUID, block ne
 	if err != nil {
 		return nil, fmt.Errorf("store: reading the device's organisation: %w", err)
 	}
-	spoken, err := q.SpokenForRangesInOrganization(ctx, org)
+	spoken, err := q.SpokenForRangesInOrganization(ctx, dbgen.SpokenForRangesInOrganizationParams{
+		OrganizationID: org,
+		// The block is passed so the query can reserve only the carried prefixes that could
+		// actually land on it. A customer LAN in RFC 1918 cannot overlap a block in CGNAT
+		// space and is not reserved; one inside 100.64.0.0/10 is, because a mapped range on
+		// top of it would shadow a network this device can genuinely reach.
+		Block: block,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("store: reading what is already spoken for: %w", err)
 	}
