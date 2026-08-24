@@ -6,12 +6,9 @@
 package enroll
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base32"
 	"errors"
-	"fmt"
-	"strings"
+
+	"github.com/meshpnet/meshp/internal/secret"
 )
 
 // TokenPrefix marks a meshp enrolment token.
@@ -21,19 +18,15 @@ import (
 // screenshot, and it lets us reject obvious nonsense before touching the database.
 const TokenPrefix = "meshp_tok_"
 
-// tokenEntropyBytes is 160 bits. The token is a one-time bearer secret with a
-// short life, and 160 random bits is far beyond guessable; more would only make it
-// harder to type and to fit in a QR code.
-const tokenEntropyBytes = 20
-
-// tokenEncoding is lowercase base32 without padding: no case ambiguity, no
-// characters that need escaping in a URL or a shell, and readable aloud.
-var tokenEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
-
 var (
 	// ErrTokenMalformed means the string is not shaped like a token at all. It is
 	// returned before any lookup, so a nonsense request costs nothing.
-	ErrTokenMalformed = errors.New("enroll: token is malformed")
+	//
+	// The same value as secret.ErrMalformed rather than a second sentinel wrapping it.
+	// They are one condition, and two sentinels for one condition means every caller has
+	// to know which of them a given code path produces — while re-wrapping would double
+	// the text of every message ("token is malformed: token is malformed: ...").
+	ErrTokenMalformed = secret.ErrMalformed
 
 	// ErrTokenUnknown means the token is well formed but no such token exists.
 	ErrTokenUnknown = errors.New("enroll: token not recognised")
@@ -59,39 +52,19 @@ type Token struct {
 
 // NewToken mints a token.
 func NewToken() (Token, error) {
-	raw := make([]byte, tokenEntropyBytes)
-	if _, err := rand.Read(raw); err != nil {
-		return Token{}, fmt.Errorf("enroll: generating token: %w", err)
+	tok, err := secret.New(TokenPrefix)
+	if err != nil {
+		return Token{}, err
 	}
-	plaintext := TokenPrefix + tokenEncoding.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(plaintext))
-	return Token{Plaintext: plaintext, Hash: sum[:]}, nil
+	return Token{Plaintext: tok.Plaintext, Hash: tok.Hash}, nil
 }
 
 // HashToken validates a presented token's shape and returns the hash to look up.
 //
-// SHA-256 rather than a password hash is deliberate. Argon2 exists to slow down
-// guessing of low-entropy, human-chosen secrets; this is 160 bits of randomness,
-// where guessing is hopeless regardless of how fast the hash is. What hashing buys
-// here is that a database dump — or a backup, or a log line that captured a row —
-// does not yield usable tokens. A slow hash would add startup cost to every
-// enrolment and buy nothing.
-//
-// The lookup is by hash against an indexed column, so no secret is ever compared
-// byte by byte and there is no comparison for a timing attack to observe.
+// The shape, the entropy and the hashing all live in internal/secret, which the API tokens
+// of ADR-0024 §2 use as well — a bearer secret written twice is one whose second copy nobody
+// is looking at. What stays here is the vocabulary: a device presenting nonsense is told its
+// enrolment token is malformed, in this package's words rather than that one's.
 func HashToken(plaintext string) ([]byte, error) {
-	plaintext = strings.TrimSpace(plaintext)
-	if !strings.HasPrefix(plaintext, TokenPrefix) {
-		return nil, fmt.Errorf("%w: expected it to start with %q", ErrTokenMalformed, TokenPrefix)
-	}
-	body := plaintext[len(TokenPrefix):]
-	raw, err := tokenEncoding.DecodeString(body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrTokenMalformed, err)
-	}
-	if len(raw) != tokenEntropyBytes {
-		return nil, fmt.Errorf("%w: carries %d bytes, want %d", ErrTokenMalformed, len(raw), tokenEntropyBytes)
-	}
-	sum := sha256.Sum256([]byte(plaintext))
-	return sum[:], nil
+	return secret.Hash(TokenPrefix, plaintext)
 }

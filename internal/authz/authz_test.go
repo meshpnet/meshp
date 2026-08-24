@@ -89,7 +89,7 @@ func TestTheBuiltinDescriptionsAreTrue(t *testing.T) {
 			t.Errorf("an administrator cannot %q, which is configuring a network", p)
 		}
 	}
-	for _, p := range []Permission{OrganizationUsersWrite, OrganizationRolesBind} {
+	for _, p := range []Permission{OrganizationUsersWrite, OrganizationRolesBind, OrganizationTokensWrite} {
 		if administrator.Allows(p) {
 			t.Errorf("an administrator holds %q, which their description says they do not", p)
 		}

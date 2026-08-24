@@ -77,6 +77,13 @@ const (
 
 	OrganizationRolesRead Permission = "organization.roles.read"
 
+	// Reading and revoking the API tokens in an organisation. Somebody's own tokens are
+	// not behind either of these — you mint and prune your own without needing a
+	// permission, the same way you change your own password — so these are about
+	// everybody else's, which is what somebody needs when a person leaves.
+	OrganizationTokensRead  Permission = "organization.tokens.read"
+	OrganizationTokensWrite Permission = "organization.tokens.write"
+
 	// Granting and removing a role. The permission that decides who may act, kept apart
 	// from every other so that "can change the network" and "can change who may change the
 	// network" are different answers.
@@ -119,6 +126,8 @@ var Catalogue = []Entry{
 	{OrganizationUsersRead, "List the people in an organisation"},
 	{OrganizationUsersWrite, "Create, suspend, delete people and set their passwords"},
 	{OrganizationRolesRead, "Read the roles an organisation has and who holds them"},
+	{OrganizationTokensRead, "List the API tokens in an organisation and whose they are"},
+	{OrganizationTokensWrite, "Revoke somebody else's API token"},
 	{OrganizationRolesBind, "Grant and remove roles"},
 }
 

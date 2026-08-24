@@ -293,6 +293,24 @@ func (s *Server) routes() []route {
 		{pattern: "POST /api/v1/me/password", handler: s.handleChangeOwnPassword, kind: guardSignedIn},
 		{pattern: "GET /api/v1/permissions", handler: s.handleListPermissions, kind: guardSignedIn},
 
+		// Credentials for machines (ADR-0024 §2). Your own, which is why they hang off /me
+		// and are behind no permission: minting and pruning your own credentials is like
+		// changing your own password, and needing to be granted the right to do it would
+		// leave somebody unable to clean up after themselves.
+		//
+		// The handlers refuse a machine holding somebody's token, which guardSignedIn
+		// cannot express: a token that could mint a token would survive its own revocation.
+		{pattern: "POST /api/v1/me/tokens", handler: s.handleMintToken, kind: guardSignedIn},
+		{pattern: "GET /api/v1/me/tokens", handler: s.handleListOwnTokens, kind: guardSignedIn},
+		{pattern: "DELETE /api/v1/me/tokens/{tokenID}", handler: s.handleRevokeOwnToken, kind: guardSignedIn},
+
+		// Everybody else's, which is an administrative act and is what somebody needs when
+		// a person leaves.
+		{pattern: "GET /api/v1/organizations/{organizationID}/tokens",
+			handler: s.handleListOrganizationTokens, kind: guardOrganization, perm: authz.OrganizationTokensRead},
+		{pattern: "DELETE /api/v1/organizations/{organizationID}/tokens/{tokenID}",
+			handler: s.handleRevokeOrganizationToken, kind: guardOrganization, perm: authz.OrganizationTokensWrite},
+
 		// Networks, which name no scope in their path: the caller's own organisation is
 		// the scope.
 		{pattern: "POST /api/v1/networks",

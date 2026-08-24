@@ -95,7 +95,8 @@ func Builtins() []Builtin {
 		},
 		{
 			Slug: RoleAdministrator, Name: "Administrator",
-			Description: "Configures networks completely. Cannot create accounts or grant roles.",
+			Description: "Configures networks completely. Cannot create accounts, grant roles, " +
+				"or revoke anybody else's credentials.",
 			Permissions: administrator,
 		},
 		{
