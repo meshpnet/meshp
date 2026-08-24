@@ -152,44 +152,67 @@ git clone https://github.com/meshpnet/meshp.git
 cd meshp
 cp .env.example .env
 
-# Both are required. The control plane refuses to start without a secret key, and
-# leaves the administrative API switched off without an admin token.
+# MESHP_SECRET_KEY is required. MESHP_ADMIN_TOKEN is the bootstrap secret: it makes
+# the first account on a deployment that has none, and gets you back into one that
+# has locked itself out. It is used twice below and then not again.
 #
 # Kept in the shell too, because the commands below need it. Reading it back out of
 # .env does not work: the example declares both keys empty, so appending leaves two
 # lines with the same name — compose takes the last, a grep takes both.
-export MESHP_ADMIN_TOKEN="$(openssl rand -base64 32)"
+export MESHP_BOOTSTRAP="$(openssl rand -base64 32)"
 {
   echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)"
-  echo "MESHP_ADMIN_TOKEN=$MESHP_ADMIN_TOKEN"
+  echo "MESHP_ADMIN_TOKEN=$MESHP_BOOTSTRAP"
 } >> .env
 
 make build
 docker compose up -d
 ```
 
-Then enrol a device. All of it is API calls:
+Then give yourself an account, and use it. All of it is API calls:
 
 ```bash
+# The bootstrap secret makes an organisation and the first account. The first person
+# in an organisation is its owner: somebody has to be able to grant a role, and on a
+# fresh organisation there is nobody who can.
 ORG=$(curl -fsS -X POST \
-  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $MESHP_BOOTSTRAP" \
   -H 'Content-Type: application/json' \
   -d '{"slug":"acme","name":"Acme"}' \
   http://localhost:8080/api/v1/organizations | jq -r .organization_id)
 
-NETWORK=$(curl -fsS -X POST \
-  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_BOOTSTRAP" \
   -H 'Content-Type: application/json' \
-  -d "{\"organization_id\":\"$ORG\",\"slug\":\"hq\",\"name\":\"HQ\",
-       \"address_pools\":[\"100.90.0.0/24\",\"fd7c:6d65:7368::/120\"]}" \
+  -d '{"email":"you@example.com","name":"You","password":"a passphrase you will remember"}' \
+  "http://localhost:8080/api/v1/organizations/$ORG/users" >/dev/null
+
+# From here on you are a person. Sign in, then mint a token for your scripts: it is
+# yours, it carries only the permissions you name, and it is revocable on its own.
+curl -fsS -c meshp-cookies.txt -o /dev/null -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"a passphrase you will remember"}' \
+  http://localhost:8080/api/v1/ui/session
+
+MESHP_TOKEN=$(curl -fsS -b meshp-cookies.txt -X POST \
+  -H "Origin: http://localhost:8080" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"readme","permissions":["organization.networks.create","network.enrollment_tokens.write"]}' \
+  http://localhost:8080/api/v1/me/tokens | jq -r .token)
+
+# No organisation_id: a token acts within its owner's, and you belong to one.
+NETWORK=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $MESHP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"hq","name":"HQ",
+       "address_pools":["100.90.0.0/24","fd7c:6d65:7368::/120"]}' \
   http://localhost:8080/api/v1/networks | jq -r .network_id)
 
 TOKEN=$(curl -fsS -X POST \
-  -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"max_uses":1,"expires_in_seconds":600}' \
-  "http://localhost:8080/api/v1/networks/$NETWORK/enrollment-tokens" \
-  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  "http://localhost:8080/api/v1/networks/$NETWORK/enrollment-tokens" | jq -r .token)
 
 sudo ./bin/meshpd &                # holds the keys and the sessions
 sudo ./bin/meshp join "$TOKEN"

@@ -13,10 +13,16 @@ Every command here has been run against a live control plane.
 Set up first:
 
 ```bash
-export MESHP_ADMIN_TOKEN=...            # the admin token from your .env
-export NETWORK=...                      # the network id
+export MESHP_TOKEN=...     # an API token of yours; the quickstart shows how to mint one
+export NETWORK=...         # the network id
 BASE="http://localhost:8080/api/v1/networks/$NETWORK"
 ```
+
+The permissions this page needs are `network.routes.read` and `network.routes.write`, plus
+`network.devices.read` to find a membership id. Changing which advertiser carries a prefix —
+the failover section below — is `network.routes.failover`, which an operator holds as well:
+it is what somebody does at two in the morning when a link is down, and it is deliberately
+separate from being able to change which routes exist at all.
 
 ## Carrying an office LAN
 
@@ -24,7 +30,7 @@ A branch office has `192.168.10.0/24` behind it. One machine there — a small s
 router running Linux — joins the network and offers to carry it.
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"slug":"branch-lan","name":"Branch LAN","kind":"subnet",
        "prefixes":["192.168.10.0/24"]}' \
@@ -34,9 +40,9 @@ curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
 Nothing carries it yet. Find the membership id of the device that will, then offer it:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" "$BASE/devices"
+curl -fsS -H "Authorization: Bearer $MESHP_TOKEN" "$BASE/devices"
 
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"membership_id":"<the branch router>","priority":1}' \
   "$BASE/route-groups/branch-lan/advertisers"
@@ -55,7 +61,7 @@ back out of the same machine is at best a loop and at worst takes the site off t
 A second machine at the same site, at a lower priority:
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"membership_id":"<the backup>","priority":2}' \
   "$BASE/route-groups/branch-lan/advertisers"
@@ -72,7 +78,7 @@ exactly when it is most likely to need to.
 ## Failover: how patient a device should be
 
 ```bash
-curl -fsS -X PUT -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,
        "fail_threshold":2,
@@ -117,7 +123,7 @@ Probe targets fix that. The device dials them *through the tunnel* and requires 
 answer:
 
 ```bash
-curl -fsS -X PUT -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true,
        "fail_threshold":2,
@@ -164,7 +170,7 @@ An exit node is a route group of kind `egress`. It carries the default route, so
 prefixes of its own — and the store refuses one that tries:
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"slug":"exit-lon","name":"London exit","kind":"egress"}' \
   "$BASE/route-groups"
@@ -190,14 +196,14 @@ discovery.
 To turn it off for a whole network:
 
 ```bash
-curl -fsS -X PUT -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"enforced":false}' \
   "$BASE/egress-fail-closed"
 ```
 
 ```bash
-curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" "$BASE/egress-fail-closed"
+curl -fsS -H "Authorization: Bearer $MESHP_TOKEN" "$BASE/egress-fail-closed"
 ```
 
 `enforced` must be stated. A body that leaves it out is refused rather than read as false,
@@ -217,7 +223,7 @@ a broken path is a better outcome than a working path from an address that will 
 ## Draining a machine for maintenance
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"membership_id":"<the one going down>","priority":1,"admin_state":"draining"}' \
   "$BASE/route-groups/branch-lan/advertisers"
@@ -231,7 +237,7 @@ what draining is for. `disabled` stops it outright.
 To remove it entirely:
 
 ```bash
-curl -fsS -X DELETE -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X DELETE -H "Authorization: Bearer $MESHP_TOKEN" \
   "$BASE/route-groups/branch-lan/advertisers/<membership id>"
 ```
 
@@ -261,7 +267,7 @@ problem rather than a routing one (ADR-0019).
 ## Reading it back
 
 ```bash
-curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" "$BASE/route-groups"
+curl -fsS -H "Authorization: Bearer $MESHP_TOKEN" "$BASE/route-groups"
 ```
 
 Each group comes back with its prefixes, selection mode and full failover policy.

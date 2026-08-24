@@ -53,7 +53,7 @@ If the decision was wrong for the whole network rather than for one machine, tur
 centrally and let the agents pick it up:
 
 ```bash
-curl -fsS -X PUT -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"enforced":false}' \
   "https://control.example.com/api/v1/networks/$NETWORK/egress-fail-closed"
@@ -119,7 +119,7 @@ See [self-hosting](self-hosting.md#relays).
 Read the group's failover policy back:
 
 ```bash
-curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -H "Authorization: Bearer $MESHP_TOKEN" \
   "https://control.example.com/api/v1/networks/$NETWORK/route-groups"
 ```
 
@@ -140,7 +140,7 @@ Device names come from the peer list and need nothing written down. Names for an
 administrator writes:
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -X POST -H "Authorization: Bearer $MESHP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name": "git", "type": "A", "value": "10.80.0.30"}' \
   "https://control.example.com/api/v1/networks/$NETWORK/dns-records"
@@ -166,7 +166,7 @@ Ask the audit trail. A device that moves itself between candidates says why, and
 plane records it (ADR-0003):
 
 ```bash
-curl -fsS -H "Authorization: Bearer $MESHP_ADMIN_TOKEN" \
+curl -fsS -H "Authorization: Bearer $MESHP_TOKEN" \
   "https://control.example.com/api/v1/networks/$NETWORK/audit?limit=20"
 ```
 
@@ -192,8 +192,23 @@ A bare `{"error":"internal"}` means something the server did not expect, and the
 its log rather than the response — deliberately, because an error whose text nobody has
 reviewed could name a table, a path or a peer.
 
-`503` with `admin_disabled` means `MESHP_ADMIN_TOKEN` is unset, so the administrative
-endpoints are switched off rather than running open.
+`401` with `unauthorized` means the request carried no credential this control plane
+recognises: no session cookie, no API token, and not the bootstrap secret. On a deployment
+with no accounts yet and no `MESHP_ADMIN_TOKEN` set, everything answers this — see the
+[quickstart](quickstart.md) for making the first account.
+
+`403` with `forbidden` means the opposite: you are who you say you are and may not do this.
+The message names the permission you would need, so it is something to hand to whoever
+administers your organisation rather than something to retry.
+
+`403` with `cross_origin` means a request that changes something arrived with a session
+cookie and no `Origin` header naming this site. Browsers always send one; `curl` does not,
+so add `-H "Origin: https://your-control-plane"` — or use an API token, which needs no such
+header.
+
+`403` with `person_required` means an API token tried to do something only a person may:
+mint another token, or change its owner's password. A token that could mint a token would
+survive its own revocation.
 
 ## Reporting a bug
 

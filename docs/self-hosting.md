@@ -48,14 +48,60 @@ derived from. The control plane refuses to start without it. **Changing it inval
 outstanding challenge and session**, so agents reconnect — survivable, but not something to
 do casually.
 
-`MESHP_ADMIN_TOKEN` gates the administrative API. Left empty, those endpoints answer 503
-rather than running open: a control plane that will mint enrolment tokens for anyone who
-asks is worse than one whose admin API is switched off.
+`MESHP_ADMIN_TOKEN` is the **bootstrap secret**, and it has exactly two jobs (ADR-0024 §5):
 
-Be clear-eyed about what that token is. It is a single shared secret with no identity, no
-scoping and no audit trail beyond "the admin token was used". It is a bootstrap mechanism
-that exists so tokens can be minted before users and sessions are built, and it should be
-treated as a root credential for every network on this control plane.
+- it creates the first account on a deployment that has none, which is the only way a fresh
+  deployment can have one;
+- it is how you get back in when nobody else can — the last owner left, everybody forgot
+  their password — because a self-hosted deployment has no support line to call.
+
+It is not the credential to run anything with. It is a single shared secret with no
+identity, so the audit trail can only ever record that "the bootstrap secret" did
+something; it cannot be scoped to one network; and it cannot be revoked without locking out
+whatever else was using it. Treat it as a root credential for every network on this control
+plane, keep it somewhere you would keep a root password, and use an account for everything
+else.
+
+**Once an account exists, every use of it is logged at warning level.** That line means
+something is still reaching for the shared secret when it could be using an account — an
+old script, usually. It is throttled to at most one an hour, so it is a nudge rather than
+noise.
+
+Leaving it unset is supported and is the right end state for a deployment whose people all
+have accounts. What you lose is the way back in, so do not unset it until somebody other
+than you holds the owner role, and be aware that a deployment with no accounts *and* no
+bootstrap secret cannot be administered at all without editing the database.
+
+### Accounts, roles and API tokens
+
+Every person gets an account, and what they can do is what their role allows. The four
+built-in roles nest:
+
+| Role | What it is for |
+| --- | --- |
+| `reader` | Sees everything this control plane shows and changes nothing. |
+| `operator` | Adds and removes devices, and moves traffic between advertisers when a link dies. Cannot change the access policy, DNS, or which routes exist. |
+| `administrator` | Configures networks completely. Cannot create accounts, grant roles, or revoke anybody else's credentials. |
+| `owner` | Everything, including deciding who may act. |
+
+A role can be granted across the whole organisation, or narrowed to a single network — which
+is what a technician who looks after one customer needs. A grant narrowed to a network never
+carries an organisation-wide permission, so somebody given a role inside one network cannot
+create accounts across the organisation it belongs to.
+
+`GET /api/v1/permissions` lists the catalogue;
+`GET /api/v1/organizations/{id}/roles` lists what this deployment can grant.
+
+**Scripts and CI use API tokens, not passwords and not the bootstrap secret.** A token
+belongs to the person who minted it, carries the permissions they name — intersected with
+what they hold *at the time it is used*, so demoting somebody demotes their tokens — and is
+revoked on its own without touching their password. Mint one at `POST /api/v1/me/tokens`,
+list them at `GET /api/v1/me/tokens`, and revoke one at `DELETE /api/v1/me/tokens/{id}`.
+An owner can see and revoke everybody's at
+`/api/v1/organizations/{id}/tokens`, which is what you want the day somebody leaves.
+
+Tokens expire: ninety days by default, a year at most, and there is no unexpiring one. That
+is deliberate — a bearer secret that never expires outlives the reason it was made.
 
 ### TLS
 

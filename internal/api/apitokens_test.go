@@ -283,3 +283,36 @@ func TestATokenHoldsNothingInAnotherOrganisation(t *testing.T) {
 		t.Errorf("a token reading another organisation's people = %d, want 403", status)
 	}
 }
+
+// A machine acting within its owner's organisation does not have to name it.
+//
+// Found by writing the quickstart rather than by reading the code: the route derives the
+// organisation from the caller, and until now "the caller" meant a person. A token holding
+// organization.networks.create was refused for not naming an organisation the guard had
+// already scoped it to — a permission it could hold and could not use.
+func TestATokenCreatesANetworkInItsOwnersOrganisation(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "alice@example.com")
+	cookie := signIn(t, h, "alice@example.com", testPassword)
+	secret, _ := mintAPIToken(t, h, cookie, map[string]any{
+		"name":        "ci",
+		"permissions": []string{string(authz.OrganizationNetworksCreate)},
+	})
+
+	status, body := h.withToken(http.MethodPost, "/api/v1/networks", secret, map[string]any{
+		"slug": "branch", "name": "Branch", "address_pools": []string{"100.91.0.0/24"},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("a token creating a network = %d: %v", status, body)
+	}
+
+	// And it landed in the owner's organisation rather than nowhere.
+	var org string
+	if err := h.store.Pool().QueryRow(h.ctx,
+		`SELECT organization_id::text FROM networks WHERE slug = 'branch'`).Scan(&org); err != nil {
+		t.Fatal(err)
+	}
+	if org != orgOf(t, h).String() {
+		t.Errorf("the network landed in %s, want the owner's organisation", org)
+	}
+}

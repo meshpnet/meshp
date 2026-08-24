@@ -36,6 +36,70 @@ deploy it. The data plane is Linux-only. Reports are still welcome and will be h
 above — but a finding that a half-built feature is half-built is not one, and there are
 several of those in the open issues already.
 
+## Accounts, credentials and what happens to them
+
+This is worth its own section because the threat model changed. Until ADR-0024 landed there
+was one credential, a shared secret in an environment variable, and the worst case was that
+it leaked. There are now passwords in a database, and that is a liability this project did
+not previously have.
+
+**Passwords** are hashed with Argon2id at 64 MiB, two passes, one lane, stored in PHC
+string format so the parameters travel with the hash and can be raised later. Verification
+is constant-time, and an address that does not exist is put through the same work as one
+that does — so the time a sign-in takes does not say whether the account is real.
+
+**Every way a sign-in can fail looks the same**: no such address, wrong password, suspended,
+deleted, an organisation that does not exist. One status, one message, one log line. Being
+able to tell "no such account" from "wrong password" would let a stranger enumerate who has
+an account here, which is worth more to them than the specificity is worth to the person
+typing, who already knows which of the two they got wrong.
+
+**Sessions** live in PostgreSQL, one row per sign-in, so they are revocable rather than
+merely expiring. What the database holds is a SHA-256 of what the browser presents, so a
+backup does not hand somebody a live session. A sliding idle window of 12 hours keeps a
+dashboard somebody is watching alive; a fixed 30-day ceiling that no amount of use raises
+means a page left open on a wall does not hold a credential forever.
+
+**Changing a password ends every session, including the one that changed it.** A password is
+usually changed because somebody else may have seen it, and the change would be worth much
+less if it left their session running. Suspending an account ends its sessions too, and
+stops its API tokens working immediately.
+
+**API tokens** carry the permissions of the person who minted them, intersected with a scope
+chosen at creation, and that intersection is evaluated *at every use*. Demoting somebody
+demotes their tokens on the next request rather than whenever they happen to sign out. A
+token cannot mint another token, and cannot change its owner's password. Tokens expire —
+ninety days by default, a year at most, with no unexpiring option.
+
+**Permissions are read per request**, for the same reason: a role revoked in one tab takes
+effect on the next request made in another.
+
+**Writes from a browser are defended twice.** `SameSite=Strict` means a browser does not
+attach the session cookie to a request another site caused; behind that, any unsafe method
+authenticated by cookie must carry an `Origin` naming this host.
+
+### What we know is missing
+
+Said plainly, because a security policy that only lists strengths is not one:
+
+- **There is no lockout after repeated failures, and no per-account rate limit.** Sign-in
+  is throttled, but by the same per-address limiter the enrolment endpoints use, which is
+  deliberately generous — so it bounds a flood from one host and does nothing about a slow
+  distributed attempt on one account. Argon2id at 64 MiB makes online guessing expensive
+  rather than impossible. ADR-0024 names this as work its own decision creates; it is
+  tracked in [#148](https://github.com/meshpnet/meshp/issues/148).
+- **There is no second factor.** The `mfa_enrolled_at` column exists and nothing writes it.
+  ADR-0024 §1 commits to TOTP in the open core rather than as a paid feature.
+- **There is no password reset flow yet.** An administrator sets a password directly. The
+  design (ADR-0024 §6) is a link rather than an email, so that running meshp never requires
+  running a mail server.
+- **The bootstrap secret still exists**, deliberately: it is how a locked-out deployment
+  gets back in. Every use of it is audited as itself and logged at warning level once an
+  account exists.
+
+Reports about any of the above are welcome and will be treated as reports about a known gap
+rather than a discovery — see the note on half-built features in Scope.
+
 ## What is not a vulnerability here
 
 Three behaviours look like faults and are the product working as designed. Each has a

@@ -34,10 +34,10 @@ func (s *Server) sessionUser(r *http.Request) *store.User {
 
 // signInWithPassword opens a session for a person.
 //
-// The other half of handleUILogin. Which path a request takes is decided by whether it
-// carries an email, not by a separate endpoint: there is one cookie, one sign-in URL, and
-// one thing a browser has to know about. When ADR-0024's later slices remove the
-// administrative token from this endpoint, what is left is this function and no new route.
+// The whole of handleUILogin now. It used to be one of two paths, chosen by whether the
+// request carried an email — the other took the administrative token — and the prediction
+// written here was that removing that path would leave this function and no new route.
+// That is what happened.
 func (s *Server) signInWithPassword(w http.ResponseWriter, r *http.Request, email, plain, orgSlug string) {
 	// Named by slug rather than id, because somebody typing this into a sign-in form has a
 	// slug and would have to look an id up. Resolved before the password is checked, and a
@@ -300,9 +300,16 @@ func (s *Server) warnBootstrapTokenUsed(r *http.Request) {
 		// database will be reported by the request that actually needed it.
 		return
 	}
+	// The hint says what to do, not that something is odd. Whoever reads this line is
+	// running a script they wrote months ago and has no reason to know what replaced the
+	// credential in it, so a warning that only reports a smell costs them a search.
 	s.log.Warn("the bootstrap administrative token was used on a deployment that has accounts",
 		"path", logx.Safe(r.URL.Path),
 		"remote", logx.Safe(clientKey(r)),
-		"hint", "sign in as a user instead; this token is the way back in when nobody can, "+
-			"and every use of it is recorded as nobody in particular")
+		"what_to_do", "replace this credential with an API token: sign in at POST /api/v1/ui/session, "+
+			"then mint one at POST /api/v1/me/tokens naming the permissions it needs",
+		"why", "the bootstrap secret has no identity, so the audit trail can only record that it was used "+
+			"and not by whom; it cannot be scoped to one network, and revoking it locks out everything else "+
+			"still using it",
+		"keep_it", "it is still how you get back in when nobody can sign in — see docs/self-hosting.md")
 }
