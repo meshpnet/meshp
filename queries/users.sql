@@ -1,8 +1,9 @@
 -- People, and the sessions they hold (ADR-0024).
 --
--- Until roles land every authenticated user is equivalent, and these queries do not pretend
--- otherwise: there is nothing here that reads a permission, because there is nothing yet to
--- read.
+-- What a person may do is not here. Permissions live in roles.sql, read per request against
+-- the scope a route names, and nothing in this file grants or checks one — an account and
+-- what it may do are separate questions, and answering them in one place is how a suspended
+-- user ends up still holding a permission somewhere.
 
 -- name: CreateUser :one
 INSERT INTO users (organization_id, email, name, password_hash)

@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/meshpnet/meshp/internal/httpx"
+	"github.com/meshpnet/meshp/internal/store"
 )
 
 // handleCreateOrganization makes the tenant a network belongs to.
@@ -12,9 +14,10 @@ import (
 // quickstart told people to run `psql`, which meant standing meshp up required database
 // access — for a row with two fields in it.
 //
-// Behind the administrative token, and not readable by a browser session: an organisation
-// is not scoped to a network, and ADR-0022 §5 keeps that credential to what one network can
-// see.
+// Behind the administrative token, and not behind a permission. A person belongs to exactly
+// one organisation, so there is no organisation somebody could hold a permission over that
+// would authorise creating another: making a tenant is deployment administration, and the
+// deployment's own credential is the honest gate for it.
 func (s *Server) handleCreateOrganization(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Slug string `json:"slug"`
@@ -41,12 +44,40 @@ func (s *Server) handleCreateOrganization(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// handleListOrganizations answers which tenants exist.
+// handleListOrganizations answers which organisation the caller is in.
+//
+// Behind no permission, because knowing which organisation you belong to is not a privilege:
+// GET /api/v1/me already answers it, and a page that cannot ask would have to be told by
+// whoever configured it.
+//
+// One organisation for a person, because a person belongs to one. Until permissions existed
+// this returned every tenant this control plane holds to anybody who was signed in, which on
+// a deployment with more than one customer was a list of the others — invisible in
+// development, where there is only ever one.
+//
+// The administrative token belongs to no organisation and sees them all, which is what it is
+// for and is the only way a deployment operator can find a tenant to work in.
 func (s *Server) handleListOrganizations(w http.ResponseWriter, r *http.Request) {
+	// A browser session minted from the administrative token is refused, and not as a
+	// special case: this endpoint answers "which organisation am I in", and a credential
+	// with no identity has no answer. Returning every tenant to it would hand a page
+	// derived from one shared secret a list of every customer on the deployment, which is
+	// the thing ADR-0022 §5 was amended about.
+	if callerFrom(r).readOnly {
+		httpx.Error(w, s.log, http.StatusForbidden, "forbidden",
+			"this asks which organisation you are in, and this session is not a person; sign in")
+		return
+	}
+
 	orgs, err := s.store.ListOrganizations(r.Context())
 	if err != nil {
 		s.respondError(w, r, err)
 		return
+	}
+	if user := callerFrom(r).user; user != nil {
+		orgs = slices.DeleteFunc(orgs, func(org store.Organization) bool {
+			return org.ID != user.OrganizationID
+		})
 	}
 	out := make([]map[string]any, 0, len(orgs))
 	for _, org := range orgs {

@@ -277,39 +277,6 @@ func (s *Server) handleUILogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// readable gates an endpoint on either the administrative token or a browser session.
-//
-// The only middleware that accepts a cookie, and it is applied only to the endpoints that
-// answer questions. Everything that creates or changes something stays on adminOnly, which
-// is what keeps the browser's credential strictly weaker than the one it came from.
-func (s *Server) readable(next http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A signed-in person first, and without reference to the administrative token: a
-		// deployment that has created accounts and unset MESHP_ADMIN_TOKEN is the end state
-		// ADR-0024 is heading towards, and it must not be one where nobody can read
-		// anything.
-		if s.sessionUser(r) != nil {
-			next(w, r)
-			return
-		}
-		if s.cfg.AdminToken == "" {
-			httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
-				"sign in, or set MESHP_ADMIN_TOKEN to bootstrap the first account")
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) == 1 {
-			next(w, r)
-			return
-		}
-		if cookie, err := r.Cookie(uiCookieName); err == nil && s.ui.valid(cookie.Value) {
-			next(w, r)
-			return
-		}
-		httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
-			"a valid administrative token or browser session is required")
-	})
-}
-
 // canSetSecureCookie reports whether this request may be given a Secure cookie.
 //
 // TLS on this connection, or loopback. X-Forwarded-Proto is deliberately not consulted:

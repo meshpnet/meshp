@@ -267,6 +267,19 @@ func IsUniqueViolation(err error) bool {
 	return false
 }
 
+// IsForeignKeyViolation reports whether err is a PostgreSQL foreign-key violation.
+//
+// Which is usually a caller naming a row that is not there — granting a role to a user id
+// nobody has — and is worth telling apart from a real database failure, because the answer
+// to the caller is "no such thing" rather than "try again".
+func IsForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503"
+	}
+	return false
+}
+
 // ConstraintName returns the constraint a database error violated, or "".
 // Different unique constraints on the same table mean different things, and this is
 // how a caller tells them apart.

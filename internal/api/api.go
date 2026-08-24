@@ -5,12 +5,17 @@
 //   - Device endpoints under /api/v1/enroll are reachable without a credential,
 //     because a device that has nothing yet cannot authenticate. The enrolment
 //     token in the body is the credential.
-//   - Administrative endpoints require a bootstrap secret. That is a placeholder
-//     until users and sessions exist, and it is marked as one everywhere it appears.
+//   - Everything else requires a permission, held either in one network or across
+//     one organisation (ADR-0024 §4). The route table in Routes is where each
+//     endpoint says which, and a route that says nothing does not start.
+//
+// The bootstrap secret still works and holds everything, including permissions that
+// do not exist yet. It is how a fresh deployment creates its first account and how a
+// locked-out one gets back in, and every use of it is recorded as what it is: the
+// shared credential, rather than a person (ADR-0024 §5).
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshpnet/meshp/internal/authz"
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
@@ -111,139 +117,350 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 }
 
 // Routes registers the API on a mux.
+//
+// Every route is a row in the table below, and every row says how it is gated. That is not
+// tidiness: a route registered with no guard is the failure this shape exists to make
+// impossible, and the zero value of guardKind is `guardUnset`, which panics here rather than
+// serving. A permission that is not in the catalogue panics too — a typo would otherwise
+// produce a route nobody can reach and nothing would say so.
 func (s *Server) Routes(mux *http.ServeMux) {
-	mux.Handle("POST /api/v1/enroll/challenge", s.rateLimited(s.handleChallenge))
-	mux.Handle("POST /api/v1/enroll", s.rateLimited(s.handleRedeem))
-
-	// Sessions. The challenge endpoint is unauthenticated for the same reason
-	// enrolment's is — a device proves itself by signing what it gets back — so it is
-	// rate limited alongside them. The upgrade itself is not: it authenticates in its
-	// first frame, and throttling reconnects is how a brief control-plane outage turns
-	// into a long one when every agent comes back at once.
-	mux.Handle("POST /api/v1/session/challenge", s.rateLimited(s.handleSessionChallenge))
-	mux.Handle("GET /api/v1/session", http.HandlerFunc(s.handleSession))
-
-	mux.Handle("POST /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleCreateToken))
-	mux.Handle("GET /api/v1/networks/{networkID}/enrollment-tokens", s.adminOnly(s.handleListTokens))
-	mux.Handle("DELETE /api/v1/networks/{networkID}/enrollment-tokens/{tokenID}", s.adminOnly(s.handleRevokeToken))
-
-	mux.Handle("GET /api/v1/networks/{networkID}/devices", s.adminOnly(s.handleListMemberships))
-	mux.Handle("DELETE /api/v1/networks/{networkID}/devices/{membershipID}", s.adminOnly(s.handleRevokeMembership))
-
-	// The names an administrator writes down, which nothing can derive from the peer list
-	// (ADR-0021 §2). Reading is browser-readable like the rest of a network's state;
-	// writing is not, which is the line ADR-0022 §5 draws.
-	mux.Handle("GET /api/v1/networks/{networkID}/dns-records", s.readable(s.handleListDNSRecords))
-	mux.Handle("POST /api/v1/networks/{networkID}/dns-records", s.adminOnly(s.handleCreateDNSRecord))
-	mux.Handle("DELETE /api/v1/networks/{networkID}/dns-records/{recordID}", s.adminOnly(s.handleDeleteDNSRecord))
-
-	mux.Handle("GET /api/v1/networks/{networkID}/acl", s.adminOnly(s.handleGetPolicy))
-	mux.Handle("PUT /api/v1/networks/{networkID}/acl", s.adminOnly(s.handlePublishPolicy))
-	mux.Handle("GET /api/v1/networks/{networkID}/acl/versions", s.adminOnly(s.handleListPolicyVersions))
-
-	// The tenant networks belong to. Administrative both ways: an organisation is not
-	// scoped to a network, so the browser's credential does not reach it (ADR-0022 §5).
-	mux.Handle("POST /api/v1/organizations", s.adminOnly(s.handleCreateOrganization))
-	mux.Handle("GET /api/v1/organizations", s.adminOnly(s.handleListOrganizations))
-
-	// People (ADR-0024). Every account these make is an administrator account until roles
-	// land, which adminOnly says at more length.
-	mux.Handle("POST /api/v1/organizations/{organizationID}/users", s.adminOnly(s.handleCreateUser))
-	mux.Handle("GET /api/v1/organizations/{organizationID}/users", s.adminOnly(s.handleListUsers))
-	mux.Handle("PUT /api/v1/organizations/{organizationID}/users/{userID}/suspended", s.adminOnly(s.handleSetUserSuspended))
-	mux.Handle("PUT /api/v1/organizations/{organizationID}/users/{userID}/password", s.adminOnly(s.handleSetUserPassword))
-	mux.Handle("DELETE /api/v1/organizations/{organizationID}/users/{userID}", s.adminOnly(s.handleDeleteUser))
-
-	// Who this request is, and the one password a session may change without help. Neither
-	// is behind adminOnly: they are about the caller rather than about the deployment, and
-	// gating "who am I" on being an administrator would make the sign-in page unable to ask.
-	mux.Handle("GET /api/v1/me", http.HandlerFunc(s.handleWhoAmI))
-	mux.Handle("POST /api/v1/me/password", http.HandlerFunc(s.handleChangeOwnPassword))
-
-	mux.Handle("POST /api/v1/networks", s.adminOnly(s.handleCreateNetwork))
-	mux.Handle("GET /api/v1/networks", s.readable(s.handleListNetworks))
-
-	// The one read endpoint (ADR-0022). Everything else under /api/v1 creates or changes
-	// something; this answers a question about a network, and the commercial layer builds
-	// its cross-tenant roll-up on it, so its shape is not this page's to choose.
-	mux.Handle("GET /api/v1/networks/{networkID}/overview", s.readable(s.handleNetworkOverview))
-
-	// The audit trail. Readable by the browser as of the amendment to ADR-0022 §5: the
-	// cookie is scoped to reads within one network, and this is one — it carries more than
-	// the overview does, and it carries it about the same network.
-	mux.Handle("GET /api/v1/networks/{networkID}/audit", s.readable(s.handleListAuditEvents))
-
-	// Signing in, which is the only route that takes the administrative token in a body.
-	// Rate limited with the enrolment endpoints: it is the one place a wrong secret can be
-	// guessed at, and while guessing a 32-byte secret is not a real threat, an endpoint
-	// that allocates on success should not be free to hammer.
-	mux.Handle("POST /api/v1/ui/session", s.rateLimited(s.handleUILogin))
-	mux.Handle("DELETE /api/v1/ui/session", http.HandlerFunc(s.handleUILogout))
+	for _, rt := range s.routes() {
+		switch rt.kind {
+		case guardUnset:
+			panic("api: " + rt.pattern + " was registered without saying how it is gated")
+		case guardNetwork, guardOrganization, guardCallerOrganization:
+			if !authz.Known(string(rt.perm)) {
+				panic("api: " + rt.pattern + " needs " + string(rt.perm) +
+					", which is not in the permission catalogue")
+			}
+		default:
+			if rt.perm != "" {
+				panic("api: " + rt.pattern + " names a permission that its guard never checks")
+			}
+		}
+		mux.Handle(rt.pattern, s.gate(rt))
+	}
 
 	// The page itself (ADR-0022 §2), registered as one route per embedded file rather
 	// than as a catch-all — see routePage for why that distinction is load-bearing.
 	s.routePage(mux)
-
-	// Its own sub-resource rather than a field on a general network update, because this
-	// is the one setting here that can decide whether a laptop leaks. A PUT that names it
-	// in the path cannot be made by accident, reads unambiguously in an access log, and
-	// leaves no room for a partial update that silently carries it along.
-	mux.Handle("GET /api/v1/networks/{networkID}/egress-fail-closed", s.adminOnly(s.handleGetEgressFailClosed))
-	mux.Handle("PUT /api/v1/networks/{networkID}/egress-fail-closed", s.adminOnly(s.handleSetEgressFailClosed))
-
-	mux.Handle("GET /api/v1/networks/{networkID}/route-groups", s.adminOnly(s.handleListRouteGroups))
-	mux.Handle("POST /api/v1/networks/{networkID}/route-groups", s.adminOnly(s.handleCreateRouteGroup))
-	mux.Handle("DELETE /api/v1/networks/{networkID}/route-groups/{slug}", s.adminOnly(s.handleDeleteRouteGroup))
-	mux.Handle("POST /api/v1/networks/{networkID}/route-groups/{slug}/advertisers", s.adminOnly(s.handleAdvertise))
-	mux.Handle("DELETE /api/v1/networks/{networkID}/route-groups/{slug}/advertisers/{membershipID}", s.adminOnly(s.handleWithdraw))
-	mux.Handle("PUT /api/v1/networks/{networkID}/route-groups/{slug}/failover", s.adminOnly(s.handleSetRouteGroupFailover))
 }
 
-// rateLimited wraps an unauthenticated handler.
-func (s *Server) rateLimited(next http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.limit.allow(clientKey(r)) {
-			w.Header().Set("Retry-After", "1")
-			httpx.Error(w, s.log, http.StatusTooManyRequests,
-				"rate_limited", "too many enrolment attempts; slow down")
-			return
-		}
-		next(w, r)
-	})
+// guardKind is how a route decides whether a request may proceed.
+type guardKind int
+
+const (
+	// guardUnset is the zero value and is not a guard. Registering a route with it panics,
+	// which is the point: adding an endpoint should not be possible without deciding who
+	// may reach it, and the decision should not be able to default to the permissive one.
+	guardUnset guardKind = iota
+
+	// guardThrottled is unauthenticated and rate limited. A device with nothing yet cannot
+	// authenticate, so the token in the body is the credential (ADR-0006).
+	guardThrottled
+
+	// guardOpen is unauthenticated and not rate limited. Two routes: the session upgrade,
+	// which authenticates in its own first frame and must not be throttled because
+	// throttling reconnects turns a brief outage into a long one, and signing out, which
+	// has to work for a browser holding a session this process has already forgotten.
+	guardOpen
+
+	// guardSignedIn is any caller this control plane can identify, with no permission
+	// required. For routes about the caller rather than about the deployment: who am I,
+	// which organisation am I in, what permissions exist.
+	guardSignedIn
+
+	// guardBootstrap is the administrative token itself, and not a person however powerful.
+	//
+	// One thing needs it: creating an organisation. A user belongs to exactly one
+	// organisation, so there is no organisation a person could hold a permission over that
+	// would authorise creating another — making a tenant is deployment administration, and
+	// the deployment's credential is the honest gate for it.
+	guardBootstrap
+
+	// guardNetwork requires a permission held in the network named by {networkID}. An
+	// organisation-wide grant satisfies it, and so does one narrowed to that network.
+	guardNetwork
+
+	// guardOrganization requires a permission held across the organisation named by
+	// {organizationID}. A grant narrowed to a single network never satisfies one.
+	guardOrganization
+
+	// guardCallerOrganization requires a permission held across the caller's own
+	// organisation, for the two routes that name no scope in their path. A person belongs
+	// to exactly one organisation, so there is no ambiguity for them; the administrative
+	// token belongs to none, and holds everything.
+	guardCallerOrganization
+)
+
+// route is one endpoint and what it takes to reach it.
+type route struct {
+	pattern string
+	handler http.HandlerFunc
+	kind    guardKind
+
+	// perm is required by the three guards that check one, and must be empty otherwise.
+	// A permission written next to a guard that ignores it reads like a control and is not
+	// one, which is worse than no permission at all.
+	perm authz.Permission
 }
 
-// adminOnly gates a handler behind the bootstrap secret, or a signed-in person.
+// routes is every endpoint this control plane serves, and the permission each needs.
 //
-// A signed-in person passes, and that is the whole permission model for now: ADR-0024 §4
-// puts roles in a later slice, so **every user account is an administrator account**. It
-// cannot be otherwise — there are no limits to apply — and it is written here rather than
-// left to be discovered, because an endpoint that creates users looks like one that could
-// create a limited one.
-func (s *Server) adminOnly(next http.HandlerFunc) http.Handler {
+// The mapping from route to permission is the public surface of ADR-0024 §4: ADR-0009 makes
+// the commercial layer a consumer of it, and ADR-0023 records that such surface cannot be
+// reshaped freely afterwards. A permission is chosen here once.
+func (s *Server) routes() []route {
+	return []route{
+		// Enrolment. A device that has nothing yet cannot authenticate, so the token in
+		// the body is the credential.
+		{pattern: "POST /api/v1/enroll/challenge", handler: s.handleChallenge, kind: guardThrottled},
+		{pattern: "POST /api/v1/enroll", handler: s.handleRedeem, kind: guardThrottled},
+
+		// Sessions. The challenge endpoint is unauthenticated for the same reason
+		// enrolment's is — a device proves itself by signing what it gets back — so it is
+		// rate limited alongside them. The upgrade itself is not: it authenticates in its
+		// first frame, and throttling reconnects is how a brief control-plane outage turns
+		// into a long one when every agent comes back at once.
+		{pattern: "POST /api/v1/session/challenge", handler: s.handleSessionChallenge, kind: guardThrottled},
+		{pattern: "GET /api/v1/session", handler: s.handleSession, kind: guardOpen},
+
+		// Enrolment tokens. Minting one is how a device gets onto a network, which is why
+		// an operator holds it and a reader does not.
+		{pattern: "POST /api/v1/networks/{networkID}/enrollment-tokens",
+			handler: s.handleCreateToken, kind: guardNetwork, perm: authz.NetworkEnrollmentTokensWrite},
+		{pattern: "GET /api/v1/networks/{networkID}/enrollment-tokens",
+			handler: s.handleListTokens, kind: guardNetwork, perm: authz.NetworkEnrollmentTokensRead},
+		{pattern: "DELETE /api/v1/networks/{networkID}/enrollment-tokens/{tokenID}",
+			handler: s.handleRevokeToken, kind: guardNetwork, perm: authz.NetworkEnrollmentTokensWrite},
+
+		{pattern: "GET /api/v1/networks/{networkID}/devices",
+			handler: s.handleListMemberships, kind: guardNetwork, perm: authz.NetworkDevicesRead},
+		{pattern: "DELETE /api/v1/networks/{networkID}/devices/{membershipID}",
+			handler: s.handleRevokeMembership, kind: guardNetwork, perm: authz.NetworkDevicesRevoke},
+
+		// The names an administrator writes down, which nothing can derive from the peer
+		// list (ADR-0021 §2).
+		{pattern: "GET /api/v1/networks/{networkID}/dns-records",
+			handler: s.handleListDNSRecords, kind: guardNetwork, perm: authz.NetworkDNSRead},
+		{pattern: "POST /api/v1/networks/{networkID}/dns-records",
+			handler: s.handleCreateDNSRecord, kind: guardNetwork, perm: authz.NetworkDNSWrite},
+		{pattern: "DELETE /api/v1/networks/{networkID}/dns-records/{recordID}",
+			handler: s.handleDeleteDNSRecord, kind: guardNetwork, perm: authz.NetworkDNSWrite},
+
+		{pattern: "GET /api/v1/networks/{networkID}/acl",
+			handler: s.handleGetPolicy, kind: guardNetwork, perm: authz.NetworkACLRead},
+		{pattern: "PUT /api/v1/networks/{networkID}/acl",
+			handler: s.handlePublishPolicy, kind: guardNetwork, perm: authz.NetworkACLWrite},
+		{pattern: "GET /api/v1/networks/{networkID}/acl/versions",
+			handler: s.handleListPolicyVersions, kind: guardNetwork, perm: authz.NetworkACLRead},
+
+		// The tenant networks belong to. Creating one is deployment administration rather
+		// than something a person can hold a permission over — see guardBootstrap — while
+		// which organisation you are in is not a privilege: /api/v1/me already answers it.
+		{pattern: "POST /api/v1/organizations", handler: s.handleCreateOrganization, kind: guardBootstrap},
+		{pattern: "GET /api/v1/organizations", handler: s.handleListOrganizations, kind: guardSignedIn},
+
+		// People (ADR-0024). Creating an account and suspending one are the same
+		// permission: both decide who can sign in.
+		{pattern: "POST /api/v1/organizations/{organizationID}/users",
+			handler: s.handleCreateUser, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
+		{pattern: "GET /api/v1/organizations/{organizationID}/users",
+			handler: s.handleListUsers, kind: guardOrganization, perm: authz.OrganizationUsersRead},
+		{pattern: "PUT /api/v1/organizations/{organizationID}/users/{userID}/suspended",
+			handler: s.handleSetUserSuspended, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
+		{pattern: "PUT /api/v1/organizations/{organizationID}/users/{userID}/password",
+			handler: s.handleSetUserPassword, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
+		{pattern: "DELETE /api/v1/organizations/{organizationID}/users/{userID}",
+			handler: s.handleDeleteUser, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
+
+		// Who may act, kept apart from every other permission so that "can change the
+		// network" and "can change who may change the network" are different answers.
+		{pattern: "GET /api/v1/organizations/{organizationID}/roles",
+			handler: s.handleListRoles, kind: guardOrganization, perm: authz.OrganizationRolesRead},
+		{pattern: "GET /api/v1/organizations/{organizationID}/users/{userID}/roles",
+			handler: s.handleListUserRoles, kind: guardOrganization, perm: authz.OrganizationRolesRead},
+		{pattern: "POST /api/v1/organizations/{organizationID}/users/{userID}/roles",
+			handler: s.handleGrantRole, kind: guardOrganization, perm: authz.OrganizationRolesBind},
+		{pattern: "DELETE /api/v1/organizations/{organizationID}/users/{userID}/roles/{bindingID}",
+			handler: s.handleRevokeRole, kind: guardOrganization, perm: authz.OrganizationRolesBind},
+
+		// Who this request is, the one password a session may change without help, and
+		// what permissions exist at all. None is behind a permission: they are about the
+		// caller rather than about the deployment, and gating "who am I" would make the
+		// sign-in page unable to ask.
+		{pattern: "GET /api/v1/me", handler: s.handleWhoAmI, kind: guardSignedIn},
+		{pattern: "POST /api/v1/me/password", handler: s.handleChangeOwnPassword, kind: guardSignedIn},
+		{pattern: "GET /api/v1/permissions", handler: s.handleListPermissions, kind: guardSignedIn},
+
+		// Networks, which name no scope in their path: the caller's own organisation is
+		// the scope.
+		{pattern: "POST /api/v1/networks",
+			handler: s.handleCreateNetwork, kind: guardCallerOrganization, perm: authz.OrganizationNetworksCreate},
+		{pattern: "GET /api/v1/networks",
+			handler: s.handleListNetworks, kind: guardCallerOrganization, perm: authz.OrganizationNetworksRead},
+
+		// The one read endpoint (ADR-0022). Everything else under /api/v1 creates or
+		// changes something; this answers a question about a network, and the commercial
+		// layer builds its cross-tenant roll-up on it, so its shape is not this page's to
+		// choose.
+		{pattern: "GET /api/v1/networks/{networkID}/overview",
+			handler: s.handleNetworkOverview, kind: guardNetwork, perm: authz.NetworkRead},
+
+		// The audit trail, which is its own permission rather than travelling with
+		// network.read: a trail says who did what, and somebody who may watch a dashboard
+		// is not automatically somebody who may see the names of everyone who touched it.
+		{pattern: "GET /api/v1/networks/{networkID}/audit",
+			handler: s.handleListAuditEvents, kind: guardNetwork, perm: authz.NetworkAuditRead},
+
+		// Signing in. Rate limited with the enrolment endpoints: it is where a wrong
+		// password can be guessed at, and an endpoint that hashes on every attempt should
+		// not be free to hammer. Signing out is not — it has to work for a browser holding
+		// a session this process has already forgotten.
+		{pattern: "POST /api/v1/ui/session", handler: s.handleUILogin, kind: guardThrottled},
+		{pattern: "DELETE /api/v1/ui/session", handler: s.handleUILogout, kind: guardOpen},
+
+		// Its own sub-resource rather than a field on a general network update, because
+		// this is the one setting here that can decide whether a laptop leaks. A PUT that
+		// names it in the path cannot be made by accident, reads unambiguously in an access
+		// log, and leaves no room for a partial update that silently carries it along.
+		{pattern: "GET /api/v1/networks/{networkID}/egress-fail-closed",
+			handler: s.handleGetEgressFailClosed, kind: guardNetwork, perm: authz.NetworkEgressRead},
+		{pattern: "PUT /api/v1/networks/{networkID}/egress-fail-closed",
+			handler: s.handleSetEgressFailClosed, kind: guardNetwork, perm: authz.NetworkEgressWrite},
+
+		// Route groups. Changing which advertiser carries a prefix is what somebody does at
+		// two in the morning when a link is down; changing which prefixes exist is not. The
+		// two are different permissions for that reason.
+		{pattern: "GET /api/v1/networks/{networkID}/route-groups",
+			handler: s.handleListRouteGroups, kind: guardNetwork, perm: authz.NetworkRoutesRead},
+		{pattern: "POST /api/v1/networks/{networkID}/route-groups",
+			handler: s.handleCreateRouteGroup, kind: guardNetwork, perm: authz.NetworkRoutesWrite},
+		{pattern: "DELETE /api/v1/networks/{networkID}/route-groups/{slug}",
+			handler: s.handleDeleteRouteGroup, kind: guardNetwork, perm: authz.NetworkRoutesWrite},
+		{pattern: "POST /api/v1/networks/{networkID}/route-groups/{slug}/advertisers",
+			handler: s.handleAdvertise, kind: guardNetwork, perm: authz.NetworkRoutesWrite},
+		{pattern: "DELETE /api/v1/networks/{networkID}/route-groups/{slug}/advertisers/{membershipID}",
+			handler: s.handleWithdraw, kind: guardNetwork, perm: authz.NetworkRoutesWrite},
+		{pattern: "PUT /api/v1/networks/{networkID}/route-groups/{slug}/failover",
+			handler: s.handleSetRouteGroupFailover, kind: guardNetwork, perm: authz.NetworkRoutesFailover},
+	}
+}
+
+// gate turns a route into a handler that decides whether the request may proceed.
+//
+// Two lookups for a signed-in person: the session, and the permissions. The second is per
+// request rather than resolved at sign-in, so revoking a role takes effect on the next
+// request rather than whenever somebody happens to close their browser.
+func (s *Server) gate(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.sessionUser(r) != nil {
-			next(w, r)
+		switch rt.kind {
+		case guardOpen:
+			rt.handler(w, r)
 			return
-		}
-		if s.cfg.AdminToken == "" {
-			httpx.Error(w, s.log, http.StatusServiceUnavailable, "admin_disabled",
-				"sign in, or set MESHP_ADMIN_TOKEN to bootstrap the first account")
+		case guardThrottled:
+			if !s.limit.allow(clientKey(r)) {
+				w.Header().Set("Retry-After", "1")
+				httpx.Error(w, s.log, http.StatusTooManyRequests,
+					"rate_limited", "too many attempts; slow down")
+				return
+			}
+			rt.handler(w, r)
 			return
 		}
 
-		presented := bearer(r)
-		// Constant time, so a caller cannot learn the secret one byte at a time from
-		// how long the comparison takes.
-		if subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.AdminToken)) != 1 {
-			s.log.Warn("administrative request rejected",
-				"path", logx.Safe(r.URL.Path), "remote", logx.Safe(clientKey(r)))
-			httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
-				"a valid administrative token is required")
+		c, ok := s.identify(r)
+		if !ok {
+			s.unauthenticated(w, r)
 			return
 		}
-		s.warnBootstrapTokenUsed(r)
-		next(w, r)
+		r = r.WithContext(withCaller(r.Context(), c))
+
+		switch rt.kind {
+		case guardSignedIn:
+			rt.handler(w, r)
+
+		case guardBootstrap:
+			if !c.bootstrap {
+				// Not a permission failure, so it does not go through refuse: no
+				// permission would help, and saying which one was missing would be
+				// pointing at something that does not exist.
+				httpx.Error(w, s.log, http.StatusForbidden, "forbidden",
+					"this needs the administrative token; it is deployment administration "+
+						"rather than something a role can grant")
+				return
+			}
+			rt.handler(w, r)
+
+		case guardNetwork:
+			networkID, ok := s.pathUUID(w, r, "networkID")
+			if !ok {
+				return
+			}
+			held, err := s.permissionsInNetwork(r, c, networkID)
+			if err != nil {
+				s.respondError(w, r, err)
+				return
+			}
+			if !held.Allows(rt.perm) {
+				s.refuse(w, r, c, held, rt.perm)
+				return
+			}
+			rt.handler(w, r)
+
+		case guardOrganization:
+			orgID, ok := s.pathUUID(w, r, "organizationID")
+			if !ok {
+				return
+			}
+			held, err := s.permissionsInOrganization(r, c, orgID)
+			if err != nil {
+				s.respondError(w, r, err)
+				return
+			}
+			if !held.Allows(rt.perm) {
+				s.refuse(w, r, c, held, rt.perm)
+				return
+			}
+			rt.handler(w, r)
+
+		case guardCallerOrganization:
+			// The administrative token belongs to no organisation and holds everything,
+			// so there is nothing to resolve for it.
+			if c.user == nil {
+				held := s.callerPermissions(c)
+				if !held.Allows(rt.perm) {
+					s.refuse(w, r, c, held, rt.perm)
+					return
+				}
+				rt.handler(w, r)
+				return
+			}
+			held, err := s.permissionsInOrganization(r, c, c.user.OrganizationID)
+			if err != nil {
+				s.respondError(w, r, err)
+				return
+			}
+			if !held.Allows(rt.perm) {
+				s.refuse(w, r, c, held, rt.perm)
+				return
+			}
+			rt.handler(w, r)
+
+		default:
+			// Unreachable: Routes panics on guardUnset before anything is registered.
+			httpx.Error(w, s.log, http.StatusInternalServerError, "internal",
+				"the request could not be completed")
+		}
 	})
+}
+
+// callerPermissions is what a credential that is not a person holds, everywhere.
+func (s *Server) callerPermissions(c caller) authz.Set {
+	if c.bootstrap {
+		return authz.All()
+	}
+	return authz.ReadOnly()
 }
 
 func bearer(r *http.Request) string {

@@ -7,11 +7,13 @@ import (
 	"github.com/meshpnet/meshp/internal/store"
 )
 
-// handleCreateUser adds a person to an organisation.
+// handleCreateUser adds a person to an organisation and gives them a role.
 //
-// Every account this makes is an administrator account. Permissions are a later slice of
-// ADR-0024, so there is nothing to limit an account with, and this endpoint deliberately
-// takes no role: a field that accepted one and did nothing would be worse than its absence.
+// The role is optional and the default is not the same for everybody: the first person in an
+// organisation becomes its owner, because somebody has to be able to grant a role and on a
+// fresh organisation there is nobody who can; everybody after them becomes an administrator,
+// because making every account an owner is how a permission system ends up meaning nothing.
+// What was granted comes back in the response rather than being left to be discovered.
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.pathUUID(w, r, "organizationID")
 	if !ok {
@@ -21,18 +23,34 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Name     string `json:"name"`
 		Password string `json:"password"`
+
+		// Role is a slug: one of the built-ins, or one this organisation defined. The
+		// permission catalogue is at GET /api/v1/permissions and the roles that can be
+		// granted at GET /api/v1/organizations/{id}/roles.
+		Role string `json:"role"`
 	}
 	if err := decode(w, r, &body); err != nil {
 		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 
-	user, err := s.store.CreateUser(r.Context(), orgID, body.Email, body.Name, body.Password)
+	user, binding, err := s.store.CreateUser(r.Context(), store.CreateUserRequest{
+		Organization: orgID,
+		Email:        body.Email,
+		Name:         body.Name,
+		Password:     body.Password,
+		Role:         body.Role,
+		Actor:        s.actor(r),
+		SourceIP:     requestAddr(r),
+	})
 	if err != nil {
 		s.respondError(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, s.log, http.StatusCreated, userJSON(user))
+
+	out := userJSON(user)
+	out["role"] = binding.RoleSlug
+	httpx.WriteJSON(w, s.log, http.StatusCreated, out)
 }
 
 // handleListUsers answers who is in an organisation.

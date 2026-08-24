@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/meshpnet/meshp/internal/authz"
 	"github.com/meshpnet/meshp/internal/password"
 	dbgen "github.com/meshpnet/meshp/internal/store/gen"
 )
@@ -86,42 +87,94 @@ type Session struct {
 	User User
 }
 
-// CreateUser adds a person to an organisation.
+// CreateUserRequest adds a person to an organisation.
+type CreateUserRequest struct {
+	Organization uuid.UUID
+	Email        string
+	Name         string
+	Password     string
+
+	// Role is the slug this person is granted across the organisation. Empty takes the
+	// default, which depends on whether there is anybody here yet — see CreateUser.
+	Role string
+
+	Actor    Actor
+	SourceIP *netip.Addr
+}
+
+// CreateUser adds a person to an organisation and grants them a role.
 //
-// Every user created here is, for now, an administrator: permissions do not exist yet and
-// every authenticated caller is equivalent — ADR-0024 §4 is a later slice. Said out loud
-// because somebody would otherwise assume the opposite. This cannot make a limited account,
-// because there are no limits.
-func (s *Store) CreateUser(ctx context.Context, orgID uuid.UUID, email, name, plain string) (User, error) {
-	email = strings.ToLower(strings.TrimSpace(email))
+// One transaction, because an account with no role can do nothing at all: creating one and
+// failing to grant it anything would produce a person who can sign in, sees a page of
+// refusals, and has no way to tell that from a broken deployment.
+//
+// The default role is the first thing here that is not the same for everybody. **The first
+// person in an organisation becomes its owner**; everybody after them becomes an
+// administrator. Somebody has to be able to grant a role, and on a fresh organisation there
+// is nobody who can — while making every subsequent account an owner is how a permission
+// system ends up meaning nothing. The role that was granted comes back, so the rule is
+// visible in the response rather than something to be discovered later.
+func (s *Store) CreateUser(ctx context.Context, req CreateUserRequest) (User, Binding, error) {
+	email := strings.ToLower(strings.TrimSpace(req.Email))
 	if !strings.Contains(email, "@") || strings.ContainsAny(email, " \t\r\n") {
 		// Not a full grammar. An address is checked by sending to it, which this deployment
 		// may have no way to do (ADR-0024 §6), so this rejects what is obviously not one
 		// and declines to litigate the rest.
-		return User{}, invalid("%q is not an email address", email)
+		return User{}, Binding{}, invalid("%q is not an email address", email)
 	}
-	if err := checkPasswordStrength(plain); err != nil {
-		return User{}, err
+	if err := checkPasswordStrength(req.Password); err != nil {
+		return User{}, Binding{}, err
 	}
-
-	hash, err := password.Hash(plain)
+	hash, err := password.Hash(req.Password)
 	if err != nil {
-		return User{}, fmt.Errorf("store: hashing the password: %w", err)
+		return User{}, Binding{}, fmt.Errorf("store: hashing the password: %w", err)
 	}
 
-	row, err := s.Queries().CreateUser(ctx, dbgen.CreateUserParams{
-		OrganizationID: orgID,
-		Email:          email,
-		Name:           name,
-		PasswordHash:   &hash,
+	var (
+		user    User
+		binding Binding
+	)
+	err = s.InTx(ctx, func(q *dbgen.Queries) error {
+		// Counted before the insert, so "the first person here" means what it says.
+		existing, err := q.ListUsersForOrganization(ctx, req.Organization)
+		if err != nil {
+			return fmt.Errorf("store: reading the organisation's people: %w", err)
+		}
+
+		row, err := q.CreateUser(ctx, dbgen.CreateUserParams{
+			OrganizationID: req.Organization,
+			Email:          email,
+			Name:           req.Name,
+			PasswordHash:   &hash,
+		})
+		if IsUniqueViolation(err) {
+			return fmt.Errorf("%w: %q", ErrUserExists, email)
+		}
+		if err != nil {
+			return fmt.Errorf("store: creating the user: %w", err)
+		}
+		user = userFrom(row.ID, row.OrganizationID, row.Email, row.Name, row.CreatedAt, row.SuspendedAt)
+
+		slug := req.Role
+		if slug == "" {
+			slug = authz.RoleAdministrator
+			if len(existing) == 0 {
+				slug = authz.RoleOwner
+			}
+		}
+		binding, err = bindRole(ctx, q, BindRequest{
+			Organization: req.Organization,
+			User:         user.ID,
+			Role:         slug,
+			Actor:        req.Actor,
+			SourceIP:     req.SourceIP,
+		})
+		return err
 	})
-	if IsUniqueViolation(err) {
-		return User{}, fmt.Errorf("%w: %q", ErrUserExists, email)
-	}
 	if err != nil {
-		return User{}, fmt.Errorf("store: creating the user: %w", err)
+		return User{}, Binding{}, err
 	}
-	return userFrom(row.ID, row.OrganizationID, row.Email, row.Name, row.CreatedAt, row.SuspendedAt), nil
+	return user, binding, nil
 }
 
 // ListUsers returns an organisation's people.

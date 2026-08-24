@@ -112,8 +112,12 @@ func TestTheSameOrganisationTwiceIsRefused(t *testing.T) {
 	}
 }
 
-// An organisation is not scoped to a network, so the browser's credential does not reach it
-// either way (ADR-0022 §5).
+// The browser credential minted from the administrative token reaches neither half of this.
+//
+// Reading is refused because the endpoint answers "which organisation am I in", and that
+// session is not a person — returning every tenant to a page derived from one shared secret
+// is the leak ADR-0022 §5 was amended about. Writing is refused because creating a tenant is
+// deployment administration and needs the token itself.
 func TestOrganisationsAreNotBrowserReadable(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login()
@@ -121,8 +125,8 @@ func TestOrganisationsAreNotBrowserReadable(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		resp := h.withCookie(method, "/api/v1/organizations", cookie)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s with a browser session = %d, want 401", method, resp.StatusCode)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s with a browser session = %d, want 403", method, resp.StatusCode)
 		}
 	}
 }

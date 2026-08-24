@@ -11,6 +11,7 @@ import (
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/session"
 	"github.com/meshpnet/meshp/internal/store"
+	dbgen "github.com/meshpnet/meshp/internal/store/gen"
 )
 
 // Presence answers which memberships are talking to this control plane right now.
@@ -237,17 +238,35 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 // overviewPollInterval is how long a page should wait before asking again.
 const overviewPollInterval = 5 * time.Second
 
-// handleListNetworks answers what networks exist.
+// handleListNetworks answers what networks the caller can see.
 //
-// It comes with the overview because a page reachable only by pasting a UUID is not a
-// product, and there has never been a way to list networks over the API — the quickstart
-// works around it with psql.
+// The caller's own organisation, not every network this control plane holds. Until
+// permissions existed this returned all of them to anybody who was signed in, which on a
+// deployment with more than one tenant was a list of other people's networks — the kind of
+// leak that is invisible in development, where there is only ever one.
+//
+// The administrative token belongs to no organisation and still sees everything, which is
+// what it is for (ADR-0024 §5) and what keeps a deployment operator able to answer "what is
+// on this box".
 func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.store.Queries().ListAllNetworks(r.Context())
+	var (
+		rows []dbgen.ListAllNetworksRow
+		err  error
+	)
+	if user := callerFrom(r).user; user != nil {
+		var scoped []dbgen.ListNetworksForOrganizationWithCountsRow
+		scoped, err = s.store.Queries().ListNetworksForOrganizationWithCounts(r.Context(), user.OrganizationID)
+		for _, row := range scoped {
+			rows = append(rows, dbgen.ListAllNetworksRow(row))
+		}
+	} else {
+		rows, err = s.store.Queries().ListAllNetworks(r.Context())
+	}
 	if err != nil {
 		s.respondError(w, r, err)
 		return
 	}
+
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, map[string]any{
