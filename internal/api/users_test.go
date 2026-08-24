@@ -6,9 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/meshpnet/meshp/internal/store"
 )
 
 const testPassword = "correct horse battery staple"
@@ -43,6 +47,12 @@ func doJSON(t *testing.T, method, url string, body any, cookie *http.Cookie, tok
 	}
 	if cookie != nil {
 		req.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+		// What a browser sends on every unsafe method, and what the cross-site request
+		// forgery check requires of a cookie-authenticated write. Set from the request's
+		// own URL so it is right whatever host the test server got.
+		if parsed, err := neturl.Parse(url); err == nil {
+			req.Header.Set("Origin", parsed.Scheme+"://"+parsed.Host)
+		}
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -343,4 +353,80 @@ func auditFor(t *testing.T, h *harness, action string) []map[string]any {
 		}
 	}
 	return out
+}
+
+// A page nobody is watching stops reading. A page somebody is watching does not.
+//
+// The sliding half of the session's lifetime. This was tested against the in-memory browser
+// sessions until ADR-0024 removed them; the database sessions have the same shape and had no
+// test, so the property moved here rather than being lost with the code that used to hold it.
+//
+// The clock is not advanced — the store reads the wall clock — so the rows are aged with SQL
+// instead, which is the same thing from the query's point of view.
+func TestASessionExpiresWhenIdleAndIsHeldOpenByUse(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "alice@example.com")
+	cookie := signIn(t, h, "alice@example.com", testPassword)
+
+	// Aged past the point where SessionUser will extend it, then used. A dashboard polling
+	// for hours must not log itself out.
+	for range 3 {
+		ageSession(t, h, store.SessionIdle-time.Minute)
+		resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("a session in use returned %d, want 200", resp.StatusCode)
+		}
+	}
+
+	// And then left alone past the window.
+	ageSession(t, h, store.SessionIdle+time.Minute)
+	resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("an idle session still reads, returned %d", resp.StatusCode)
+	}
+}
+
+// Use extends the idle window and never the ceiling, so a page left open on a wall does not
+// hold a credential forever.
+func TestASessionHasACeilingThatUseDoesNotRaise(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "alice@example.com")
+	cookie := signIn(t, h, "alice@example.com", testPassword)
+
+	// Continuously polled, so only the fixed deadline can end this. The clamp in
+	// TouchUserSession is what makes it terminate: without it the idle window would walk
+	// past the ceiling one request at a time.
+	if _, err := h.store.Pool().Exec(h.ctx,
+		`UPDATE user_sessions SET expires_at = now() + interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a session inside its ceiling returned %d, want 200", resp.StatusCode)
+	}
+
+	if _, err := h.store.Pool().Exec(h.ctx,
+		`UPDATE user_sessions SET expires_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	after := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
+	defer func() { _ = after.Body.Close() }()
+	if after.StatusCode != http.StatusUnauthorized {
+		t.Errorf("a session past its ceiling returned %d, want 401 — use raised the ceiling",
+			after.StatusCode)
+	}
+}
+
+// ageSession moves every session's idle deadline backwards by d, which is what the passage
+// of that much time looks like to the query.
+func ageSession(t *testing.T, h *harness, d time.Duration) {
+	t.Helper()
+	if _, err := h.store.Pool().Exec(h.ctx,
+		`UPDATE user_sessions SET idle_expires_at = idle_expires_at - $1::interval`,
+		d.String()); err != nil {
+		t.Fatal(err)
+	}
 }

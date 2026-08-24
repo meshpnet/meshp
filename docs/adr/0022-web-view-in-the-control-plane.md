@@ -107,65 +107,83 @@ page visibly stale rather than leaving old data on screen looking current. A mon
 view that lies about when it last heard anything is worse than no view, in the same way
 that a tunnel silently failing open is worse than one that refuses traffic (ADR-0011).
 
-### 5. A browser gets a cookie, and the cookie can only read
+### 5. A browser gets a cookie, and the cookie is a person
 
-> **Superseded in substance by ADR-0024.** That record gives the browser a real user
-> session with a real identity, at which point the read-only restriction below stops being
-> necessary — it exists only because a credential derived from a shared secret has nothing
-> to attach permissions to. This section describes what ships today and should be rewritten
-> rather than amended again when users land.
->
-> **What the derived session now holds.** ADR-0024's permission slice replaced the list of
-> endpoints below with a rule: the cookie minted from the administrative token holds every
-> permission whose action is a read, and none that writes. That is wider than the two
-> endpoints this section enumerated — it now reaches the device list, the policy, DNS
-> records, the route groups and the enrolment token metadata. The widening is deliberate and
-> it is the point of recording it here: a rule somebody can hold in their head is worth more
-> than a list, and this section had to be amended twice because it was a list. Nothing it
-> reaches was out of reach of the secret it is derived from.
+*Rewritten 2026-08-24, when ADR-0024's permission slices landed. What this section said
+before is at the end, because how it was wrong is the useful part.*
 
-`POST /api/v1/ui/session` takes the administrative token once and returns a session
-cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, short-lived, revocable server-side.
-`DELETE` on the same path logs out. The token itself never reaches JavaScript and is never
-stored in the browser.
+`POST /api/v1/ui/session` takes an email address and a password and returns a session
+cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, sliding idle window, fixed ceiling,
+revocable server-side because it names a row in `user_sessions`. `DELETE` on the same path
+signs out. No credential ever reaches JavaScript.
 
-**The cookie authorises reads, and nothing else.** It is a strictly weaker credential
-derived from the administrative one: every route that creates or changes something keeps
-requiring the bearer token.
+**What the cookie authorises is what the person holds.** There is no separate browser
+credential and no separate rule about what a browser may do: the session identifies a user,
+the user has role bindings, and every route checks a permission against them (ADR-0024 §4).
+A reader signs in and sees a page with no buttons on it. An owner signs in and sees the same
+page with buttons. The middleware that used to mean "reads only" is gone, because there is
+nothing left for it to distinguish.
 
-Two reads it deliberately does not reach, because they are not about a network at all: the
-organisation endpoints, which describe tenants rather than anything inside one. The network
-*list* it does reach, and that is a cross-tenant read — names, slugs and device counts for
-every network this control plane holds. It is there because a page reachable only by pasting
-a UUID is not a product, and it is the one place this credential sees past a single network.
-Worth stating rather than leaving to be discovered, because it is the seam where a
-future per-user scope will have to bite first.
+**The page asks what it may do before it renders.** `GET /api/v1/me/permissions?network=`
+answers for the caller, in that scope. This is never enforcement — the API refuses
+regardless, and a page that believed itself would be one edit away from being the security
+boundary — it is so that a control that would be refused is never drawn. A button that
+returns 403 teaches somebody the product is broken rather than that they lack a permission.
 
-That is what makes shipping this before real user accounts defensible, and it is the whole
-of the justification: a stolen browser session reads one network. The moment the UI grows
-a write path, per-user accounts stop being a follow-up and become a prerequisite — the
-tables are already in the schema waiting for a reader.
+**Writes are defended twice, and the two fail independently.** `SameSite=Strict` means a
+browser does not attach the cookie to a request another site caused; this is the strong one
+and the browser enforces it. Behind it, an unsafe method authenticated by cookie must carry
+an `Origin` naming this host — a cross-origin form POST cannot suppress that header, and a
+cross-origin `fetch` that sets an acceptable one cannot get past a preflight this server
+never answers. Hosts are compared and schemes are not, because a TLS-terminating proxy
+leaves `r.TLS` nil and this package refuses to take `X-Forwarded-Proto` on trust; scheme
+downgrade is the cookie's problem, and the cookie is `Secure`.
 
-*Amended 2026-08-21.* This originally named the endpoints in Decision 1 and nothing else,
-which was the wrong granularity and showed it the first time another read arrived: the
-audit trail (#125) shipped behind the administrative token purely because it was not on a
-list, leaving the page unable to answer "why did my outbound IP change?" while the record
-that answers it sat one route away. The boundary that carries the argument is read against
-write, not which reads — a list makes every future read endpoint an ADR amendment, and an
-amendment made to unblock a feature is one nobody weighs properly. Scoping by kind keeps
-the property that matters, which is that this credential cannot change anything and cannot
-see past the network it was opened on.
+While the credential could only read, `SameSite` alone was adequate — the worst a forged
+request could achieve was making somebody's browser read something on their behalf. A cookie
+that can revoke a device is a different proposition, and a defence with one layer is one
+nobody has asked what happens if it fails.
 
-What that admits: the audit trail carries more than the overview does — actor labels,
-source addresses, the reasons administrators typed. A stolen session now reads one
-network's history as well as its state. That is a real widening, accepted because it is the
-same kind of exposure rather than a new one, and because the alternative was a product that
-cannot show an operator why their traffic moved.
+**The page writes two things, and deliberately only two.** Minting an enrolment token, and
+revoking a device: the two halves of a device's life, which is what this page is already
+about and what an operator otherwise reaches for `curl` to do. Publishing an access policy
+and editing DNS records are not here — they are documents somebody composes rather than
+buttons, and a form that got them subtly wrong would be worse than the command it replaced.
 
-The login endpoint refuses to mint a cookie over plaintext to anything but loopback. TLS
-is already supported both ways (`MESHP_TLS_CERT`, or `MESHP_TLS_DOMAINS` for automatic
-certificates); this makes configuring it a requirement for any deployment somebody
-actually browses to.
+**A minted token pauses the page.** The control plane stores only a hash, so the moment
+after minting is the only moment that secret exists; the view is replaced wholesale on every
+poll, which would wipe a half-made text selection. So polling stops while it is on screen and
+the page says that it has, which is the same rule about freshness as everywhere else.
+
+The login endpoint still refuses to mint a cookie over plaintext to anything but loopback,
+which makes configuring TLS a requirement for any deployment somebody actually browses to.
+
+**What is gone.** The in-memory session store, the credential derived from the
+administrative token, and the read-only middleware. A deployment with no user accounts
+cannot sign in to this page at all, which is correct: it has nothing to look at until
+somebody creates the first account, and creating one is an API call the bootstrap secret
+still makes (ADR-0024 §5).
+
+#### What this section used to say, and how it was wrong
+
+It said the cookie was minted from the administrative token and could only read, and that
+this was what made shipping a UI before user accounts defensible. That was true and it was
+also a bound with no principle underneath it — there was nothing to attach permissions to,
+so "reads only" was the only honest thing to say.
+
+It was amended twice in two days and wrong once, both times for the same reason: it
+enumerated. Naming the endpoints meant the audit trail (#125) shipped behind the
+administrative token purely because it was not on the list, leaving the page unable to
+answer "why did my outbound IP change?" while the record that answers it sat one route away.
+Replacing the endpoints with a rule — read against write — fixed the granularity, but the
+*next* amendment claimed the cookie could not read across networks, which had not been true
+since `GET /api/v1/networks` shipped in #113.
+
+The lesson worth keeping is not "check your claims", though that too. It is that a section
+describing a credential in terms of the routes it reaches will go stale every time a route
+is added, and nobody weighs an amendment made to unblock a feature. A credential described
+in terms of what its holder is does not have that failure mode, which is why this rewrite
+describes a person rather than a list.
 
 ## Consequences
 
@@ -245,6 +263,11 @@ can write everything into a place XSS can read, with no revocation and no expiry
 the price of admission for a read-only page: it is a larger project than the view, and it
 would keep the product invisible for the length of it. Decision 5 is what makes deferring
 it honest rather than merely convenient.
+
+> *Two weeks later, done.* ADR-0024 built exactly this, and Decision 5 above is now written
+> in terms of it. The deferral turned out to be worth what it cost — the page shipped, was
+> used, and the shape of what it needed from accounts was clearer for having had it — but
+> the estimate was right too: it was a larger project than the view, in four slices.
 
 **Three endpoints, polled separately.** Resource-shaped, more RESTful, and each one
 simpler. Rejected for the reason in the Context: the page would render an instant that

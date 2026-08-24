@@ -3,19 +3,22 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/meshpnet/meshp/internal/authz"
-	"github.com/meshpnet/meshp/internal/clock"
 )
 
-// login exchanges the administrative token for a browser session and returns the cookie.
+// login signs in as a reader and returns the cookie.
+//
+// A reader, because that is the successor to the credential these tests were written for: a
+// browser session that reads everything and writes nothing. That used to be a property of
+// the credential itself, derived from the administrative token and bounded by having no
+// identity to attach permissions to. It is now a property of the person holding it, which
+// is the whole of what ADR-0024 changed here.
 //
 // The cookie is carried by hand rather than by a cookie jar, because Go's jar honours the
 // Secure attribute and would refuse to send it back over the test server's plaintext
@@ -23,37 +26,30 @@ import (
 // about. What is under test is the server's side of it.
 func (h *harness) login() *http.Cookie {
 	h.t.Helper()
-	resp := h.loginWith(testAdminToken)
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusCreated {
-		h.t.Fatalf("signing in returned %d", resp.StatusCode)
-	}
-	for _, c := range resp.Cookies() {
-		if c.Name == uiCookieName {
-			return c
-		}
-	}
-	h.t.Fatalf("signing in set no %s cookie", uiCookieName)
-	return nil
+	return h.loginAs("reader")
 }
 
-func (h *harness) loginWith(token string) *http.Response {
+// loginAs signs in as somebody holding exactly one built-in role.
+func (h *harness) loginAs(role string) *http.Cookie {
 	h.t.Helper()
-	body, _ := json.Marshal(map[string]string{"token": token})
-	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/ui/session", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	return resp
+	email := role + "@example.com"
+	user := createUser(h.t, h, email)
+	takeAwayEveryRole(h.t, h, user)
+	grantRole(h.t, h, user, map[string]any{"role": role})
+	return signIn(h.t, h, email, testPassword)
 }
 
 // withCookie makes a request carrying the browser session and no bearer token.
+//
+// Origin is set because a browser sets it on every unsafe method, and the cross-site request
+// forgery check refuses a cookie-authenticated write without it. A test helper that omitted
+// it would make every write in this file fail for the wrong reason — and would hide whether
+// the permission underneath was ever checked.
 func (h *harness) withCookie(method, path string, cookie *http.Cookie) *http.Response {
 	h.t.Helper()
 	req, _ := http.NewRequest(method, h.server.URL+path, bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", h.server.URL)
 	if cookie != nil {
 		req.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
 	}
@@ -87,8 +83,8 @@ func TestSigningInSetsAHardenedCookie(t *testing.T) {
 	if cookie.Value == "" {
 		t.Error("the cookie carries no value")
 	}
-	if cookie.Value == testAdminToken {
-		t.Fatal("the cookie carries the administrative token itself, which is the one thing it must never do")
+	if strings.Contains(cookie.Value, testPassword) {
+		t.Fatal("the cookie carries the password, which is the one thing it must never do")
 	}
 }
 
@@ -204,92 +200,12 @@ func (h *harness) fillPath(pattern, membership string) string {
 	return pattern
 }
 
-// A wrong token mints nothing. Otherwise the endpoint is a way to turn a guess into a
-// credential that outlives the guessing.
-func TestSigningInWithTheWrongToken(t *testing.T) {
-	h := newHarness(t)
-
-	resp := h.loginWith("not-the-admin-token")
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("returned %d, want 401", resp.StatusCode)
-	}
-	for _, c := range resp.Cookies() {
-		if c.Name == uiCookieName && c.Value != "" {
-			t.Fatal("a refused sign-in still set a session cookie")
-		}
-	}
-}
-
-// Signing out is what "revocable server-side" means, so the cookie has to stop working
-// even though the browser still holds it.
-func TestSigningOutRevokesTheSession(t *testing.T) {
-	h := newHarness(t)
-	cookie := h.login()
-
-	out := h.withCookie(http.MethodDelete, "/api/v1/ui/session", cookie)
-	_ = out.Body.Close()
-	if out.StatusCode != http.StatusNoContent {
-		t.Fatalf("signing out returned %d, want 204", out.StatusCode)
-	}
-
-	resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("the cookie still reads after signing out, returned %d", resp.StatusCode)
-	}
-}
-
-// A page nobody is watching stops being able to read. A page somebody is watching does not.
-func TestTheSessionExpiresWhenIdleAndIsHeldOpenByUse(t *testing.T) {
-	h := newHarness(t)
-	cookie := h.login()
-
-	// Used well inside the idle window, repeatedly, past the point a fixed lifetime of one
-	// idle window would have ended it. A dashboard polling every few seconds must not log
-	// itself out.
-	for range 4 {
-		h.clk.Advance(uiSessionIdle - time.Minute)
-		resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("a session in use returned %d, want 200", resp.StatusCode)
-		}
-	}
-
-	h.clk.Advance(uiSessionIdle + time.Minute)
-	resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("an idle session still reads, returned %d", resp.StatusCode)
-	}
-}
-
-// Use extends the idle window but never the ceiling, so a page left open on a wall does not
-// hold a credential derived from the deployment's root password indefinitely.
-func TestTheSessionHasACeilingUseDoesNotRaise(t *testing.T) {
-	h := newHarness(t)
-	cookie := h.login()
-
-	// Polled continuously, so the idle window is refreshed every time and only the absolute
-	// deadline can end this.
-	for range int(uiSessionMaxAge/(uiSessionIdle-time.Minute)) + 2 {
-		h.clk.Advance(uiSessionIdle - time.Minute)
-		resp := h.withCookie(http.MethodGet, "/api/v1/networks", cookie)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized {
-			return // the ceiling ended it, which is the point
-		}
-	}
-	t.Errorf("a continuously polled session outlived its %s ceiling", uiSessionMaxAge)
-}
-
 // Signing in over plaintext to something that is not loopback is refused rather than
 // downgraded, so configuring TLS is a requirement for any deployment somebody browses to.
 func TestSigningInIsRefusedOverPlaintextToARemoteHost(t *testing.T) {
 	h := newHarness(t)
 
-	body, _ := json.Marshal(map[string]string{"token": testAdminToken})
+	body, _ := json.Marshal(map[string]string{"email": "alice@example.com", "password": testPassword})
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/ui/session", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	// The connection is still loopback; what the server can see of where the browser
@@ -311,8 +227,8 @@ func TestSigningInIsRefusedOverPlaintextToARemoteHost(t *testing.T) {
 	}
 }
 
-// A forged or stale cookie is not a session. The store is keyed by a hash of what the
-// browser presents, so this also covers the case of somebody who has seen the map.
+// A forged or stale cookie is not a session. What the database holds is a hash of what the
+// browser presents, so this also covers somebody who has read the table.
 func TestAnInventedCookieIsNotASession(t *testing.T) {
 	h := newHarness(t)
 	h.login() // so there is a real session in the store to be confused with
@@ -325,40 +241,53 @@ func TestAnInventedCookieIsNotASession(t *testing.T) {
 	}
 }
 
-// The store's own bounds, exercised directly because the HTTP path cannot reach them
-// without a thousand sign-ins.
-func TestTheSessionStoreSweepsAndRefusesToGrowWithoutBound(t *testing.T) {
-	clk := clock.NewFake()
-	store := newUISessions(clk)
+// The administrative token no longer signs anybody in to the page.
+//
+// It still works on the API, because a locked-out deployment needs a way back (ADR-0024 §5).
+// What it does not do any more is mint a browser session — there is no credential-without-an
+// identity left for one to be. Asserted rather than assumed, because restoring that path
+// would be a two-line change that reintroduces a shared secret to the one surface people
+// actually look at, and nothing else would fail.
+func TestSigningInNoLongerTakesTheAdministrativeToken(t *testing.T) {
+	body, _ := json.Marshal(map[string]string{"token": testAdminToken})
+	h := newHarness(t)
 
-	first, _, err := store.create()
+	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/ui/session", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.valid(first) {
-		t.Fatal("a fresh session is not valid")
-	}
+	defer func() { _ = resp.Body.Close() }()
 
-	// Expired entries go on the next sign-in rather than lingering, so an abandoned page
-	// does not hold a slot against the bound below.
-	clk.Advance(uiSessionMaxAge + time.Hour)
-	if _, _, err := store.create(); err != nil {
-		t.Fatalf("creating a session after everything expired: %v", err)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("signing in with the administrative token = %d, want 400", resp.StatusCode)
 	}
-	if store.valid(first) {
-		t.Error("an expired session is still valid")
-	}
-	if got := len(store.byHash); got != 1 {
-		t.Errorf("the store holds %d sessions, want 1 — the expired one was not swept", got)
-	}
-
-	for range maxUISessions {
-		if _, _, err := store.create(); err != nil {
-			if !errors.Is(err, errTooManySessions) {
-				t.Fatalf("creating a session: %v", err)
-			}
-			return // refused rather than growing, which is the point
+	for _, c := range resp.Cookies() {
+		if c.Name == uiCookieName && c.Value != "" {
+			t.Fatal("the administrative token still mints a browser session")
 		}
 	}
-	t.Errorf("the store grew past %d sessions without refusing", maxUISessions)
+}
+
+// A deployment with no accounts cannot sign in here at all, and that is correct: there is
+// nothing to look at until somebody creates the first account, and creating one is an API
+// call the bootstrap secret still makes.
+func TestADeploymentWithNoAccountsCannotSignIn(t *testing.T) {
+	h := newHarness(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"email": "nobody@example.com", "password": testPassword,
+	})
+	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/ui/session", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("signing in to a deployment with no accounts = %d, want 401", resp.StatusCode)
+	}
 }

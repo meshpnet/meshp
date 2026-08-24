@@ -74,9 +74,6 @@ type Server struct {
 	// with no presence reads as disconnected, which is what it is.
 	presence Presence
 
-	// ui holds the browser sessions minted from the administrative token (ADR-0022 §5).
-	ui *uiSessions
-
 	// bootstrapWarnedAt is when the administrative token was last complained about, so the
 	// complaint is occasional rather than per request. See warnBootstrapTokenUsed.
 	bootstrapWarnedAt atomic.Pointer[time.Time]
@@ -104,7 +101,6 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 		cfg:     cfg,
 		log:     cfg.Log,
 		limit:   newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
-		ui:      newUISessions(cfg.Clock),
 	}
 	// Taken through the interface rather than held as a *Hub, so the thing that replaces
 	// it for multi-replica deployments (ADR-0012) has one place to arrive. A typed nil
@@ -293,6 +289,12 @@ func (s *Server) routes() []route {
 		{pattern: "POST /api/v1/me/password", handler: s.handleChangeOwnPassword, kind: guardSignedIn},
 		{pattern: "GET /api/v1/permissions", handler: s.handleListPermissions, kind: guardSignedIn},
 
+		// What this caller may do, here — which is what the page loads before deciding
+		// which controls exist. Behind no permission of its own: it answers a question
+		// about the caller, and refusing to tell somebody what they may do would leave a
+		// page guessing.
+		{pattern: "GET /api/v1/me/permissions", handler: s.handleListOwnPermissions, kind: guardSignedIn},
+
 		// Credentials for machines (ADR-0024 §2). Your own, which is why they hang off /me
 		// and are behind no permission: minting and pruning your own credentials is like
 		// changing your own password, and needing to be granted the right to do it would
@@ -394,6 +396,17 @@ func (s *Server) gate(rt route) http.Handler {
 		}
 		r = r.WithContext(withCaller(r.Context(), c))
 
+		// A browser session that is about to change something must have been sent by this
+		// site. See sameOrigin: the page can now revoke a device, so the defence is an
+		// argument rather than an inherited assumption.
+		if c.user != nil && !safeMethod(r.Method) && !sameOrigin(r) {
+			s.log.Warn("a cross-origin write was refused",
+				"path", logx.Safe(r.URL.Path), "origin", logx.Safe(r.Header.Get("Origin")))
+			httpx.Error(w, s.log, http.StatusForbidden, "cross_origin",
+				"this request did not come from this site")
+			return
+		}
+
 		switch rt.kind {
 		case guardSignedIn:
 			rt.handler(w, r)
@@ -443,18 +456,23 @@ func (s *Server) gate(rt route) http.Handler {
 			rt.handler(w, r)
 
 		case guardCallerOrganization:
-			// The administrative token belongs to no organisation and holds everything,
-			// so there is nothing to resolve for it.
-			if c.user == nil {
-				held := s.callerPermissions(c)
-				if !held.Allows(rt.perm) {
-					s.refuse(w, r, c, held, rt.perm)
-					return
-				}
+			// The administrative token belongs to no organisation and holds everything, so
+			// there is nothing to resolve for it. A token belongs to its owner's, which is
+			// the one permissionsInOrganization asks about below.
+			if c.bootstrap {
 				rt.handler(w, r)
 				return
 			}
-			held, err := s.permissionsInOrganization(r, c, c.user.OrganizationID)
+			org := callerOrganization(c)
+			if org == nil {
+				// Unreachable: identify returns bootstrap, a person or a token, and the
+				// first is handled above. Answered rather than dereferenced, because the
+				// alternative is a panic that only shows up when it is wrong.
+				httpx.Error(w, s.log, http.StatusForbidden, "forbidden",
+					"this caller belongs to no organisation")
+				return
+			}
+			held, err := s.permissionsInOrganization(r, c, *org)
 			if err != nil {
 				s.respondError(w, r, err)
 				return
@@ -471,14 +489,6 @@ func (s *Server) gate(rt route) http.Handler {
 				"the request could not be completed")
 		}
 	})
-}
-
-// callerPermissions is what a credential that is not a person holds, everywhere.
-func (s *Server) callerPermissions(c caller) authz.Set {
-	if c.bootstrap {
-		return authz.All()
-	}
-	return authz.ReadOnly()
 }
 
 func bearer(r *http.Request) string {

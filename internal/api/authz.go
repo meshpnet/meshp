@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/subtle"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -36,12 +38,6 @@ type caller struct {
 	// bootstrap is the administrative token itself: the deployment's root credential, which
 	// holds every permission including ones that do not exist yet (ADR-0024 §5).
 	bootstrap bool
-
-	// readOnly is a browser session minted from the administrative token (ADR-0022 §5).
-	// Strictly weaker than the secret it came from: it holds every permission that only
-	// reads and nothing else, which is the whole argument for having shipped a page before
-	// there were accounts. Nothing mints these once people sign in with their own accounts.
-	readOnly bool
 }
 
 type callerKey struct{}
@@ -94,11 +90,6 @@ func (s *Server) identify(r *http.Request) (caller, bool) {
 		return caller{token: &token}, true
 	}
 
-	if s.cfg.AdminToken != "" {
-		if cookie, err := r.Cookie(uiCookieName); err == nil && s.ui.valid(cookie.Value) {
-			return caller{readOnly: true}, true
-		}
-	}
 	return caller{}, false
 }
 
@@ -112,8 +103,6 @@ func (s *Server) permissionsInNetwork(r *http.Request, c caller, networkID uuid.
 	switch {
 	case c.bootstrap:
 		return authz.All(), nil
-	case c.readOnly:
-		return authz.ReadOnly(), nil
 	case c.token != nil:
 		return s.store.TokenPermissions(r.Context(), *c.token, &networkID)
 	default:
@@ -130,8 +119,6 @@ func (s *Server) permissionsInOrganization(r *http.Request, c caller, orgID uuid
 	switch {
 	case c.bootstrap:
 		return authz.All(), nil
-	case c.readOnly:
-		return authz.ReadOnly(), nil
 	case c.token != nil:
 		if c.token.OrganizationID != orgID {
 			// A token belongs to one organisation, as its owner does. Asked about another,
@@ -184,4 +171,63 @@ func (s *Server) unauthenticated(w http.ResponseWriter, r *http.Request) {
 		"path", logx.Safe(r.URL.Path), "remote", logx.Safe(clientKey(r)))
 	httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
 		"sign in, or present a valid administrative token")
+}
+
+// callerOrganization is the one organisation this caller belongs to, or nil for the
+// administrative token, which belongs to none.
+func callerOrganization(c caller) *uuid.UUID {
+	switch {
+	case c.user != nil:
+		return &c.user.OrganizationID
+	case c.token != nil:
+		return &c.token.OrganizationID
+	default:
+		return nil
+	}
+}
+
+// safeMethod reports whether a request only reads.
+func safeMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
+// sameOrigin reports whether an unsafe request came from this site.
+//
+// The cross-site request forgery defence, and it is written down rather than assumed because
+// what it is defending changed. While the browser's credential could only read, SameSite=Strict
+// carried the whole burden and that was adequate: the worst a forged request could achieve was
+// to make somebody's browser read something on their behalf. A cookie that can revoke a device
+// deserves an argument.
+//
+// Two things now stand in the way, and they fail independently:
+//
+//   - SameSite=Strict, so a browser does not attach the cookie to a request another site
+//     caused at all. This is the strong one and it is enforced by the browser.
+//   - This check, which is what remains if that is bypassed — by a browser that does not
+//     implement it, or by a bug in one. A cross-origin form POST cannot suppress the Origin
+//     header, and a cross-origin fetch that sets one this endpoint would accept cannot get
+//     past the preflight, because nothing here answers with CORS headers.
+//
+// Hosts are compared and schemes are not. A TLS-terminating proxy in front leaves r.TLS nil
+// while the browser sends an https Origin, and this package deliberately does not consult
+// X-Forwarded-Proto — a header a client can set should not decide whether a write is allowed.
+// Scheme downgrade is the cookie's problem and the cookie is Secure, so it never travels over
+// plaintext to be replayed.
+//
+// Only cookie-authenticated requests are checked. A bearer token is not attached by a browser
+// to anything, so there is nothing to forge; and requiring an Origin from `curl`, which sends
+// none, would break every machine caller to defend against an attack they cannot suffer.
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Absent, on an unsafe method, from a request carrying a cookie. Every browser
+		// sends it for POST, PUT and DELETE, so this is not one — and a request that is
+		// not a browser has no business using the browser's credential.
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host)
 }

@@ -163,8 +163,12 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
 .faults li { color: var(--bad); font-size: 13px; }
 
 /* Sign-in and the network picker. */
-form.signin { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-input[type="password"], select {
+/* A column, since sign-in became two labelled fields and sometimes three. The single
+   token field this used to hold sat happily on one row beside its button; three do not,
+   and a wrapped row puts a label under the input it names. */
+form.signin { display: flex; flex-direction: column; gap: 2px; align-items: stretch; }
+form.signin button.primary { margin-top: 14px; align-self: flex-start; }
+input[type="password"], input[type="email"], input[type="text"], select {
   font: inherit;
   padding: 8px 10px;
   border: 1px solid var(--line);
@@ -202,3 +206,68 @@ button.primary {
 .event .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .event .who { font-weight: 500; }
 .event .why { color: var(--muted); font-size: 13px; }
+
+/* --- doing something ------------------------------------------------------------------ */
+
+/* The actions column stays narrow and never pushes the columns that carry the answer. */
+td.actions,
+th.actions {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+button.danger {
+  background: transparent;
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  border-radius: 4px;
+  padding: 0.2rem 0.6rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--bad);
+  color: var(--bg);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* Shown once and never again, so it is easy to select and hard to miss. */
+code.token {
+  display: block;
+  margin: 0.6rem 0;
+  padding: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: var(--mono);
+  /* Long, and it must stay selectable in one gesture rather than scrolling sideways. */
+  word-break: break-all;
+  user-select: all;
+}
+
+.error.inline {
+  margin-left: 0.5rem;
+  font-size: 0.9em;
+}
+
+form.signin label {
+  margin-top: 10px;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+button.quiet {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}

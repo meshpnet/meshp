@@ -145,22 +145,6 @@ func TestAnOwnerHoldsTheWholeCatalogue(t *testing.T) {
 	}
 }
 
-// The browser session minted from the administrative token reads and does nothing else. That
-// asymmetry is the whole argument ADR-0022 §5 makes for having shipped a page before there
-// were accounts, and it is now a property of this set rather than of a list of two routes.
-func TestTheReadOnlySetOnlyReads(t *testing.T) {
-	ro := ReadOnly()
-	for _, e := range Catalogue {
-		allowed := ro.Allows(e.Name)
-		if IsRead(e.Name) != allowed {
-			t.Errorf("read-only %v %q", map[bool]string{true: "allows", false: "refuses"}[allowed], e.Name)
-		}
-	}
-	if ro.Empty() {
-		t.Error("the read-only set is empty, so a browser session would be allowed nothing")
-	}
-}
-
 // A caller holding everything holds what has not been invented yet. The bootstrap secret is
 // the deployment's root credential and a list would describe it wrongly the moment the
 // catalogue grew.
