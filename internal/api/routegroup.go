@@ -220,22 +220,23 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// A person belongs to one organisation and a machine acts within its owner's, so
+	// neither has to name one. Only the administrative token does, because it belongs to
+	// no organisation at all.
+	mine := callerOrganization(callerFrom(r))
 	orgID, err := uuid.Parse(body.OrganizationID)
-	if body.OrganizationID == "" {
-		// A person belongs to one organisation, so they do not have to name it. The
-		// administrative token belongs to none and does.
-		if user := callerFrom(r).user; user != nil {
-			orgID, err = user.OrganizationID, nil
-		}
+	if body.OrganizationID == "" && mine != nil {
+		orgID, err = *mine, nil
 	}
 	if err != nil {
-		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", "organization_id must be a UUID")
+		httpx.Error(w, s.log, http.StatusBadRequest, "bad_request",
+			"organization_id must be a UUID, or omitted to use your own organisation")
 		return
 	}
 	// The permission that got this request here was held over the caller's own organisation,
 	// so it authorises a network in that one and no other. Without this check the guard would
 	// be asking about one tenant and the handler writing to another.
-	if user := callerFrom(r).user; user != nil && orgID != user.OrganizationID {
+	if mine != nil && orgID != *mine {
 		httpx.Error(w, s.log, http.StatusForbidden, "forbidden",
 			"you may only create networks in your own organisation")
 		return
