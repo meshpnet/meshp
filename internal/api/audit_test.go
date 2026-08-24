@@ -204,16 +204,21 @@ func TestABrowserSessionReachesTheAuditTrail(t *testing.T) {
 	}
 }
 
-// The widening is to reads within one network and no further. Everything that changes
-// something still needs the bearer token, which is the property the whole of §5 rests on.
+// The widening is to reads and no further. Everything that changes something is still
+// refused, which is the property the whole of §5 rests on.
+//
+// Refused with 403 rather than 401 since permissions arrived: the session is a credential
+// this control plane recognises, and saying "who are you" to something it has just
+// identified was always the wrong answer. It holds every permission that reads and none
+// that writes, so this is a refusal about what it may do.
 func TestABrowserSessionStillCannotWrite(t *testing.T) {
 	h := newHarness(t)
 
 	resp := h.withCookie(http.MethodPost,
 		"/api/v1/networks/"+h.netID.String()+"/enrollment-tokens", h.login())
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("a browser session minting an enrolment token = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("a browser session minting an enrolment token = %d, want 403", resp.StatusCode)
 	}
 }
 

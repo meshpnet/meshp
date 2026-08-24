@@ -51,14 +51,14 @@ type ListAllNetworksRow struct {
 // transaction. Everything here is deliberately shaped for a consumer that is not this
 // repository's web page: the commercial layer builds its cross-tenant roll-up on the same
 // endpoint (ADR-0009), so these cannot be reshaped to suit whatever one screen needs.
-// scope: global the only credential that reaches this is the administrative token, which is
-// a single shared secret granting every route already (ADR-0022 §5), so a tenant parameter
-// here would suggest a constraint that does not exist. The day roles arrive, this is the
-// first query that has to grow a caller, and that is a change to this line as much as to
-// the SQL.
+// scope: global the only credential that still reaches this is the administrative token,
+// which is a single shared secret granting every route already (ADR-0024 §5), so a tenant
+// parameter here would suggest a constraint that does not exist. A signed-in person gets
+// ListNetworksForOrganizationWithCounts below instead — which is what this comment used to
+// predict would happen the day roles arrived, and this is that day.
 //
-// Every network this control plane holds, so a view can offer a choice rather than
-// requiring somebody to paste a UUID.
+// Every network this control plane holds, so a deployment operator can answer "what is on
+// this box" without reading the database.
 func (q *Queries) ListAllNetworks(ctx context.Context) ([]ListAllNetworksRow, error) {
 	rows, err := q.db.Query(ctx, listAllNetworks)
 	if err != nil {
@@ -164,6 +164,71 @@ func (q *Queries) ListNetworkOverviewDevices(ctx context.Context, arg ListNetwor
 			&i.LastAckAt,
 			&i.LastError,
 			&i.UnappliedComponents,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNetworksForOrganizationWithCounts = `-- name: ListNetworksForOrganizationWithCounts :many
+SELECT
+    n.id,
+    n.organization_id,
+    o.slug          AS organization_slug,
+    n.slug,
+    n.name,
+    n.state_version,
+    n.created_at,
+    (
+        SELECT count(*)
+        FROM device_network_memberships m
+        WHERE m.network_id = n.id AND m.state = 'active'
+    )               AS active_device_count
+FROM networks n
+JOIN organizations o ON o.id = n.organization_id
+WHERE n.organization_id = $1 AND n.deleted_at IS NULL
+ORDER BY o.slug, n.slug
+`
+
+type ListNetworksForOrganizationWithCountsRow struct {
+	ID                uuid.UUID
+	OrganizationID    uuid.UUID
+	OrganizationSlug  string
+	Slug              string
+	Name              string
+	StateVersion      int64
+	CreatedAt         time.Time
+	ActiveDeviceCount int64
+}
+
+// What a signed-in person can see: their own organisation's networks.
+//
+// The same shape as ListAllNetworks, deliberately — the caller converts one row type to the
+// other, so if these two ever stop matching it is a compile error rather than a page that
+// renders one of them wrongly.
+func (q *Queries) ListNetworksForOrganizationWithCounts(ctx context.Context, organizationID uuid.UUID) ([]ListNetworksForOrganizationWithCountsRow, error) {
+	rows, err := q.db.Query(ctx, listNetworksForOrganizationWithCounts, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNetworksForOrganizationWithCountsRow
+	for rows.Next() {
+		var i ListNetworksForOrganizationWithCountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrganizationID,
+			&i.OrganizationSlug,
+			&i.Slug,
+			&i.Name,
+			&i.StateVersion,
+			&i.CreatedAt,
+			&i.ActiveDeviceCount,
 		); err != nil {
 			return nil, err
 		}

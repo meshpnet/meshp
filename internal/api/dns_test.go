@@ -156,7 +156,7 @@ func TestARecordCanBeRemoved(t *testing.T) {
 	}
 }
 
-// Writing needs the administrative token; reading is browser-readable like the rest of a
+// Writing needs more than a browser session; reading is browser-readable like the rest of a
 // network's state (ADR-0022 §5).
 func TestWritingARecordNeedsMoreThanABrowserSession(t *testing.T) {
 	h := newHarness(t)
@@ -164,8 +164,8 @@ func TestWritingARecordNeedsMoreThanABrowserSession(t *testing.T) {
 
 	write := h.withCookie(http.MethodPost, "/api/v1/networks/"+h.netID.String()+"/dns-records", cookie)
 	defer func() { _ = write.Body.Close() }()
-	if write.StatusCode != http.StatusUnauthorized {
-		t.Errorf("a browser session writing a record = %d, want 401", write.StatusCode)
+	if write.StatusCode != http.StatusForbidden {
+		t.Errorf("a browser session writing a record = %d, want 403", write.StatusCode)
 	}
 
 	read := h.withCookie(http.MethodGet, "/api/v1/networks/"+h.netID.String()+"/dns-records", cookie)

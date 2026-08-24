@@ -12,15 +12,19 @@
 #
 # Removing an entry is how a mechanism graduates. Adding one should be uncomfortable.
 
-# --- waiting for the authentication work ---------------------------------------------------
+# --- waiting for a decision that has not been made ------------------------------------------
 #
-# Users and sessions exist as of ADR-0024's first slice; what is left here is authorisation.
-# Every authenticated caller is currently equivalent, so there is nothing yet that reads a
-# role or a binding — and nothing should pretend to. These graduate with the permission
-# slice, which is the one that gives them a reader.
-table:roles            — as above
-table:role_bindings    — as above
-table:groups           — as above
+# Users, sessions, roles and role bindings all have readers as of ADR-0024's slices. What is
+# left here is a different thing wearing the same badge: `groups` and `group_members`
+# describe an ACL model where policy references people rather than tags — a device belongs to
+# a person (devices.user_id, also unwritten), people belong to groups, and a rule names a
+# group.
+#
+# That is a real design and ADR-0024 deliberately does not settle it: what that record does is
+# make the identity such a model would reference exist. Until there is a decision about
+# whether ACLs name people, nothing should reach these, because a reader written now would be
+# guessing at the shape.
+table:groups           — an ACL model that names people, not yet decided; see ADR-0024's consequences
 table:group_members    — as above
 
 # --- deferred with a stated trigger --------------------------------------------------------

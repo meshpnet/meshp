@@ -126,7 +126,7 @@ func (s *Server) refuseSignIn(w http.ResponseWriter, r *http.Request, email stri
 // The current password is required even though the caller is already signed in: a session
 // left open on an unlocked laptop should not be enough to take an account over.
 func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request) {
-	user := s.sessionUser(r)
+	user := callerFrom(r).user
 	if user == nil {
 		httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
 			"this needs a browser session; sign in first")
@@ -177,7 +177,7 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 // The endpoint a page calls on load to decide whether to show a sign-in form. Answers 200
 // with the user or 401 with nothing, so there is no shape for "signed in as nobody".
 func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
-	user := s.sessionUser(r)
+	user := callerFrom(r).user
 	if user == nil {
 		httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized", "not signed in")
 		return
@@ -207,16 +207,21 @@ func requestAddr(r *http.Request) *netip.Addr {
 
 // actor is who this request is, for the audit trail.
 //
-// A signed-in person where there is one; the bootstrap secret otherwise. There is no third
-// answer: a request that reached an audited handler got past adminOnly, which accepts
-// exactly those two things.
+// Taken from what the guard already worked out rather than looked up again: every audited
+// handler sits behind a guard that identified the caller, and asking the database a second
+// time would put a session read in front of every write to save carrying one value.
+//
+// A signed-in person where there is one; the bootstrap secret otherwise. The browser session
+// derived from that secret holds only read permissions, so it never reaches an audited
+// handler — and if it ever did it would be recorded as what it is, which is the shared
+// credential rather than a person.
 //
 // The label for a person is their email rather than their display name, because an audit
 // line is read months later by somebody trying to reach whoever did it, and a display name
 // is not a way to reach anyone.
 func (s *Server) actor(r *http.Request) store.Actor {
-	if user := s.sessionUser(r); user != nil {
-		return store.UserActor(*user)
+	if c := callerFrom(r); c.user != nil {
+		return store.UserActor(*c.user)
 	}
 	return store.BootstrapActor()
 }

@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/meshpnet/meshp/internal/authz"
 	"github.com/meshpnet/meshp/internal/clock"
 )
 
@@ -107,41 +111,97 @@ func TestTheCookieReadsTheOverview(t *testing.T) {
 	}
 }
 
-// And the whole point of the point: it does nothing else.
+// And the whole point of the point: it changes nothing.
 //
-// This is the test that makes shipping a UI against a single shared secret defensible, so
-// it walks every route that changes something rather than sampling one. A stolen browser
-// session must read a network and be unable to mint a token, publish a policy, revoke a
-// device or touch a route group.
-func TestTheCookieCannotReachAnythingThatWrites(t *testing.T) {
+// This is the test that makes shipping a UI against a single shared secret defensible, so it
+// walks every route rather than sampling one — and it walks them out of the route table
+// rather than out of a list somebody maintains here, so a write endpoint added next month is
+// covered on the day it is added rather than on the day somebody remembers this test.
+//
+// What it asserts changed shape when permissions arrived. It used to be "every one of these
+// paths answers 401"; it is now "no route requiring a permission that is not a read can be
+// reached", which is the property that was always meant and is now something the code can
+// express.
+func TestTheCookieCannotReachAnythingThatChangesSomething(t *testing.T) {
 	h := newHarness(t)
 	membership := h.enrol("a-device").MembershipID.String()
 	cookie := h.login()
 
-	writes := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, h.netPath("/enrollment-tokens")},
-		{http.MethodGet, h.netPath("/enrollment-tokens")},
-		{http.MethodGet, h.netPath("/devices")},
-		{http.MethodDelete, h.netPath("/devices/" + membership)},
-		{http.MethodGet, h.netPath("/acl")},
-		{http.MethodPut, h.netPath("/acl")},
-		{http.MethodPost, "/api/v1/networks"},
-		{http.MethodGet, h.netPath("/route-groups")},
-		{http.MethodPost, h.netPath("/route-groups")},
-		{http.MethodDelete, h.netPath("/route-groups/anything")},
-		{http.MethodPost, h.netPath("/route-groups/anything/advertisers")},
-	}
-	for _, route := range writes {
-		resp := h.withCookie(route.method, route.path, cookie)
+	checked := 0
+	for _, rt := range h.srv.routes() {
+		if rt.perm == "" || authz.IsRead(rt.perm) {
+			continue
+		}
+		method, pattern, ok := strings.Cut(rt.pattern, " ")
+		if !ok {
+			t.Fatalf("route %q has no method", rt.pattern)
+		}
+		checked++
+
+		resp := h.withCookie(method, h.fillPath(pattern, membership), cookie)
 		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s %s with only a browser session returned %d, want 401 — the cookie is "+
-				"not weaker than the token it came from", route.method, route.path, resp.StatusCode)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s with only a browser session returned %d, want 403 — the cookie is "+
+				"not weaker than the token it came from", method, pattern, resp.StatusCode)
 		}
 	}
+	if checked == 0 {
+		t.Fatal("no route required a permission that writes, so this asserted nothing")
+	}
+}
+
+// The other half, said out loud because it is a widening and widenings should not be
+// discovered by reading a diff.
+//
+// The browser credential used to reach two endpoints. It now reaches every route whose
+// permission is a read, which is a larger set — the device list, the policy, the route
+// groups, the enrolment token metadata. That is deliberate: the rule "this session reads and
+// does not write" is one somebody can hold in their head, while "this session reaches these
+// two URLs" is a list, and a list is what ADR-0022 §5 had to amend twice. Everything here is
+// derived from a secret that could already do all of it and more.
+func TestTheCookieReachesEveryRouteThatOnlyReads(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login()
+
+	checked := 0
+	for _, rt := range h.srv.routes() {
+		if rt.perm == "" || !authz.IsRead(rt.perm) {
+			continue
+		}
+		method, pattern, _ := strings.Cut(rt.pattern, " ")
+		checked++
+
+		resp := h.withCookie(method, h.fillPath(pattern, uuid.NewString()), cookie)
+		_ = resp.Body.Close()
+		// Not "200": some of these answer 404 for a network with nothing in it, which is
+		// the handler having been reached. What matters is that the guard let it past.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			t.Errorf("%s %s with a browser session returned %d; a read should be reachable",
+				method, pattern, resp.StatusCode)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no route required a permission that reads, so this asserted nothing")
+	}
+}
+
+// fillPath turns a route pattern into a URL. The values only have to parse: every assertion
+// here is about the guard, which runs before any handler looks at them.
+func (h *harness) fillPath(pattern, membership string) string {
+	org := orgOf(h.t, h)
+	for placeholder, value := range map[string]string{
+		"{networkID}":      h.netID.String(),
+		"{organizationID}": org.String(),
+		"{membershipID}":   membership,
+		"{userID}":         uuid.NewString(),
+		"{tokenID}":        uuid.NewString(),
+		"{recordID}":       uuid.NewString(),
+		"{bindingID}":      uuid.NewString(),
+		"{slug}":           "anything",
+	} {
+		pattern = strings.ReplaceAll(pattern, placeholder, value)
+	}
+	return pattern
 }
 
 // A wrong token mints nothing. Otherwise the endpoint is a way to turn a guess into a

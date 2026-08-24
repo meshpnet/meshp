@@ -407,6 +407,20 @@ func open(ctx context.Context, log *slog.Logger, cfg runConfig) (*store.Store, e
 		st.Close()
 		return nil, fmt.Errorf("database is not usable: %s", h.Error)
 	}
+
+	// The built-in roles are a projection of the permission catalogue in internal/authz, so
+	// they are brought up to date on every boot rather than seeded once by a migration. A
+	// route added in this release becomes reachable by an owner here; without this it would
+	// need a migration, and the permission list would have two homes that drift.
+	//
+	// After the readiness check on purpose: on a schema older than the one that created the
+	// rows, this would fail with something about a missing constraint, and "your database is
+	// out of date" is the more useful of the two messages.
+	if err := st.EnsureBuiltinRoles(ctx); err != nil {
+		st.Close()
+		return nil, err
+	}
+
 	log.Info("control plane ready")
 	return st, nil
 }

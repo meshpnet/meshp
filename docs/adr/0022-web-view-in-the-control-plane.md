@@ -114,6 +114,15 @@ that a tunnel silently failing open is worse than one that refuses traffic (ADR-
 > necessary — it exists only because a credential derived from a shared secret has nothing
 > to attach permissions to. This section describes what ships today and should be rewritten
 > rather than amended again when users land.
+>
+> **What the derived session now holds.** ADR-0024's permission slice replaced the list of
+> endpoints below with a rule: the cookie minted from the administrative token holds every
+> permission whose action is a read, and none that writes. That is wider than the two
+> endpoints this section enumerated — it now reaches the device list, the policy, DNS
+> records, the route groups and the enrolment token metadata. The widening is deliberate and
+> it is the point of recording it here: a rule somebody can hold in their head is worth more
+> than a list, and this section had to be amended twice because it was a list. Nothing it
+> reaches was out of reach of the secret it is derived from.
 
 `POST /api/v1/ui/session` takes the administrative token once and returns a session
 cookie: `HttpOnly`, `Secure`, `SameSite=Strict`, short-lived, revocable server-side.

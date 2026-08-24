@@ -29,6 +29,7 @@ const testAdminToken = "an-administrative-token-long-enough"
 
 type harness struct {
 	t      *testing.T
+	srv    *Server
 	server *httptest.Server
 	store  *store.Store
 	clk    *clock.Fake
@@ -76,6 +77,13 @@ func newHarnessWithLog(t *testing.T, log *slog.Logger) *harness {
 	if _, err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// What the control plane does on every boot. The built-in roles are a projection of the
+	// permission catalogue, and migration 0011 creates their rows with no permissions at
+	// all — so a harness that skipped this would build a server on which every signed-in
+	// person holds an owner role that grants nothing.
+	if err := st.EnsureBuiltinRoles(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	var orgID, netID uuid.UUID
 	if err := st.Pool().QueryRow(ctx,
@@ -119,7 +127,7 @@ func newHarnessWithLog(t *testing.T, log *slog.Logger) *harness {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	return &harness{t: t, server: ts, store: st, clk: clk, netID: netID, ctx: ctx}
+	return &harness{t: t, srv: srv, server: ts, store: st, clk: clk, netID: netID, ctx: ctx}
 }
 
 // mintToken uses the administrative endpoint, the way an operator would.
@@ -253,9 +261,14 @@ func TestAdminEndpointsRequireTheToken(t *testing.T) {
 	}
 }
 
-// With no secret configured the administrative API must be off, not open. A control
-// plane that mints enrolment tokens for anyone who asks is worse than one whose
-// admin API is unavailable.
+// With no secret configured and nobody signed in, the administrative API must be closed, not
+// open. A control plane that mints enrolment tokens for anyone who asks is worse than one
+// whose admin API is unreachable.
+//
+// 401 rather than the 503 this used to answer. "The administrative API is switched off"
+// stopped being true when accounts arrived: a deployment with no MESHP_ADMIN_TOKEN and
+// people who can sign in has a working administrative API, and this request simply carries
+// no credential.
 func TestAdminEndpointsAreClosedWhenUnconfigured(t *testing.T) {
 	h := newHarness(t)
 	challenger, _ := enroll.NewChallenger([]byte("api-test-master-secret-value"), 0, h.clk)
@@ -273,8 +286,8 @@ func TestAdminEndpointsAreClosedWhenUnconfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
 
