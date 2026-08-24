@@ -126,7 +126,15 @@ func (s *Server) refuseSignIn(w http.ResponseWriter, r *http.Request, email stri
 // The current password is required even though the caller is already signed in: a session
 // left open on an unlocked laptop should not be enough to take an account over.
 func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request) {
-	user := callerFrom(r).user
+	c := callerFrom(r)
+	if c.token != nil {
+		// A machine holding somebody's credential must not be able to take their account
+		// over with it. The token is theirs to act *within*, not theirs to change.
+		httpx.Error(w, s.log, http.StatusForbidden, "person_required",
+			"an API token cannot change its owner's password")
+		return
+	}
+	user := c.user
 	if user == nil {
 		httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized",
 			"this needs a browser session; sign in first")
@@ -177,12 +185,39 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 // The endpoint a page calls on load to decide whether to show a sign-in form. Answers 200
 // with the user or 401 with nothing, so there is no shape for "signed in as nobody".
 func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
-	user := callerFrom(r).user
+	c := callerFrom(r)
+
+	// A machine gets an answer too, and it is a different answer. "What am I, and what was
+	// I minted to do" is the first thing a machine asks, and telling it only who its owner
+	// is would hide the part that decides whether its next request will work.
+	if c.token != nil {
+		out := map[string]any{
+			"kind":            "api_token",
+			"token_id":        c.token.ID,
+			"name":            c.token.Name,
+			"owner":           c.token.OwnerEmail,
+			"organization_id": c.token.OrganizationID,
+			"permissions":     c.token.Scope,
+			"expires_at":      c.token.ExpiresAt.UTC(),
+			// Said plainly, because the scope is a ceiling rather than a grant and a
+			// machine reading its own permissions would otherwise assume it holds them.
+			"note": "these are the permissions this token may use; what it can actually do " +
+				"is these intersected with what its owner holds now",
+		}
+		if c.token.Network != nil {
+			out["network_id"] = *c.token.Network
+		}
+		httpx.WriteJSON(w, s.log, http.StatusOK, out)
+		return
+	}
+
+	user := c.user
 	if user == nil {
 		httpx.Error(w, s.log, http.StatusUnauthorized, "unauthorized", "not signed in")
 		return
 	}
 	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]any{
+		"kind":            "user",
 		"user_id":         user.ID,
 		"email":           user.Email,
 		"name":            user.Name,
@@ -211,7 +246,8 @@ func requestAddr(r *http.Request) *netip.Addr {
 // handler sits behind a guard that identified the caller, and asking the database a second
 // time would put a session read in front of every write to save carrying one value.
 //
-// A signed-in person where there is one; the bootstrap secret otherwise. The browser session
+// A signed-in person where there is one, the API token where a machine is acting through
+// somebody's credential, and the bootstrap secret otherwise. The browser session
 // derived from that secret holds only read permissions, so it never reaches an audited
 // handler — and if it ever did it would be recorded as what it is, which is the shared
 // credential rather than a person.
@@ -220,10 +256,15 @@ func requestAddr(r *http.Request) *netip.Addr {
 // line is read months later by somebody trying to reach whoever did it, and a display name
 // is not a way to reach anyone.
 func (s *Server) actor(r *http.Request) store.Actor {
-	if c := callerFrom(r); c.user != nil {
+	c := callerFrom(r)
+	switch {
+	case c.user != nil:
 		return store.UserActor(*c.user)
+	case c.token != nil:
+		return store.TokenActor(c.token.ID, c.token.Name, c.token.OwnerEmail)
+	default:
+		return store.BootstrapActor()
 	}
-	return store.BootstrapActor()
 }
 
 // warnBootstrapTokenUsed says, at most occasionally, that the administrative token was used

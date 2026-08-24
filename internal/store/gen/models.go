@@ -58,6 +58,20 @@ type AdvertiserHealth struct {
 	CooldownUntil      *time.Time
 }
 
+type ApiToken struct {
+	ID             uuid.UUID
+	TokenHash      []byte
+	UserID         uuid.UUID
+	OrganizationID uuid.UUID
+	Name           string
+	Permissions    []string
+	NetworkID      *uuid.UUID
+	LastUsedAt     *time.Time
+	ExpiresAt      time.Time
+	CreatedAt      time.Time
+	RevokedAt      *time.Time
+}
+
 type AuditEvent struct {
 	ID             int64
 	OrganizationID *uuid.UUID

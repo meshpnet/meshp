@@ -50,6 +50,18 @@ func DeviceActor(deviceID uuid.UUID, name string) Actor {
 	return Actor{Kind: "device", ID: &id, Label: name}
 }
 
+// TokenActor is a machine acting through somebody's API token.
+//
+// The id is the token's rather than the owner's, and the label names both. That is a
+// deliberate trade against the one actor_id column the schema has: when a credential leaks,
+// the urgent question is "what did *this token* do", and an id that answers it is worth more
+// than one that answers "what did Alice do" — which the label still answers, and which the
+// role bindings and sessions already record under her own id.
+func TokenActor(tokenID uuid.UUID, name, ownerEmail string) Actor {
+	id := tokenID
+	return Actor{Kind: "api_token", ID: &id, Label: name + " (" + ownerEmail + ")"}
+}
+
 // BootstrapActor is the administrative token.
 //
 // Named rather than left blank, which is what it was: every administrative action in this

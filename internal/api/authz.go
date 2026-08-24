@@ -10,6 +10,7 @@ import (
 	"github.com/meshpnet/meshp/internal/authz"
 	"github.com/meshpnet/meshp/internal/httpx"
 	"github.com/meshpnet/meshp/internal/logx"
+	"github.com/meshpnet/meshp/internal/secret"
 	"github.com/meshpnet/meshp/internal/store"
 )
 
@@ -20,8 +21,17 @@ import (
 // organisation-wide permission is not granted by a binding narrowed to a network — so the
 // permission set is resolved against the scope the route names rather than carried around.
 type caller struct {
-	// user is the signed-in person, or nil for the two credentials that are not people.
+	// user is the signed-in person, or nil for the credentials that are not people.
+	//
+	// A token caller leaves this nil even though it has an owner. Nothing that requires a
+	// person should accept a machine holding that person's credential: minting a token,
+	// changing a password. Setting this to the owner would make both work, silently.
 	user *store.User
+
+	// token is a machine acting through somebody's API token (ADR-0024 §2). What it may do
+	// is its owner's current permissions intersected with the scope it was minted with,
+	// resolved at every request.
+	token *store.APIToken
 
 	// bootstrap is the administrative token itself: the deployment's root credential, which
 	// holds every permission including ones that do not exist yet (ADR-0024 §5).
@@ -60,11 +70,31 @@ func (s *Server) identify(r *http.Request) (caller, bool) {
 	if user := s.sessionUser(r); user != nil {
 		return caller{user: user}, true
 	}
-	if s.cfg.AdminToken != "" {
-		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) == 1 {
-			s.warnBootstrapTokenUsed(r)
-			return caller{bootstrap: true}, true
+
+	presented := bearer(r)
+	if s.cfg.AdminToken != "" &&
+		subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.AdminToken)) == 1 {
+		s.warnBootstrapTokenUsed(r)
+		return caller{bootstrap: true}, true
+	}
+
+	// An API token is recognised by its prefix before any lookup, so a header carrying
+	// something else costs nothing. Checked after the administrative token rather than
+	// before, because that comparison is constant time and cheap and this one is a query.
+	if secret.LooksLike(store.APITokenPrefix, presented) {
+		token, err := s.store.FindToken(r.Context(), presented)
+		if err != nil {
+			// Expired, revoked, unknown, or owned by a suspended account: all the same
+			// answer. A machine holding a dead credential learns that it is dead, and
+			// every one of those needs the same thing done about it.
+			s.log.Warn("an API token was refused",
+				"path", logx.Safe(r.URL.Path), "remote", logx.Safe(clientKey(r)))
+			return caller{}, false
 		}
+		return caller{token: &token}, true
+	}
+
+	if s.cfg.AdminToken != "" {
 		if cookie, err := r.Cookie(uiCookieName); err == nil && s.ui.valid(cookie.Value) {
 			return caller{readOnly: true}, true
 		}
@@ -84,6 +114,8 @@ func (s *Server) permissionsInNetwork(r *http.Request, c caller, networkID uuid.
 		return authz.All(), nil
 	case c.readOnly:
 		return authz.ReadOnly(), nil
+	case c.token != nil:
+		return s.store.TokenPermissions(r.Context(), *c.token, &networkID)
 	default:
 		return s.store.PermissionsInNetwork(r.Context(), networkID, c.user.ID)
 	}
@@ -100,6 +132,14 @@ func (s *Server) permissionsInOrganization(r *http.Request, c caller, orgID uuid
 		return authz.All(), nil
 	case c.readOnly:
 		return authz.ReadOnly(), nil
+	case c.token != nil:
+		if c.token.OrganizationID != orgID {
+			// A token belongs to one organisation, as its owner does. Asked about another,
+			// it holds nothing — rather than falling through to a lookup that would answer
+			// the same way but for a reason somebody would have to work out.
+			return authz.NewSet(nil), nil
+		}
+		return s.store.TokenPermissions(r.Context(), *c.token, nil)
 	default:
 		return s.store.PermissionsInOrganization(r.Context(), orgID, c.user.ID)
 	}
@@ -112,8 +152,11 @@ func (s *Server) permissionsInOrganization(r *http.Request, c caller, orgID uuid
 // whoever administers their organisation.
 func (s *Server) refuse(w http.ResponseWriter, r *http.Request, c caller, held authz.Set, want authz.Permission) {
 	who := "this session"
-	if c.user != nil {
+	switch {
+	case c.user != nil:
 		who = c.user.Email
+	case c.token != nil:
+		who = "token " + c.token.Name + " (" + c.token.OwnerEmail + ")"
 	}
 	s.log.Info("request refused",
 		"path", logx.Safe(r.URL.Path), "code", "forbidden",
