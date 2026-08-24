@@ -17,8 +17,42 @@ const view = document.getElementById("view");
 const freshnessEl = document.getElementById("freshness");
 const signoutEl = document.getElementById("signout");
 
+/**
+ * What this person may do in the network being shown.
+ *
+ * Fetched once per network rather than per poll — a role changes rarely and the answer is
+ * about the caller, not about the network — and used only to decide which controls exist.
+ * It is never the enforcement: the API refuses regardless, and a page that believed itself
+ * would be a page one edit away from being the security boundary.
+ *
+ * Empty until it has been read, so a control is absent while the answer is unknown rather
+ * than flickering into existence. Absent-then-present is a page loading; present-then-gone
+ * is a page that lied.
+ */
+let permissions = new Set();
+let unlimited = false;
+
+/** Whether this person may do something here. */
+function may(permission) {
+  return unlimited || permissions.has(permission);
+}
+
+/**
+ * A token this page has just minted, held here rather than in the DOM.
+ *
+ * The view is replaced wholesale by every poll, and the control plane stores only a hash, so
+ * a secret drawn straight into the page would be unrecoverable within a few seconds of
+ * existing — and somebody would click again, minting another credential nobody can use.
+ */
+let mintedToken = null;
+/** Which network that token was minted for, so moving away clears it. */
+let shownFor = null;
+
 /** Last successful overview, kept so a failed poll can keep showing it — marked stale. */
 let lastGood = null;
+/** What was rendered beside it, so the page can redraw itself without polling again. */
+let lastNetworks = [];
+let lastHistory = null;
 /** When that arrived, by this browser's clock. `as_of` is the server's. */
 let lastGoodAt = null;
 let pollTimer = null;
@@ -88,8 +122,16 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+/**
+ * Replaces the view.
+ *
+ * Nullish children are dropped, the same way el() drops them — and for a reason that only
+ * appeared once the page had controls that are absent for some people. `replaceChildren`
+ * stringifies what it is given, so a panel that renders as null for somebody without the
+ * permission for it put the word "null" on their screen.
+ */
 function show(...nodes) {
-  view.replaceChildren(...nodes);
+  view.replaceChildren(...nodes.filter((node) => node !== null && node !== undefined && node !== false));
 }
 
 // --- what counts as broken ------------------------------------------------------------
@@ -261,6 +303,10 @@ function renderDevices(devices) {
             )
           : el("span", { class: "note" }, "—"),
       ),
+      // Empty for somebody who may not act, rather than absent: a column that appears and
+      // disappears between people makes two screenshots of the same page look like two
+      // different products.
+      el("td", { class: "actions" }, revokeButton(device)),
     );
   });
 
@@ -280,11 +326,160 @@ function renderDevices(devices) {
         el("th", {}, "Tunnel"),
         el("th", {}, "Applied version"),
         el("th", {}, "Reported faults"),
+        el("th", { class: "actions" }, ""),
       ),
     ),
     el("tbody", {}, rows),
   );
   return el("div", { class: "scroll" }, table);
+}
+
+// --- doing something ---------------------------------------------------------------------
+//
+// Two write paths, and deliberately only two (ADR-0022 §5, as rewritten by ADR-0024). They
+// are the two halves of a device's life — getting one on, and getting one off — which is
+// what this page is already about and what an operator otherwise reaches for `curl` to do.
+// Publishing a policy and editing DNS are not here: they are text somebody composes, not a
+// button, and a form that got them subtly wrong would be worse than the curl it replaced.
+
+/**
+ * Runs a write.
+ *
+ * `refresh` is opt-in, and the two callers below want opposite things. Revoking a device
+ * must refresh: a page that changed something and kept showing the old state makes somebody
+ * click twice, and on a revoke the second click is the one that does damage. Minting a token
+ * must not: the poll re-renders this whole view every few seconds, so anything drawn here
+ * and not held in state is gone within one tick — which for a secret shown exactly once
+ * means a person clicking again and leaking another credential nobody can use.
+ */
+async function act(node, run, { refresh = false } = {}) {
+  const previous = node.textContent;
+  node.disabled = true;
+  node.textContent = "…";
+  try {
+    await run();
+    if (refresh) restart();
+    else {
+      node.disabled = false;
+      node.textContent = previous;
+    }
+  } catch (err) {
+    node.disabled = false;
+    node.textContent = previous;
+    // Shown against the control that failed rather than at the top of the page, because
+    // by the time somebody has scrolled to a device the top is not where they are looking.
+    const message = el("span", { class: "error inline" }, ` ${reason(err)}`);
+    node.after(message);
+    setTimeout(() => message.remove(), 8000);
+  }
+}
+
+/** The button that throws a device off the network. */
+function revokeButton(device) {
+  if (!may("network.devices.revoke") || device.state !== "active") return null;
+
+  const button = el("button", { class: "danger", type: "button" }, "Revoke");
+  button.addEventListener("click", () => {
+    // Confirmed, because this is not undoable: the device has to enrol again with a fresh
+    // token, and its addresses go back to the pool. A one-click version of that beside a
+    // device somebody is already worried about is a trap.
+    if (!window.confirm(`Revoke ${device.device_name}? It will lose access immediately and must enrol again.`)) {
+      return;
+    }
+    act(
+      button,
+      () =>
+        api(
+          `/api/v1/networks/${encodeURIComponent(currentNetworkID())}` +
+            `/devices/${encodeURIComponent(device.membership_id)}`,
+          { method: "DELETE" },
+        ),
+      { refresh: true },
+    );
+  });
+  return button;
+}
+
+/** The panel that mints an enrolment token, and shows it exactly once. */
+function renderAddDevice() {
+  if (!may("network.enrollment_tokens.write")) return null;
+
+  const button = el("button", { class: "primary", type: "button" }, "Create an enrolment token");
+  button.addEventListener("click", () => {
+    mintedToken = null;
+    act(button, async () => {
+      const body = await api(
+        `/api/v1/networks/${encodeURIComponent(currentNetworkID())}/enrollment-tokens`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          // One device, one hour. Deliberately the narrowest thing that is useful: a
+          // token minted from a page somebody left open should not outlive the afternoon,
+          // and anybody who needs a wider one is already using the API.
+          body: JSON.stringify({ max_uses: 1, expires_in_seconds: 3600 }),
+        },
+      );
+      // Into module state, not into the DOM. This view is replaced wholesale by the next
+      // poll, and the control plane stores only a hash — so a token drawn straight into
+      // the page would be unrecoverable within a few seconds of existing.
+      mintedToken = body.token;
+      // Polling stops while it is on screen. Every poll replaces this view wholesale, which
+      // would wipe a half-made text selection — and the whole point of showing a secret once
+      // is that somebody selects it and copies it. A dashboard that refreshes out from under
+      // the one thing it asked you to copy is worse than one that pauses and says so.
+      stopPolling();
+      renderFromLastGood();
+    });
+  });
+
+  return el(
+    "div",
+    { class: "panel" },
+    el("h3", {}, "Add a device"),
+    button,
+    mintedToken ? renderMintedToken() : null,
+  );
+}
+
+/** The one showing of a token, kept across re-renders until it is dismissed. */
+function renderMintedToken() {
+  const done = el("button", { class: "quiet", type: "button" }, "Done");
+  done.addEventListener("click", () => {
+    mintedToken = null;
+    // Which also starts the page updating again.
+    restart();
+  });
+
+  return el(
+    "div",
+    {},
+    el(
+      "p",
+      { class: "note" },
+      "Copy this now — it is not shown again, and it is good for one device for an hour.",
+    ),
+    el("code", { class: "token" }, mintedToken),
+    el(
+      "p",
+      { class: "note" },
+      "On the device: ",
+      el("span", { class: "mono" }, `meshp up --token ${mintedToken}`),
+    ),
+    // Said rather than left to be noticed. The page's own rule is that it never lies about
+    // its freshness, and it is deliberately not updating right now.
+    el("p", { class: "note" }, "This page has paused while the token is shown."),
+    done,
+  );
+}
+
+/**
+ * Redraws from the last good poll, without waiting for the next one.
+ *
+ * For state that is this page's own rather than the control plane's — whether a minted token
+ * is on screen — where asking the server again would answer a question it was never asked.
+ */
+function renderFromLastGood() {
+  if (lastGood) renderOverview(lastGood, lastNetworks, lastHistory);
 }
 
 function renderOverview(data, networks, history) {
@@ -305,6 +500,7 @@ function renderOverview(data, networks, history) {
       ? el("div", {}, data.route_groups.map(renderGroup))
       : el("div", { class: "panel note" }, "This network has no route groups."),
     el("h2", {}, "Devices"),
+    renderAddDevice(),
     el(
       "div",
       { class: "panel" },
@@ -329,6 +525,10 @@ const ACTIONS = {
   "device.revoked": "was removed from the network",
   "policy.published": "published a policy",
   "route.switched": "moved to another candidate",
+  "role.granted": "was given a role",
+  "role.revoked": "had a role taken away",
+  "api_token.minted": "created an API token",
+  "api_token.revoked": "revoked an API token",
 };
 
 /** The audit trail, newest first. */
@@ -420,34 +620,77 @@ function renderFreshness(problem) {
 
 // --- sign in --------------------------------------------------------------------------
 
-function renderSignIn(message) {
-  const input = el("input", {
+function renderSignIn(message, options = {}) {
+  const email = el("input", {
+    type: "email",
+    id: "email",
+    name: "email",
+    autocomplete: "username",
+    placeholder: "you@example.com",
+    required: "required",
+  });
+  const password = el("input", {
     type: "password",
-    id: "token",
+    id: "password",
+    name: "password",
     autocomplete: "current-password",
-    placeholder: "administrative token",
+    placeholder: "password",
+    required: "required",
+  });
+  // Asked for only after the server says the address is ambiguous. Almost every deployment
+  // has one organisation, so asking everybody up front would be a field almost nobody needs
+  // and everybody has to read.
+  const organization = el("input", {
+    type: "text",
+    id: "organization",
+    name: "organization",
+    autocomplete: "organization",
+    placeholder: "organisation",
   });
   const error = el("p", { class: "error" }, message || "");
+
+  const fields = [
+    el("label", { for: "email" }, "Email"),
+    email,
+    el("label", { for: "password" }, "Password"),
+    password,
+  ];
+  if (options.needsOrganization) {
+    fields.push(el("label", { for: "organization" }, "Organisation"), organization);
+  }
 
   const form = el(
     "form",
     { class: "signin" },
-    input,
+    ...fields,
     el("button", { class: "primary", type: "submit" }, "Sign in"),
   );
   form.addEventListener("submit", async (event) => {
+    // Always, and first. The CSP sets form-action 'none' so a native submit cannot leave
+    // this origin at all, but a native submit would also put the password in a URL if the
+    // form ever gained a GET method by accident.
     event.preventDefault();
     error.textContent = "";
     try {
       await api("/api/v1/ui/session", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: input.value }),
+        body: JSON.stringify({
+          email: email.value,
+          password: password.value,
+          organization: organization.value || undefined,
+        }),
       });
-      input.value = "";
+      password.value = "";
       start();
     } catch (err) {
+      if (err.code === "ambiguous_sign_in") {
+        renderSignIn(err.message, { needsOrganization: true });
+        return;
+      }
       error.textContent = err.message;
+      password.value = "";
+      password.focus();
     }
   });
 
@@ -459,15 +702,15 @@ function renderSignIn(message) {
       el(
         "p",
         { class: "note" },
-        "The administrative token is exchanged once for a session that may read and may " +
-          "not write. It is not stored in this page.",
+        "Sign in with your own account. What you can see and change here is what your " +
+          "role allows.",
       ),
       form,
       error,
     ),
   );
   signoutEl.hidden = true;
-  input.focus();
+  email.focus();
 }
 
 // --- the loop -------------------------------------------------------------------------
@@ -505,12 +748,33 @@ async function fetchHistory(networkID) {
   }
 }
 
+/**
+ * Reads what this person may do here.
+ *
+ * Failing is not fatal and leaves the set empty, which renders a page with no controls
+ * rather than no page. Somebody who can see that a device is unreachable and cannot click
+ * anything is worse off than before this slice; somebody staring at an error where the
+ * network used to be is worse off than that.
+ */
+async function fetchPermissions(networkID) {
+  try {
+    const body = await api(`/api/v1/me/permissions?network=${encodeURIComponent(networkID)}`);
+    permissions = new Set(body.permissions || []);
+    unlimited = Boolean(body.unlimited);
+  } catch {
+    permissions = new Set();
+    unlimited = false;
+  }
+}
+
 async function poll(networkID, networks) {
   try {
     const data = await api(`/api/v1/networks/${encodeURIComponent(networkID)}/overview`);
     lastGood = data;
     lastGoodAt = Date.now();
-    renderOverview(data, networks, await fetchHistory(networkID));
+    lastNetworks = networks;
+    lastHistory = await fetchHistory(networkID);
+    renderOverview(data, networks, lastHistory);
     renderFreshness(null);
     // The server decides how often it is asked, so a deployment under load can slow its
     // pages down without shipping a new one.
@@ -616,7 +880,28 @@ async function start() {
     renderPicker(networks);
     return;
   }
+  // Before the first render, so a control is never absent-then-present on a page somebody
+  // is already reading — and never present-then-absent, which would be worse.
+  await fetchPermissions(networkID);
+  if (networkID !== shownFor) {
+    // A token minted for one network must not still be on screen while another is shown.
+    mintedToken = null;
+    shownFor = networkID;
+  }
   poll(networkID, networks);
+}
+
+/**
+ * Reloads after a write.
+ *
+ * Goes through start() rather than poking the poll timer, because a write can change what
+ * comes next in more ways than one: revoking the last device changes the verdict, and a
+ * person whose role was changed in another tab should find that out here rather than by
+ * clicking something that fails.
+ */
+function restart() {
+  stopPolling();
+  start();
 }
 
 signoutEl.addEventListener("click", async () => {
@@ -628,6 +913,13 @@ signoutEl.addEventListener("click", async () => {
   }
   lastGood = null;
   lastGoodAt = null;
+  // Forgotten explicitly. A page that kept the last person's permissions in memory would
+  // render their controls for whoever signs in next, for as long as it took the next fetch
+  // to come back.
+  permissions = new Set();
+  unlimited = false;
+  mintedToken = null;
+  shownFor = null;
   renderFreshness(null);
   renderSignIn("Signed out.");
 });

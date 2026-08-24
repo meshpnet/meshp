@@ -112,21 +112,37 @@ func TestTheSameOrganisationTwiceIsRefused(t *testing.T) {
 	}
 }
 
-// The browser credential minted from the administrative token reaches neither half of this.
+// A signed-in person sees their own organisation and no other, and cannot create one.
 //
-// Reading is refused because the endpoint answers "which organisation am I in", and that
-// session is not a person — returning every tenant to a page derived from one shared secret
-// is the leak ADR-0022 §5 was amended about. Writing is refused because creating a tenant is
-// deployment administration and needs the token itself.
-func TestOrganisationsAreNotBrowserReadable(t *testing.T) {
+// This used to assert that the browser's credential reached neither half, because that
+// credential was derived from a shared secret and had no identity. It has one now, so the
+// interesting question changed: reading is allowed and *scoped*, because knowing which
+// organisation you are in is not a privilege — /api/v1/me already answers it — while
+// creating a tenant stays deployment administration and needs the token itself.
+func TestAPersonSeesTheirOwnOrganisationAndCannotCreateOne(t *testing.T) {
 	h := newHarness(t)
-	cookie := h.login()
 
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		resp := h.withCookie(method, "/api/v1/organizations", cookie)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("%s with a browser session = %d, want 403", method, resp.StatusCode)
-		}
+	// A second tenant, so "their own" is a real restriction rather than a list of one.
+	if status, body := postOrg(t, h, map[string]any{"slug": "globex", "name": "Globex"}, true); status != http.StatusCreated {
+		t.Fatalf("creating a second organisation = %d: %v", status, body)
+	}
+
+	cookie := h.login()
+	status, _, body := doJSONWithCookie(t, h, http.MethodGet, "/api/v1/organizations", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("reading = %d: %v", status, body)
+	}
+	orgs, _ := body["organizations"].([]any)
+	if len(orgs) != 1 {
+		t.Fatalf("%d organisations, want only their own", len(orgs))
+	}
+	if first, _ := orgs[0].(map[string]any); first["slug"] != "acme" {
+		t.Errorf("they see %v, want their own organisation", first["slug"])
+	}
+
+	resp := h.withCookie(http.MethodPost, "/api/v1/organizations", cookie)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("creating an organisation with a browser session = %d, want 403", resp.StatusCode)
 	}
 }

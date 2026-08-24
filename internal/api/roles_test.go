@@ -288,3 +288,67 @@ func doJSONWithBody(t *testing.T, h *harness, method, path string, body any, coo
 	t.Helper()
 	return doJSON(t, method, h.server.URL+path, body, cookie, false)
 }
+
+// The page asks what it may do before deciding what to render, so the answer has to be
+// scoped the same way the guards are: per network for a `network.` permission, organisation
+// wide for an `organization.` one.
+func TestACallerCanAskWhatTheyMayDoHere(t *testing.T) {
+	h := newHarness(t)
+	other := h.secondNetwork(t)
+
+	tech := createUser(t, h, "tech@example.com")
+	takeAwayEveryRole(t, h, tech)
+	grantRole(t, h, tech, map[string]any{
+		"role": authz.RoleOperator, "network_id": h.netID.String(),
+	})
+	cookie := signIn(t, h, "tech@example.com", testPassword)
+
+	held := func(query string) map[string]bool {
+		t.Helper()
+		status, _, body := doJSONWithCookie(t, h, http.MethodGet, "/api/v1/me/permissions"+query, cookie)
+		if status != http.StatusOK {
+			t.Fatalf("asking what I may do%s = %d: %v", query, status, body)
+		}
+		if body["unlimited"] != false {
+			t.Errorf("a person reads as unlimited: %v", body)
+		}
+		out := map[string]bool{}
+		for _, p := range body["permissions"].([]any) {
+			out[p.(string)] = true
+		}
+		return out
+	}
+
+	mine := held("?network=" + h.netID.String())
+	if !mine[string(authz.NetworkDevicesRevoke)] {
+		t.Error("an operator is not told they may revoke a device on their own network")
+	}
+
+	theirs := held("?network=" + other.String())
+	if len(theirs) != 0 {
+		t.Errorf("they are told they may do %v on a network they hold nothing on", theirs)
+	}
+
+	// And organisation-wide, where a grant narrowed to one network contributes nothing —
+	// so a page must not render an organisation-level control for this person.
+	across := held("")
+	if len(across) != 0 {
+		t.Errorf("a grant narrowed to one network was reported as %v across the organisation", across)
+	}
+}
+
+// The administrative token holds what has not been invented yet, and no list describes that
+// honestly. It says so rather than sending an array a consumer would read as a limit.
+func TestTheAdministrativeTokenSaysItIsUnlimited(t *testing.T) {
+	h := newHarness(t)
+	status, _, body := doJSON(t, http.MethodGet, h.server.URL+"/api/v1/me/permissions", nil, nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if body["unlimited"] != true {
+		t.Errorf("unlimited = %v, want true", body["unlimited"])
+	}
+	if got := len(body["permissions"].([]any)); got != len(authz.Catalogue) {
+		t.Errorf("%d permissions, want the whole catalogue of %d", got, len(authz.Catalogue))
+	}
+}

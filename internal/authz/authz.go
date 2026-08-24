@@ -171,22 +171,6 @@ type Set struct {
 // All is every permission, including ones that do not exist yet.
 func All() Set { return Set{all: true} }
 
-// ReadOnly is every permission that only reads.
-//
-// What the browser session minted from the administrative token holds (ADR-0022 §5). It is
-// derived from a credential that can do everything and is strictly weaker than it, which is
-// the entire argument for having shipped a page before accounts existed. Once a deployment
-// signs people in with their own accounts this stops being reached.
-func ReadOnly() Set {
-	s := Set{have: make(map[Permission]struct{}, len(Catalogue))}
-	for _, e := range Catalogue {
-		if IsRead(e.Name) {
-			s.have[e.Name] = struct{}{}
-		}
-	}
-	return s
-}
-
 // NewSet collects permissions, ignoring any string this control plane does not recognise.
 //
 // Ignored rather than refused, because the strings come from a table an operator may have
@@ -210,6 +194,14 @@ func (s Set) Allows(p Permission) bool {
 	_, ok := s.have[p]
 	return ok
 }
+
+// Unlimited reports whether this caller holds everything, including permissions that do not
+// exist yet.
+//
+// Worth asking rather than inferring from Sorted() being empty, which is what a caller
+// holding nothing also looks like. The two are opposites and a consumer that confused them
+// would render the most powerful credential in the deployment as the least.
+func (s Set) Unlimited() bool { return s.all }
 
 // Empty reports whether this caller holds nothing at all.
 //

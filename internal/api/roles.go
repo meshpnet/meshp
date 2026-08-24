@@ -47,6 +47,71 @@ func scopeOf(p authz.Permission) string {
 	return "organization"
 }
 
+// handleListOwnPermissions answers what this caller may do, here.
+//
+// The endpoint the page loads before it renders anything, because what it may show is now
+// per-person: a reader and an owner see the same network and a different set of controls. A
+// page that renders a button the API then refuses is worse than one that never rendered it —
+// it teaches somebody that the product is broken rather than that they lack a permission.
+//
+// Deliberately not a field on the overview. That response describes a network and is shared
+// surface the commercial layer builds on (ADR-0023); this describes the caller, and mixing
+// the two would make one response's correctness depend on who asked for it.
+//
+// ?network= scopes the answer to one network, which is where a `network.` permission is
+// held. Without it the answer is the caller's organisation-wide permissions — the set that a
+// grant narrowed to a single network never contributes to.
+func (s *Server) handleListOwnPermissions(w http.ResponseWriter, r *http.Request) {
+	c := callerFrom(r)
+
+	var (
+		held authz.Set
+		err  error
+	)
+	if raw := r.URL.Query().Get("network"); raw != "" {
+		networkID, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			httpx.Error(w, s.log, http.StatusBadRequest, "bad_request", "network must be a UUID")
+			return
+		}
+		held, err = s.permissionsInNetwork(r, c, networkID)
+	} else {
+		org := callerOrganization(c)
+		if org == nil {
+			// The administrative token belongs to no organisation, so there is nothing to
+			// resolve against. It holds everything.
+			held = authz.All()
+		} else {
+			held, err = s.permissionsInOrganization(r, c, *org)
+		}
+	}
+	if err != nil {
+		s.respondError(w, r, err)
+		return
+	}
+
+	permissions := held.Sorted()
+	if held.Unlimited() {
+		// The administrative token, which holds what has not been invented yet and which no
+		// list describes honestly. The whole catalogue is sent so a page has something to
+		// render, and `unlimited` says why the list is not the whole truth — an empty array
+		// would otherwise read as "allowed nothing", which is its exact opposite.
+		permissions = everyPermission()
+	}
+	httpx.WriteJSON(w, s.log, http.StatusOK, map[string]any{
+		"permissions": permissions,
+		"unlimited":   held.Unlimited(),
+	})
+}
+
+func everyPermission() []string {
+	out := make([]string, 0, len(authz.Catalogue))
+	for _, e := range authz.Catalogue {
+		out = append(out, string(e.Name))
+	}
+	return out
+}
+
 // handleListRoles answers what roles this organisation can grant.
 func (s *Server) handleListRoles(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.pathUUID(w, r, "organizationID")

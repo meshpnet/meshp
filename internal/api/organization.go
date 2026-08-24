@@ -58,25 +58,17 @@ func (s *Server) handleCreateOrganization(w http.ResponseWriter, r *http.Request
 // The administrative token belongs to no organisation and sees them all, which is what it is
 // for and is the only way a deployment operator can find a tenant to work in.
 func (s *Server) handleListOrganizations(w http.ResponseWriter, r *http.Request) {
-	// A browser session minted from the administrative token is refused, and not as a
-	// special case: this endpoint answers "which organisation am I in", and a credential
-	// with no identity has no answer. Returning every tenant to it would hand a page
-	// derived from one shared secret a list of every customer on the deployment, which is
-	// the thing ADR-0022 §5 was amended about.
-	if callerFrom(r).readOnly {
-		httpx.Error(w, s.log, http.StatusForbidden, "forbidden",
-			"this asks which organisation you are in, and this session is not a person; sign in")
-		return
-	}
-
 	orgs, err := s.store.ListOrganizations(r.Context())
 	if err != nil {
 		s.respondError(w, r, err)
 		return
 	}
-	if user := callerFrom(r).user; user != nil {
+	// A person sees their own organisation; a token sees its owner's. The administrative
+	// token belongs to none and sees them all, which is the only way a deployment operator
+	// can find a tenant to work in.
+	if mine := callerOrganization(callerFrom(r)); mine != nil {
 		orgs = slices.DeleteFunc(orgs, func(org store.Organization) bool {
-			return org.ID != user.OrganizationID
+			return org.ID != *mine
 		})
 	}
 	out := make([]map[string]any, 0, len(orgs))
