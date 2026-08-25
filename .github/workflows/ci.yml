@@ -613,12 +613,64 @@ jobs:
           fi
           echo "no data-plane test was skipped"
 
+  # The macOS data plane, on a real macOS kernel, creating a real utun.
+  #
+  # It lands with the implementation rather than before or after it (#144). Before, there
+  # was nothing here but a stub returning ErrUnsupported and this job would have exercised
+  # it; after, there would be a window where a data plane was merged and had never created
+  # an interface on the platform it was written for. ADR-0018 is about exactly that gap.
+  #
+  # What this proves that `cross compile` does not: that a utun can be created at all, that
+  # wgctrl configures it over the UAPI socket the same way it configures a kernel device on
+  # Linux (ADR-0015's central bet), and that the routing table can be read back accurately
+  # enough to reconcile against.
+  dataplane-macos:
+    name: data plane (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      # No separate "can this runner make a utun" probe. The test is that probe: it fails
+      # loudly if creation does not work, and the skip check below catches the other way it
+      # could report nothing — sudo not taking, so the tests run unprivileged and skip.
+      #
+      # Creating a utun goes through PF_SYSTEM and needs root, so these tests skip without
+      # it, which means an unprivileged run would report success while testing nothing.
+      # A skip is therefore a failure here, exactly as it is for the Linux job. -E keeps the
+      # Go environment across sudo.
+      - name: a utun comes up, is configured through wgctrl, and is observed back
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ -count=1 -v 2>&1 | tee dataplane-macos.log
+
+      - name: report, and refuse a silent skip
+        if: always()
+        run: |
+          {
+            echo "### Data plane (macOS)"
+            echo
+            echo '```'
+            grep -E '^(--- |ok|FAIL)' dataplane-macos.log || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if grep -q -- "--- SKIP" dataplane-macos.log; then
+            grep -- "--- SKIP" dataplane-macos.log
+            echo "macOS data-plane tests were skipped, which reports success without testing anything"
+            exit 1
+          fi
+          echo "no macOS data-plane test was skipped"
+
   ci-required:
     name: ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, reachability, image, dataplane, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, reachability, image, dataplane, dataplane-macos, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |
