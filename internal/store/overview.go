@@ -45,6 +45,15 @@ type OverviewDevice struct {
 	// now, which is why a device that cannot filter, or cannot carry what it advertises,
 	// has been invisible to everyone but whoever was logged into it.
 	Unapplied []string
+
+	// ConnectedSince is when a control session was opened, by whichever replica is holding
+	// it. Nil when no session is open anywhere.
+	//
+	// The shared half of liveness. What a device *reports* — an applied version, a path
+	// report — arrives on every heartbeat and stays in the process that received it
+	// (ADR-0012); whether the session exists changes only when a device connects or goes
+	// away, which is cheap enough to keep where every replica can see it.
+	ConnectedSince *time.Time
 }
 
 // OverviewAdvertiser is one device offering to carry a route group's prefixes.
@@ -159,6 +168,10 @@ func (s *Store) NetworkOverview(ctx context.Context, networkID uuid.UUID, device
 				RevokedAt:    row.RevokedAt,
 				LastAckAt:    row.LastAckAt,
 				Unapplied:    row.UnappliedComponents,
+
+				// Set by whichever replica is holding the session, so this is true across
+				// all of them rather than only for the one being asked.
+				ConnectedSince: row.ConnectedSince,
 			}
 			// Nil where a membership has never opened a session and so has no state row.
 			// Zero is the right reading of that — it has applied nothing — and it is also

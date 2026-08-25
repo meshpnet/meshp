@@ -127,10 +127,16 @@ Two things are worth knowing before you rely on it.
 agents and they reconnect — to whichever replica the balancer gives them, with no loss of
 configuration. What they lose is the seconds it takes to notice.
 
-**`meshp status` and the overview report what one replica can see.** Liveness is per-process
-today, so with several replicas the device list is the subset connected to whichever one
-answered. Addresses, routes and policy are unaffected — those come from PostgreSQL — and the
-gap is being closed separately.
+**Whether a device is connected is shared; what it last reported is not.** Every replica
+knows which devices have a control session open, because that is recorded when a session
+opens and closes. What a device says on each heartbeat — the version it applied, what its
+tunnel is doing — stays in the replica that received it, which is deliberate: writing it
+where every replica could see it would mean a database write per heartbeat per device
+(ADR-0012).
+
+So the overview shows every connected device, and for the ones attached to another replica
+it says `reported to another replica` in place of tunnel detail rather than implying the
+device has gone quiet.
 
 Leave it at 1, or unset, for a single-replica deployment. A replica that connects to the bus
 when there is nobody to talk to holds a database connection open for nothing.
