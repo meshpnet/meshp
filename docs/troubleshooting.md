@@ -69,9 +69,16 @@ reachable.
 sudo meshp status
 ```
 
-`interface meshp0 (not up)` on a non-Linux machine is correct and permanent for now: the
-data plane is Linux-only, and elsewhere a device enrols, holds an address, and reports
-honestly that it has no tunnel rather than pretending.
+`interface meshp0 (not up)` on Windows or a mobile platform is correct for now: there is no
+data plane there yet, so a device enrols, holds an address, and reports honestly that it has
+no tunnel rather than pretending.
+
+On macOS there **is** a tunnel, and `meshp status` reports its kind as `userspace` — macOS
+has no WireGuard in the kernel, so wireguard-go moves the packets. Expect lower throughput
+and higher CPU than the same host would manage on Linux; that is the platform, not a fault.
+What macOS still does not have is DNS configuration and fail-closed egress, so a name will
+not resolve and a full-tunnel group will be reported unhonoured rather than silently
+half-applied.
 
 On Linux, check that the kernel can make WireGuard interfaces at all:
 
