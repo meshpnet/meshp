@@ -192,6 +192,7 @@ func TestPeersNameTheRelayAndTheStateCarriesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.srv.builder = f.srv.builder.WithRelays(relays)
+	f.registerRelays(t, relays)
 
 	alice := f.enrolDevice("alice")
 	f.enrolDevice("bob")
@@ -237,6 +238,7 @@ func TestTheMTUAllowsForTheRelayHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.srv.builder = f.srv.builder.WithRelays(relays)
+	f.registerRelays(t, relays)
 
 	relayed, err := f.srv.builder.For(f.ctx, alice.membershipID, 0)
 	if err != nil {
@@ -284,6 +286,7 @@ func TestADeltaAlsoCarriesTheRelayConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.srv.builder = f.srv.builder.WithRelays(relays)
+	f.registerRelays(t, relays)
 
 	alice := f.enrolDevice("alice")
 	before := f.headVersion()

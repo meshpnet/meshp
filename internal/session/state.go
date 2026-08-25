@@ -30,6 +30,13 @@ type StateBuilder struct {
 	// relays is what this deployment offers, sent to every agent as part of desired state.
 	// Nil where relaying is not configured, in which case peers carry neither an endpoint
 	// nor a relay and know about each other without being able to reach each other.
+	//
+	// A fallback rather than the answer. What is sent is read from the relay registry on
+	// every build, so that taking a relay out of service takes effect (#128); this is what
+	// a deployment gets when the registry cannot be read, which is the state MESHP_RELAYS
+	// described before the table had a reader. Preferring stale configuration to no relays
+	// at all is deliberate: a database hiccup should not tell every agent that relaying has
+	// been switched off.
 	relays *meshpv1.RelayConfig
 
 	// log is where a condition that costs a device something, but does not stop state being
@@ -51,10 +58,66 @@ func (b *StateBuilder) WithLogger(l *slog.Logger) *StateBuilder {
 	return b
 }
 
-// WithRelays returns a builder that tells agents about these relays.
+// WithRelays returns a builder that falls back to these relays.
+//
+// What configuration names, kept for the case where the registry cannot be read. The
+// registry is seeded from the same source at startup, so on a healthy deployment the two
+// agree and this is never reached.
 func (b *StateBuilder) WithRelays(relays *meshpv1.RelayConfig) *StateBuilder {
 	b.relays = relays
 	return b
+}
+
+// relayConfig is what agents should be told about relays right now.
+//
+// Read per build, beside the DNS records, and for the same reason: it is desired state, and
+// desired state that was decided at startup cannot be changed without a restart. A relay
+// marked draining stops appearing here, so the next state any agent is sent no longer names
+// it — and because a state change is what pushes state, marking one draining has to bump the
+// networks it affects, which is what the API does.
+//
+// Falls back to configuration when the registry cannot be read. A database that is briefly
+// unwell should not be reported to every agent as "this deployment has no relays", which
+// would take away the only path they have to each other (ADR-0002).
+func (b *StateBuilder) relayConfig(ctx context.Context) *meshpv1.RelayConfig {
+	all, err := b.store.ListRelays(ctx)
+	if err != nil {
+		b.log.Error("could not read the relay registry; falling back to what was configured",
+			"error", err)
+		return b.relays
+	}
+
+	// A deployment that has never configured relaying has nothing to say about relays, and
+	// says nothing: nil, which the agent reads as "no change". Distinct from a deployment
+	// whose relays are all drained, below — the registry has rows in that case, and an
+	// empty list is a different message from silence.
+	if len(all) == 0 {
+		return nil
+	}
+
+	relays := make([]store.Relay, 0, len(all))
+	for _, relay := range all {
+		if relay.State == store.RelayActive {
+			relays = append(relays, relay)
+		}
+	}
+	// Empty rather than nil when every relay is drained, and the difference is
+	// load-bearing. The agent treats a nil relay list as "nothing changed" and a present
+	// one as "replace what you have" (peerset.Apply), so nil here would leave every agent
+	// still using the relay it was told to stop using. An empty list is the instruction to
+	// let go of it.
+	//
+	// Distinct from the failed read above, which really does mean "nothing changed": a
+	// database hiccup must not be reported to every agent as "this deployment has no
+	// relays", which would take away the only path they have to each other (ADR-0002).
+	cfg := &meshpv1.RelayConfig{}
+	for _, relay := range relays {
+		cfg.Relays = append(cfg.Relays, &meshpv1.RelayConfig_Relay{
+			Id:        relay.Slug,
+			Endpoints: relay.Endpoints,
+		})
+	}
+	return cfg
 }
 
 // For returns the state to send an agent that has applied fromVersion.
@@ -93,7 +156,23 @@ func (b *StateBuilder) For(ctx context.Context, membershipID uuid.UUID, fromVers
 		// Already current. An empty delta rather than nothing at all, so the agent
 		// acknowledges this version and the convergence gap closes; saying nothing would
 		// leave it looking behind forever.
-		return &meshpv1.StateDelta{FromVersion: fromVersion, ToVersion: head}, nil
+		//
+		// Carries the relay list, which is the one piece of desired state that changes
+		// without a version bump: draining a relay is an operator decision about the
+		// deployment rather than a change to any network's contents, and bumping every
+		// network on a deployment to express it would be a fan-out for something no
+		// network's peers care about.
+		//
+		// The trade that makes this safe is what draining means. A drained relay is still
+		// running and still carrying what it has; an agent that misses this nudge keeps
+		// using it, which delays the drain rather than breaking anything, and corrects
+		// itself on the next state change or reconnect. That would not be an acceptable
+		// trade for anything an agent must act on.
+		return &meshpv1.StateDelta{
+			FromVersion: fromVersion,
+			ToVersion:   head,
+			Relays:      b.relayConfig(ctx),
+		}, nil
 	}
 
 	changes, err := b.store.Queries().CountStateChangesSince(ctx, dbgen.CountStateChangesSinceParams{
@@ -156,17 +235,23 @@ func (b *StateBuilder) snapshot(ctx context.Context, membership dbgen.GetMembers
 // filter to only the wrapper meant a network whose peer count dropped below its change
 // count silently sent a snapshot with no policy in it.
 func (b *StateBuilder) snapshotFromPeers(ctx context.Context, membership dbgen.GetMembershipForSessionRow, peers []dbgen.ListPeersForMembershipRow) (*meshpv1.StateDelta, error) {
+	// Once per build, and used in three places: what the agent is told about relays, which
+	// relay each peer is reached through, and the MTU, which is lower when anything is
+	// relayed. Reading it three times could produce a state describing a relay in one field
+	// and not in another, if a drain landed in between.
+	relays := b.relayConfig(ctx)
+
 	delta := &meshpv1.StateDelta{
 		// Zero means a snapshot: the whole world rather than a change to it.
 		FromVersion: 0,
 		ToVersion:   uint64(membership.StateVersion),
 		UpsertPeers: make([]*meshpv1.Peer, 0, len(peers)),
-		Tunnel:      b.tunnelConfig(membership),
+		Tunnel:      b.tunnelConfig(relays, membership),
 		Dns:         b.dnsConfig(ctx, membership),
-		Relays:      b.relays,
+		Relays:      relays,
 	}
 	for _, p := range peers {
-		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
+		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(relays,
 			p.WireguardPublicKey, p.DeviceName, p.DnsLabel, p.Tags, p.AddressV4, p.AddressV6))
 	}
 
@@ -247,14 +332,16 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		}
 	}
 
+	relays := b.relayConfig(ctx)
+
 	delta := &meshpv1.StateDelta{
 		FromVersion: fromVersion,
 		ToVersion:   head,
 		// Sent with every delta, not only snapshots. It is small, it changes rarely, and an
 		// agent that missed the snapshot carrying it would have peers naming a relay it
 		// knows nothing about.
-		Relays: b.relays,
-		Tunnel: b.tunnelConfig(membership),
+		Relays: relays,
+		Tunnel: b.tunnelConfig(relays, membership),
 		// Alongside the tunnel configuration and for the same reason: it is small, it
 		// changes rarely, and an agent that missed the snapshot carrying it would have
 		// peers it cannot name.
@@ -275,7 +362,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		// A key that is being removed and re-added in the same delta is a rotation. The
 		// upsert is the newer fact, so it must not also be removed.
 		delete(removes, peer.WireguardPublicKey)
-		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(
+		delta.UpsertPeers = append(delta.UpsertPeers, b.peerFrom(relays,
 			peer.WireguardPublicKey, peer.DeviceName, peer.DnsLabel, peer.Tags, peer.AddressV4, peer.AddressV6))
 	}
 
@@ -316,7 +403,7 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	return delta, nil
 }
 
-func (b *StateBuilder) peerFrom(publicKey, deviceName, dnsLabel string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
+func (b *StateBuilder) peerFrom(relays *meshpv1.RelayConfig, publicKey, deviceName, dnsLabel string, tags []string, v4, v6 *netip.Addr) *meshpv1.Peer {
 	peer := &meshpv1.Peer{
 		PublicKey:                  publicKey,
 		AllowedIps:                 allowedIPs(v4, v6),
@@ -329,20 +416,23 @@ func (b *StateBuilder) peerFrom(publicKey, deviceName, dnsLabel string, tags []s
 		// limitation to apologise for. Endpoints arrive with discovery, and a peer that has
 		// one will prefer it.
 	}
-	if relay := b.preferredRelay(); relay != nil {
+	if relay := preferredRelay(relays); relay != nil {
 		peer.RelayId = relay.GetId()
 	}
 	return peer
 }
 
 // preferredRelay is the relay this deployment offers, or nothing.
-func (b *StateBuilder) preferredRelay() *meshpv1.RelayConfig_Relay {
-	if b.relays == nil || len(b.relays.GetRelays()) == 0 {
+//
+// Takes the list rather than reading a field, because the list is now decided per build: a
+// relay that was active when this process started may have been drained since.
+func preferredRelay(relays *meshpv1.RelayConfig) *meshpv1.RelayConfig_Relay {
+	if relays == nil || len(relays.GetRelays()) == 0 {
 		return nil
 	}
 	// One relay today. When there are several, this is where region and load belong — and
 	// the agent is told all of them regardless, so it can fall back without asking.
-	return b.relays.GetRelays()[0]
+	return relays.GetRelays()[0]
 }
 
 // tunnelConfig is what every delta and every snapshot tells a device about its tunnel.
@@ -355,7 +445,7 @@ func (b *StateBuilder) preferredRelay() *meshpv1.RelayConfig_Relay {
 // being wrong means telling a device that is still carrying a default route to stop
 // refusing egress outside it. The membership row is loaded before any of this runs and
 // already carries the column.
-func (b *StateBuilder) tunnelConfig(membership dbgen.GetMembershipForSessionRow) *meshpv1.TunnelConfig {
+func (b *StateBuilder) tunnelConfig(relays *meshpv1.RelayConfig, membership dbgen.GetMembershipForSessionRow) *meshpv1.TunnelConfig {
 	// 1420 leaves room for WireGuard's overhead inside a 1500-byte path.
 	mtu := uint32(1420)
 
@@ -368,7 +458,7 @@ func (b *StateBuilder) tunnelConfig(membership dbgen.GetMembershipForSessionRow)
 	// MTU makes the failure intermittent, and the failure mode is loss of large packets
 	// only, which is the hardest thing to attribute. A stable conservative number costs a
 	// little throughput on direct paths and nothing else.
-	if b.preferredRelay() != nil {
+	if preferredRelay(relays) != nil {
 		mtu = uint32(relayproto.RelayedTunnelMTU)
 	}
 

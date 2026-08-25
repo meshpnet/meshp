@@ -436,6 +436,19 @@ func open(ctx context.Context, log *slog.Logger, cfg runConfig) (*store.Store, e
 		return nil, err
 	}
 
+	// The relays this deployment names, into the registry that decides what agents are told
+	// (#128). Configuration stays the source of truth for which relays exist and where they
+	// are; what the table adds is a state an operator can change without a restart — so
+	// endpoints are refreshed here on every boot and state deliberately is not, because a
+	// restart quietly undoing a drain is the failure this removes.
+	if relays, err := relayEndpointsBySlug(cfg.relays); err != nil {
+		st.Close()
+		return nil, err
+	} else if err := st.SyncRelaysFromConfig(ctx, relays); err != nil {
+		st.Close()
+		return nil, err
+	}
+
 	log.Info("control plane ready")
 	return st, nil
 }
@@ -475,6 +488,26 @@ func newBus(ctx context.Context, st *store.Store, sessions *session.Server, cfg 
 		}
 	})
 	return b
+}
+
+// relayEndpointsBySlug turns the parsed relay configuration into what the registry stores.
+//
+// A map rather than the protobuf, because the store has no business knowing the wire format
+// and the registry holds strictly less than the proto does — an id and its endpoints. The
+// public key and region the table also has are not filled in here for the reason #128 gives:
+// nothing reads them, and writing a value nothing reads is how a column comes to be trusted.
+func relayEndpointsBySlug(cfg *meshpv1.RelayConfig) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, relay := range cfg.GetRelays() {
+		slug := relay.GetId()
+		if _, seen := out[slug]; seen {
+			// ParseRelays does not reject this and the table's UNIQUE(slug) would, as a
+			// constraint violation at startup with no explanation. Better said here.
+			return nil, fmt.Errorf("MESHP_RELAYS names relay %q twice", slug)
+		}
+		out[slug] = relay.GetEndpoints()
+	}
+	return out, nil
 }
 
 // probeMux builds a mux carrying only the health endpoints.

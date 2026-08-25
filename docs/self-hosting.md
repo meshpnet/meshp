@@ -141,6 +141,38 @@ device has gone quiet.
 Leave it at 1, or unset, for a single-replica deployment. A replica that connects to the bus
 when there is nobody to talk to holds a database connection open for nothing.
 
+### Taking a relay out of service
+
+`MESHP_RELAYS` names your relays and still does. What it cannot express is "stop sending new
+sessions here", which is what you want before turning a machine off.
+
+```bash
+curl -fsS -X PUT -H "Authorization: Bearer $MESHP_BOOTSTRAP" \
+  -H 'Content-Type: application/json' -d '{"state":"draining"}' \
+  http://localhost:8080/api/v1/relays/relay1/state
+```
+
+`GET /api/v1/relays` lists them with their states. Three states:
+
+| | |
+| --- | --- |
+| `active` | agents are told about it |
+| `draining` | agents are not told about it; sessions already using it keep working |
+| `disabled` | agents are not told about it, and it is not expected back |
+
+**Draining does not move anything.** A drained relay is still running and still carrying
+what it has; what stops is new sessions being pointed at it. It empties as devices reconnect
+for their own reasons, which is gentle and is not quick.
+
+**Nothing here reports when it is empty.** Relays do not check in, so the control plane
+knows which relays exist and not whether any traffic is flowing through them. Judging when
+it is safe to switch a drained relay off is yours to do, and `last_seen_at` in the listing
+is always null for the same reason. That is the remaining half of #128.
+
+A restart does not undo a drain. Endpoints are refreshed from `MESHP_RELAYS` on every boot;
+state is not, because a restart quietly putting a relay back into service is the failure this
+exists to remove. Removing a relay from `MESHP_RELAYS` removes it from the list entirely.
+
 ### TLS
 
 Agents refuse a plaintext control URL to anything but loopback, so a control plane serving

@@ -27,20 +27,24 @@
 table:groups           — an ACL model that names people, not yet decided; see ADR-0024's consequences
 table:group_members    — as above
 
-# --- deferred with a stated trigger --------------------------------------------------------
+# --- columns nothing reads, inside a table something does ------------------------------------
 #
-# Not forgotten and not an open question, which is what this entry used to claim. The
-# decision is recorded where the code makes it, in ParseRelays: "Configuration rather than a
-# database table for now. A table is right eventually — relays will have regions and health —
-# but a deployment with one relay should not need a migration to name it."
+# `relays` graduated in #128: it holds the deployment's relays, the state builder reads it on
+# every build, and an operator can drain one without a restart. That took the table off this
+# list, and this check works at table granularity — so what it can no longer see is that two
+# of that table's columns still have no reader.
 #
-# Neither half of that trigger exists: nothing reads a relay's region, and there is no relay
-# health at all, which is why last_seen_at has no writer either. What the deferral costs is
-# worth knowing before somebody picks this up: taking a relay out of service means editing
-# MESHP_RELAYS and restarting the control plane, all-or-nothing, because 'draining' lives in
-# this table and nothing reads it. Tracked in #128.
-table:relays           — configuration overtook it, deliberately; see ParseRelays and #128
-
+# `public_key` anticipates ADR-0017's relays-whose-keys-a-deployment-trusts, and the trust
+# runs the other way today: the control plane signs a capability and the relay verifies it
+# (ADR-0016), so nothing needs a relay's key. `region` is written by nothing and read by
+# nothing; no code chooses a relay by where it is.
+#
+# Neither is exposed by the API, deliberately, which is the part worth keeping true. A column
+# nothing reads is a deferral; a column nothing reads that is nonetheless in a public response
+# is a promise, and ADR-0023 says promises in that surface cannot be withdrawn freely.
+#
+# Not an entry, because there is nothing here to excuse — it is a note for whoever next reads
+# this file wondering why `relays` left without those columns gaining readers.
 
 # --- direct paths -------------------------------------------------------------------------
 #
