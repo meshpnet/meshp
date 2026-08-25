@@ -56,7 +56,12 @@ const tunnelGrace = 2 * time.Minute
 // Only an active membership can be in trouble. A revoked or suspended one is doing exactly
 // what was asked of it, and reporting it as broken would put an operator's own decision in
 // front of them as a fault to investigate.
-func deviceFaults(d store.OverviewDevice, live *session.Connected, now time.Time) []Fault {
+// connectedElsewhere is whether some other replica is holding this device's session, which
+// only the database knows. It is passed separately from live because the two answer
+// different questions: live is "do we have its heartbeat data", connectedElsewhere is "is it
+// talking to anybody". Collapsing them is what made a device attached to the replica next
+// door look like one that had never been heard from.
+func deviceFaults(d store.OverviewDevice, live *session.Connected, connectedElsewhere bool, now time.Time) []Fault {
 	faults := make([]Fault, 0, 2)
 	if d.State != "active" {
 		return faults
@@ -73,9 +78,14 @@ func deviceFaults(d store.OverviewDevice, live *session.Connected, now time.Time
 		// account of the failure that came from the machine it happened on.
 		faults = append(faults, Fault{Code: faultLastError, Message: d.LastError})
 	}
-	if live == nil && d.LastAckAt == nil {
+	if live == nil && !connectedElsewhere && d.LastAckAt == nil {
 		// Enrolled and never heard from. Easy to miss in a list of names, and usually an
 		// installation that did not finish rather than a device that has gone away.
+		//
+		// connectedElsewhere is what stops this being raised against a device that is
+		// connected right now to another replica and has simply not acknowledged anything
+		// yet — a window of seconds after a join, during which this would have reported a
+		// fault about a device doing exactly what it should.
 		faults = append(faults, Fault{
 			Code:    faultNeverApplied,
 			Message: "has never applied any configuration",

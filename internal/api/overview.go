@@ -97,8 +97,19 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 			"applied_version":      d.AppliedVersion,
 			"connected":            false,
 		}
-		if c, live := connected[d.MembershipID]; live {
+
+		// Connected here, or connected to another replica. The database knows the second
+		// and only this process knows the first, so the answer is the union — before this,
+		// a control plane reported the devices attached to itself and called the rest
+		// disconnected, which on a two-replica deployment is roughly half of them.
+		c, live := connected[d.MembershipID]
+		if live || d.ConnectedSince != nil {
 			device["connected"] = true
+			device["connected_since"] = d.ConnectedSince
+		}
+
+		if live {
+			// This replica is holding the session, so it has what the device last said.
 			device["connected_since"] = c.ConnectedAt
 			// The agent's own number, beside the database's. They disagree while an
 			// acknowledgement is in flight, and a reader chasing a device that looks stuck
@@ -121,6 +132,17 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 					"relayed":     c.Tunnel.Relayed,
 				}
 			}
+		} else if device["connected"] == true {
+			// Held by another replica. Said rather than left to be inferred from a missing
+			// tunnel field, which a reader would otherwise take for "this device has not
+			// reported yet" — a device that has been talking to the replica next door for
+			// an hour is not the same as one that has never said anything, and only one of
+			// them is worth investigating.
+			//
+			// ADR-0012 keeps the per-heartbeat detail in the process that received it, so
+			// there is genuinely nothing to show here. Reporting the absence honestly is
+			// the whole of what this control plane can do about that.
+			device["reported_by"] = "another_replica"
 		}
 		if d.AddressV4 != nil {
 			device["address_v4"] = d.AddressV4.String()
@@ -141,11 +163,11 @@ func (s *Server) handleNetworkOverview(w http.ResponseWriter, r *http.Request) {
 		// What is wrong with it, decided here rather than by whoever is rendering
 		// (ADR-0023). Always present and always a list, so a consumer never has to tell
 		// absent from empty before it can decide whether to raise an alarm.
-		var live *session.Connected
-		if c, ok := connected[d.MembershipID]; ok {
-			live = &c
+		var held *session.Connected
+		if live {
+			held = &c
 		}
-		faults := deviceFaults(d, live, now)
+		faults := deviceFaults(d, held, d.ConnectedSince != nil, now)
 		device["faults"] = faults
 		faultCount += len(faults)
 

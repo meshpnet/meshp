@@ -44,7 +44,11 @@ func TestWhatCountsAsABrokenDevice(t *testing.T) {
 		name   string
 		device store.OverviewDevice
 		live   *session.Connected
-		want   []string
+
+		// elsewhere is whether another replica holds this device's session, which is
+		// what the database knows and this process does not.
+		elsewhere bool
+		want      []string
 	}{
 		{
 			name:   "a device with nothing wrong",
@@ -115,7 +119,7 @@ func TestWhatCountsAsABrokenDevice(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := codes(deviceFaults(tc.device, tc.live, now))
+			got := codes(deviceFaults(tc.device, tc.live, tc.elsewhere, now))
 			if len(tc.want) == 0 && len(got) == 0 {
 				return
 			}
@@ -186,5 +190,32 @@ func TestADroppedControlSessionDoesNotBreakARouteGroup(t *testing.T) {
 	group := store.OverviewGroup{Advertisers: []store.OverviewAdvertiser{advertiser("enabled", "healthy")}}
 	if faults := groupFaults(group); len(faults) != 0 {
 		t.Errorf("faults = %v, want none: liveness is not part of this rule", codes(faults))
+	}
+}
+
+// A device connected to another replica is not a device that has never been heard from.
+//
+// The two look identical to a control plane that only knows its own sessions, which is what
+// made this wrong: `live == nil` meant "we have no heartbeat data", and it was being read as
+// "nobody does". On a two-replica deployment that turns roughly half the devices into
+// reported faults about installations that are working.
+func TestADeviceHeldByAnotherReplicaIsNotAFault(t *testing.T) {
+	now := time.Now().UTC()
+	device := store.OverviewDevice{State: "active"} // no LastAckAt: it has acknowledged nothing yet
+
+	// What this replica sees for a device attached to the one next door: no session of its
+	// own, and no acknowledgement in the database yet.
+	elsewhere := codes(deviceFaults(device, nil, true, now))
+	for _, code := range elsewhere {
+		if code == faultNeverApplied {
+			t.Error("a device connected to another replica was reported as never having " +
+				"applied any configuration")
+		}
+	}
+
+	// And the fault still fires for a device that genuinely is not talking to anybody,
+	// which is the case it exists for.
+	if got := codes(deviceFaults(device, nil, false, now)); !same(got, []string{faultNeverApplied}) {
+		t.Errorf("a device connected nowhere = %v, want %v", got, []string{faultNeverApplied})
 	}
 }

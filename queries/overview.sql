@@ -81,7 +81,19 @@ SELECT
     s.applied_version,
     s.last_ack_at,
     s.last_error,
-    s.unapplied_components
+    s.unapplied_components,
+    -- Whether a control session is open, as recorded by whichever replica is holding it.
+    --
+    -- The one piece of liveness that is not per-process. ADR-0012 keeps presence out of
+    -- PostgreSQL because it is high-frequency, and that is true of what a device *reports* —
+    -- an applied version and a path report on every heartbeat. It is not true of whether the
+    -- session exists at all, which changes when a device connects and when it goes away.
+    --
+    -- These two columns have been written on connect and disconnect since the first
+    -- migration and read by nothing, so a control plane could only ever report the devices
+    -- attached to itself. On one replica that is the same answer; on two it is half of one.
+    s.connected_since,
+    s.control_session_id
 FROM device_network_memberships m
 JOIN devices d ON d.id = m.device_id
 LEFT JOIN membership_state s ON s.membership_id = m.id

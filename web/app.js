@@ -143,6 +143,11 @@ function show(...nodes) {
 
 /** How a device's data plane reads, in words. */
 function tunnelSummary(device) {
+  // Held by another control-plane replica, which has the device's report and this one does
+  // not. Said rather than shown as "not reported yet": a device that has been talking to the
+  // replica next door for an hour and one that has never said anything are different, and
+  // only the second is worth investigating.
+  if (device.reported_by === "another_replica") return "reported to another replica";
   // Absent because the device has not said, which is not the same as having nothing.
   if (!device.tunnel) return device.connected ? "not reported yet" : "—";
   const { peers, talking, relayed } = device.tunnel;
