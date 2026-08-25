@@ -632,3 +632,20 @@ func (f *fixture) rawHandshake(membershipID uuid.UUID, identityKey, ch, signatur
 	f.t.Helper()
 	return rawDial(f.ctx, f.http.URL, membershipID, identityKey, ch, signature)
 }
+
+// registerRelays puts what ParseRelays produced into the relay registry.
+//
+// WithRelays is only a fallback now: the state builder reads the registry on every build so
+// that draining a relay takes effect (#128), and configuration seeds that registry at
+// startup. A test that means "this deployment has these relays" has to say so where the
+// deployment would.
+func (f *fixture) registerRelays(t *testing.T, cfg *meshpv1.RelayConfig) {
+	t.Helper()
+	byslug := map[string][]string{}
+	for _, relay := range cfg.GetRelays() {
+		byslug[relay.GetId()] = relay.GetEndpoints()
+	}
+	if err := f.store.SyncRelaysFromConfig(f.ctx, byslug); err != nil {
+		t.Fatalf("registering relays: %v", err)
+	}
+}

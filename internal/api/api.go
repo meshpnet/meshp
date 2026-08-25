@@ -266,6 +266,17 @@ func (s *Server) routes() []route {
 		// than something a person can hold a permission over — see guardBootstrap — while
 		// which organisation you are in is not a privilege: /api/v1/me already answers it.
 		{pattern: "POST /api/v1/organizations", handler: s.handleCreateOrganization, kind: guardBootstrap},
+
+		// Relays, which belong to the deployment rather than to a tenant (#128). Behind the
+		// administrative token for the same reason creating an organisation is: the
+		// permission families are `network.` and `organization.`, and a relay is neither —
+		// inventing a third family for two routes would be surface nobody asked for.
+		//
+		// Worth revisiting if an MSP operator ever needs to drain a relay without holding
+		// the deployment's root credential. That is a real scenario and it is not this one:
+		// today the person who runs the relays is the person who runs the control plane.
+		{pattern: "GET /api/v1/relays", handler: s.handleListRelays, kind: guardBootstrap},
+		{pattern: "PUT /api/v1/relays/{relay}/state", handler: s.handleSetRelayState, kind: guardBootstrap},
 		{pattern: "GET /api/v1/organizations", handler: s.handleListOrganizations, kind: guardSignedIn},
 
 		// People (ADR-0024). Creating an account and suspending one are the same

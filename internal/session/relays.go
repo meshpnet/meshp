@@ -19,9 +19,15 @@ import (
 // networks that inspect HTTP block it. The order is the order an agent tries them in, so put
 // the port most likely to work first.
 //
-// Configuration rather than a database table for now. A table is right eventually — relays
-// will have regions and health — but a deployment with one relay should not need a migration
-// to name it.
+// Configuration is still where relays are named — a deployment with one relay should not
+// need a migration to name it, which is why this has not become an API — but it is no longer
+// the whole story. What this produces seeds the `relays` table at startup, and the state
+// builder reads that table on every build, so an operator can take one relay out of service
+// without editing this string and restarting (#128).
+//
+// The division: configuration owns which relays exist and where they are, refreshed on every
+// boot. The table owns whether each is taking new sessions, and a restart deliberately does
+// not reset it.
 func ParseRelays(spec string) (*meshpv1.RelayConfig, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
