@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/meshpnet/meshp/internal/authz"
+	"github.com/meshpnet/meshp/internal/bus"
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
@@ -56,6 +57,10 @@ type Config struct {
 	EnrolRatePerSecond float64
 	EnrolBurst         float64
 
+	// Bus tells other control-plane replicas that a network changed (ADR-0025). Nil is a
+	// single-replica deployment, where the local hub is the only thing to nudge.
+	Bus bus.Bus
+
 	Clock clock.Clock
 	Log   *slog.Logger
 }
@@ -73,6 +78,11 @@ type Server struct {
 	// how the read endpoints stay usable in a test that does not stand one up: a device
 	// with no presence reads as disconnected, which is what it is.
 	presence Presence
+
+	// bus tells the other replicas that a network changed (ADR-0025). Nil in a test that
+	// stands no bus up, which reads as a single-replica deployment — the local hub is
+	// still nudged, so nothing a test asserts about one process changes.
+	bus bus.Bus
 
 	// bootstrapWarnedAt is when the administrative token was last complained about, so the
 	// complaint is occasional rather than per request. See warnBootstrapTokenUsed.
@@ -101,6 +111,7 @@ func New(st *store.Store, svc *enroll.Service, sess *session.Server, cfg Config)
 		cfg:     cfg,
 		log:     cfg.Log,
 		limit:   newLimiter(cfg.EnrolRatePerSecond, cfg.EnrolBurst, 10_000, cfg.Clock),
+		bus:     cfg.Bus,
 	}
 	// Taken through the interface rather than held as a *Hub, so the thing that replaces
 	// it for multi-replica deployments (ADR-0012) has one place to arrive. A typed nil

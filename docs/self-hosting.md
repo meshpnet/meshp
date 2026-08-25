@@ -103,6 +103,38 @@ An owner can see and revoke everybody's at
 Tokens expire: ninety days by default, a year at most, and there is no unexpiring one. That
 is deliberate — a bearer secret that never expires outlives the reason it was made.
 
+### Running more than one control plane
+
+One `meshp-control` is a single point of failure. More than one works, and needs one setting:
+
+```
+MESHP_REPLICAS=2
+```
+
+That is a statement about the deployment rather than a count anything verifies — nothing in
+a replica knows how many others exist. What it decides is whether the replica connects to
+the bus that carries "network N changed" between them (ADR-0025), which is PostgreSQL's own
+`LISTEN`/`NOTIFY`. **There is no second data store to run**: redundancy costs you a second
+container and nothing else.
+
+Point every replica at the same PostgreSQL and put them behind whatever already balances
+your traffic. They share no state of their own; PostgreSQL is the source of truth and always
+was.
+
+Two things are worth knowing before you rely on it.
+
+**An agent holds a session with one replica at a time**, so a replica going away drops its
+agents and they reconnect — to whichever replica the balancer gives them, with no loss of
+configuration. What they lose is the seconds it takes to notice.
+
+**`meshp status` and the overview report what one replica can see.** Liveness is per-process
+today, so with several replicas the device list is the subset connected to whichever one
+answered. Addresses, routes and policy are unaffected — those come from PostgreSQL — and the
+gap is being closed separately.
+
+Leave it at 1, or unset, for a single-replica deployment. A replica that connects to the bus
+when there is nobody to talk to holds a database connection open for nothing.
+
 ### TLS
 
 Agents refuse a plaintext control URL to anything but loopback, so a control plane serving

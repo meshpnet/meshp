@@ -22,12 +22,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/meshpnet/meshp/internal/api"
+	"github.com/meshpnet/meshp/internal/bus"
 	"github.com/meshpnet/meshp/internal/clock"
 	"github.com/meshpnet/meshp/internal/enroll"
 	"github.com/meshpnet/meshp/internal/httpx"
@@ -81,6 +85,12 @@ func main() {
 		// after an outage, a weekend, or a closed laptop.
 		deltaRetention = flag.Duration("delta-retention", envDuration("MESHP_DELTA_RETENTION", 72*time.Hour),
 			"how long to keep the state change log; agents behind it are sent a snapshot")
+
+		// How many meshp-control processes this deployment runs, which decides whether a
+		// change made here has to reach agents held elsewhere (ADR-0025). One is the
+		// default and needs no bus: with a single process there is nowhere else to tell.
+		replicas = flag.Int("replicas", envInt("MESHP_REPLICAS", 1),
+			"how many control-plane replicas this deployment runs; 2 or more connects the bus")
 	)
 	flag.Parse()
 
@@ -159,6 +169,7 @@ func main() {
 		adminToken:      *adminToken,
 		skipMigrate:     *skipMigrate,
 		deltaRetention:  *deltaRetention,
+		replicas:        *replicas,
 	}
 	if err := run(ctx, log, cfg); err != nil {
 		log.Error("meshp-control exited with error", "error", err)
@@ -177,6 +188,7 @@ type runConfig struct {
 	adminToken      string
 	skipMigrate     bool
 	deltaRetention  time.Duration
+	replicas        int
 }
 
 func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
@@ -306,8 +318,11 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 			return
 		}
 
+		replicaBus := newBus(ctx, st, sessionServer, cfg, log)
+
 		apiServer := api.New(st, enroll.NewService(st, challenger, clock.System{}, log), sessionServer, api.Config{
 			AdminToken: cfg.adminToken,
+			Bus:        replicaBus,
 			Clock:      clock.System{},
 			Log:        log,
 		})
@@ -423,6 +438,43 @@ func open(ctx context.Context, log *slog.Logger, cfg runConfig) (*store.Store, e
 
 	log.Info("control plane ready")
 	return st, nil
+}
+
+// newBus connects this replica to the others, and starts listening.
+//
+// Configuration decides, not a build tag (ADR-0012), and the default is the single-replica
+// one: a deployment that has not said it runs several replicas gets a bus that does nothing,
+// which is exactly right — with one process the publisher and every subscriber are the same
+// process, and tellNetwork already nudges the local hub directly.
+//
+// Turning it on is MESHP_REPLICAS=2 or more. That is a statement about the deployment rather
+// than a count this process verifies: nothing here knows how many replicas exist, and a
+// deployment that sets it and runs one process pays a held connection for nothing rather
+// than breaking.
+func newBus(ctx context.Context, st *store.Store, sessions *session.Server, cfg runConfig, log *slog.Logger) bus.Bus {
+	if cfg.replicas < 2 {
+		return bus.Local{}
+	}
+
+	b := bus.NewPostgres(st.Pool(), log)
+	log.Info("running as one of several replicas",
+		"replicas", cfg.replicas,
+		"bus", "postgresql LISTEN/NOTIFY",
+		"note", "a change made on any replica wakes agents held by all of them")
+
+	go b.Subscribe(ctx, func(networkID uuid.UUID) {
+		// Everything this replica is holding for that network. The message says only that
+		// the network changed, so the state is read from PostgreSQL as it would be for any
+		// other nudge — nothing arriving over the bus is trusted as data (ADR-0025).
+		if sessions == nil {
+			return
+		}
+		if n := sessions.Hub().NotifyNetwork(networkID); n > 0 {
+			log.Debug("another replica reported a change",
+				"network_id", networkID, "sessions", n)
+		}
+	})
+	return b
 }
 
 // probeMux builds a mux carrying only the health endpoints.
@@ -588,6 +640,23 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// envInt reads a whole number from the environment.
+//
+// A value that is not a number falls back rather than failing to start. The alternative is
+// a control plane that refuses to boot over a typo in a variable whose only effect is
+// whether it opens one extra connection.
+func envInt(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func envBool(key string) bool {
