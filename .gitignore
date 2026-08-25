@@ -5,6 +5,18 @@
 *.test
 *.out
 
+# The same four binaries, at the repository root.
+#
+# `make build` puts them in bin/, which the rule above covers. A bare
+# `go build ./cmd/meshp` does not — it drops the binary here, named after the
+# package, and a 12 MB Mach-O then sits in `git status` waiting for somebody's
+# `git add -A` to commit it. Anchored to the root so the cmd/ directories that
+# share these names are unaffected.
+/meshp
+/meshpd
+/meshp-control
+/meshp-relay
+
 # Generated code IS committed — see docs/adr/0013-commit-generated-code.md.
 # `go build ./...` and `go install` have to work on a fresh clone, and the
 # protocol package is meant to be imported by meshp-sdk and the mobile clients.
