@@ -16,6 +16,11 @@ const deleteRelaysNotIn = `-- name: DeleteRelaysNotIn :execrows
 DELETE FROM relays WHERE slug <> ALL($1::text[])
 `
 
+// scope: global a relay belongs to the deployment and not to a tenant, so there is no
+// organisation to scope this by. It is also not reachable from the API at all: it runs at
+// startup against what MESHP_RELAYS names, so the only thing that can invoke it is the
+// process reading its own configuration.
+//
 // Removes relays configuration no longer names.
 //
 // Configuration is the source of truth for which relays exist, so one taken out of
