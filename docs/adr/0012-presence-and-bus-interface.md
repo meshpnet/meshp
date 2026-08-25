@@ -1,7 +1,15 @@
 # ADR-0012: Presence and pub/sub sit behind an interface with in-memory and Redis implementations
 
-- **Status:** accepted
+- **Status:** accepted, amended for `Bus` by [ADR-0025](0025-the-bus-is-postgresql.md)
 - **Date:** 2026-08-10
+
+> **`Bus` is PostgreSQL, not Redis.** ADR-0025 changed that half when `Bus` turned out to be
+> the first of the two to be needed: the argument below for accepting Redis — that a
+> deployment large enough for replicas is large enough to run it — holds for `Presence`,
+> which is high-frequency by definition, and not for `Bus`, which publishes on
+> administrative change. Everything else here stands, `Presence` included: the interfaces,
+> the selection being configuration rather than a build tag, and the rule that nothing which
+> must survive a restart lives in either.
 
 ## Context
 

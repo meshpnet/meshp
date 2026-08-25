@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/netip"
@@ -123,14 +124,45 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 //
 // Best effort by construction: an agent that is not connected has nothing to be told,
 // and will see the change in the state it is sent when it next connects.
+//
+// Two things happen, and the order is not an accident. The agents attached to *this*
+// replica are nudged directly, and then every other replica is told over the bus
+// (ADR-0025). Doing the local nudge first means a control plane that has lost PostgreSQL
+// still wakes the agents it is holding — the bus is where the change reaches replicas this
+// process cannot see, not the mechanism by which it reaches its own.
+//
+// This replica hears its own message back and nudges a second time. Harmless: Session.Notify
+// coalesces, so ten nudges produce one push. Suppressing it would mean carrying a replica
+// identity through the message for no benefit.
 func (s *Server) tellNetwork(networkID uuid.UUID) {
-	if s.session == nil {
+	if s.session != nil {
+		if n := s.session.Hub().NotifyNetwork(networkID); n > 0 {
+			s.log.Debug("nudged connected agents", "network_id", networkID, "sessions", n)
+		}
+	}
+	if s.bus == nil {
 		return
 	}
-	if n := s.session.Hub().NotifyNetwork(networkID); n > 0 {
-		s.log.Debug("nudged connected agents", "network_id", networkID, "sessions", n)
+	// Bounded, and its own context rather than the request's: the change has committed and
+	// the response is on its way, so a caller who has hung up must not take the other
+	// replicas' notification with them.
+	ctx, cancel := context.WithTimeout(context.Background(), busPublishTimeout)
+	defer cancel()
+	if err := s.bus.Publish(ctx, networkID); err != nil {
+		// Logged and not returned. The change is already durable, and ADR-0012 requires a
+		// missed notification to cost latency rather than correctness — so failing the
+		// request here would turn a working change into a reported failure.
+		s.log.Warn("other replicas were not told about a change",
+			"network_id", networkID, "error", err,
+			"consequence", "agents held by other replicas see this on their next heartbeat")
 	}
 }
+
+// busPublishTimeout bounds telling the other replicas.
+//
+// Short, because it happens after the work is done and while a client is waiting for the
+// response: a slow bus should not become a slow API.
+const busPublishTimeout = 2 * time.Second
 
 // sourceAddr extracts the caller's address for the audit trail. Nil when it cannot
 // be parsed, which is better than recording something invented.
