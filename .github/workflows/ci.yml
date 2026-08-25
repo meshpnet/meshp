@@ -643,27 +643,54 @@ jobs:
       # it, which means an unprivileged run would report success while testing nothing.
       # A skip is therefore a failure here, exactly as it is for the Linux job. -E keeps the
       # Go environment across sudo.
-      - name: a utun comes up, is configured through wgctrl, and is observed back
+      # resolved joins wglink here because it has the same shape of unknown: whether
+      # mDNSResponder collects a supplemental domain from a service key meshp invented, on a
+      # non-standard port, is not something that can be reasoned about — it either does or
+      # it does not, and only a real macOS can say.
+      #
+      # Twice, because there are genuinely two classes of test here and each skips the other.
+      # Creating a utun needs root; being refused a write to the dynamic store needs *not*
+      # having it, and that refusal is a real path — ADR-0021 turns on a host that cannot
+      # configure its resolver saying so rather than reporting success. One run cannot
+      # exercise both, so the check below is that nothing skipped in both runs.
+      - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ -count=1 -v 2>&1 | tee dataplane-macos.log
+          go test ./internal/wglink/ ./internal/resolved/ -count=1 -v 2>&1 | tee macos-user.log
 
-      - name: report, and refuse a silent skip
+      - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ -count=1 -v 2>&1 | tee macos-root.log
+
+      # A test that skipped in both runs never ran anywhere, which reports success while
+      # testing nothing. Checked by name rather than by counting skips, because each run is
+      # *expected* to skip what the other covers.
+      - name: report, and refuse a test that ran nowhere
         if: always()
         run: |
+          skipped() { grep -E '^\s*--- SKIP: ' "$1" | sed 's/.*--- SKIP: //; s/ .*//' | sort -u; }
+          skipped macos-user.log > user-skips.txt || true
+          skipped macos-root.log > root-skips.txt || true
+          never_ran=$(comm -12 user-skips.txt root-skips.txt)
+
           {
             echo "### Data plane (macOS)"
             echo
             echo '```'
-            grep -E '^(--- |ok|FAIL)' dataplane-macos.log || true
+            grep -E '^(--- |ok|FAIL)' macos-root.log || true
             echo '```'
+            echo
+            echo "skipped unprivileged, covered as root: $(tr '\n' ' ' < user-skips.txt)"
+            echo "skipped as root, covered unprivileged: $(tr '\n' ' ' < root-skips.txt)"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          if grep -q -- "--- SKIP" dataplane-macos.log; then
-            grep -- "--- SKIP" dataplane-macos.log
-            echo "macOS data-plane tests were skipped, which reports success without testing anything"
+
+          if [ -n "$never_ran" ]; then
+            echo "these tests skipped in both runs, so they ran nowhere:"
+            echo "$never_ran"
             exit 1
           fi
-          echo "no macOS data-plane test was skipped"
+          echo "every test ran in at least one of the two runs"
 
   ci-required:
     name: ci

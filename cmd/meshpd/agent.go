@@ -83,7 +83,7 @@ type agent struct {
 	// only to something querying the agent directly, which the status command says plainly
 	// rather than leaving somebody to wonder why `ssh fileserver` does not work.
 	systemResolverOnce sync.Once
-	systemResolver     *resolved.Resolvectl
+	systemResolver     *resolved.System
 
 	ctx context.Context
 }
@@ -151,7 +151,7 @@ func proberOrNil() tunnel.Prober {
 
 // systemResolverOrNil converts a possibly-absent resolver configurer into the interface.
 //
-// Explicit for the reason routerOrNil and proberOrNil are: a nil *resolved.Resolvectl
+// Explicit for the reason routerOrNil and proberOrNil are: a nil *resolved.System
 // assigned straight to an interface is a non-nil interface holding a nil pointer, so the
 // reconciler's own nil check would pass and every reconcile would call a method on nothing.
 //
