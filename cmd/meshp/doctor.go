@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"flag"
 	"fmt"
 	"time"
@@ -84,6 +85,23 @@ type findings struct {
 // and the thing that would undo it is not running.
 func (f findings) strandedEgress() bool { return (f.locked || f.claimed) && !f.daemonUp }
 
+
+
+
+func startMeshpdCommand() string {
+	if runtime.GOOS == "linux" {
+		return "sudo systemctl start meshpd"
+	}
+	return "start meshpd however this system starts services"
+}
+
+func startMeshpdHint() string {
+	if runtime.GOOS == "linux" {
+		return "Start it with 'sudo systemctl start meshpd'."
+	}
+	return "Start meshpd however this system starts services."
+}
+
 func report(f findings, socket string) {
 	switch {
 	case f.strandedEgress():
@@ -96,7 +114,7 @@ func report(f findings, socket string) {
 		fmt.Println()
 		fmt.Println("Starting meshpd again removes it:")
 		fmt.Println()
-		fmt.Println("    sudo systemctl start meshpd")
+		fmt.Println("    " + startMeshpdCommand())
 		fmt.Println()
 		fmt.Println("If meshpd will not start, undo it by hand:")
 		fmt.Println()
@@ -144,7 +162,7 @@ func report(f findings, socket string) {
 		fmt.Printf("  socket   %s\n", socket)
 		fmt.Println()
 		fmt.Println("Whatever is wrong with this machine's network, meshp is not the")
-		fmt.Println("cause. Start it with 'sudo systemctl start meshpd'.")
+		fmt.Println("cause. " + startMeshpdHint())
 
 	case !f.enrolled:
 		fmt.Println("meshpd is running and this device has not joined a network.")
