@@ -63,9 +63,10 @@ name layer resolves to the mapped address (ADR-0020), so a technician reaches bo
 than reaching whichever membership was written last.
 
 What does not, and matters: direct paths are unimplemented, so everything is relayed. The
-data plane is Linux on its own — **macOS brings a tunnel up and carries traffic, and does
-not configure DNS or fail closed on egress**; Windows and the mobile platforms enrol, hold
-an address, and report honestly that they have no tunnel and cannot filter.
+data plane is complete on Linux and nearly so on macOS — **a tunnel, and names that
+resolve; what macOS still cannot do is fail closed on egress**. Windows and the mobile
+platforms enrol, hold an address, and report honestly that they have no tunnel and cannot
+filter.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

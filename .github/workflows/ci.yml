@@ -643,10 +643,14 @@ jobs:
       # it, which means an unprivileged run would report success while testing nothing.
       # A skip is therefore a failure here, exactly as it is for the Linux job. -E keeps the
       # Go environment across sudo.
-      - name: a utun comes up, is configured through wgctrl, and is observed back
+      # resolved joins wglink here because it has the same shape of unknown: whether
+      # mDNSResponder collects a supplemental domain from a service key meshp invented, on a
+      # non-standard port, is not something that can be reasoned about — it either does or
+      # it does not, and only a real macOS can say.
+      - name: a utun comes up and is observed back, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ -count=1 -v 2>&1 | tee dataplane-macos.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ -count=1 -v 2>&1 | tee dataplane-macos.log
 
       - name: report, and refuse a silent skip
         if: always()

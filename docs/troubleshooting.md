@@ -76,9 +76,13 @@ no tunnel rather than pretending.
 On macOS there **is** a tunnel, and `meshp status` reports its kind as `userspace` — macOS
 has no WireGuard in the kernel, so wireguard-go moves the packets. Expect lower throughput
 and higher CPU than the same host would manage on Linux; that is the platform, not a fault.
-What macOS still does not have is DNS configuration and fail-closed egress, so a name will
-not resolve and a full-tunnel group will be reported unhonoured rather than silently
-half-applied.
+Names resolve on macOS too: the agent writes a supplemental match domain into the
+SystemConfiguration store, so only this network's suffix comes to meshp and everything else
+keeps going wherever it was already going. `scutil --dns` shows it as a resolver with a
+`domain` and a high `order`, which is the thing to look at when a mesh name does not answer.
+
+What macOS still does not have is fail-closed egress, so a full-tunnel group is reported
+unhonoured rather than silently half-applied.
 
 On Linux, check that the kernel can make WireGuard interfaces at all:
 

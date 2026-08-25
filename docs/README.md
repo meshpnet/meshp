@@ -31,9 +31,9 @@ Two worth starting with:
   tunnel drops, and why that is worth the support tickets.
 
 And the honest one: the [status section of the README](../README.md#status) says what does
-not work. The data plane is complete on Linux and partial on macOS — a tunnel, and neither
-DNS nor fail-closed egress — and absent elsewhere; nothing discovers direct paths yet. If
-you need something that works this afternoon, the README names three projects that will
+not work. The data plane is complete on Linux and nearly so on macOS — a tunnel and working
+names, but no fail-closed egress — and absent elsewhere; nothing discovers direct paths yet.
+If you need something that works this afternoon, the README names three projects that will
 serve you better today.
 
 ## A note on what these pages claim

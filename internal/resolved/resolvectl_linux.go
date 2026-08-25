@@ -21,8 +21,8 @@ import (
 // important thing it does.
 const callTimeout = 10 * time.Second
 
-// Resolvectl configures systemd-resolved.
-type Resolvectl struct{ path string }
+// System configures systemd-resolved.
+type System struct{ path string }
 
 // New returns a configurer for this host, or nil where systemd-resolved is not the thing
 // answering names.
@@ -35,7 +35,7 @@ type Resolvectl struct{ path string }
 // can have resolvectl and no systemd-resolved to talk to, which fails later and looks like a
 // meshp fault. This asks resolved for its status, which needs the same bus access that
 // configuring a link does.
-func New(ctx context.Context) *Resolvectl {
+func New(ctx context.Context) *System {
 	path, err := exec.LookPath("resolvectl")
 	if err != nil {
 		return nil
@@ -45,7 +45,7 @@ func New(ctx context.Context) *Resolvectl {
 	if err := exec.CommandContext(ctx, path, "status").Run(); err != nil {
 		return nil
 	}
-	return &Resolvectl{path: path}
+	return &System{path: path}
 }
 
 // Configure points one interface's queries for these domains at the agent's resolver.
@@ -58,7 +58,7 @@ func New(ctx context.Context) *Resolvectl {
 //
 // Idempotent because the reconciler calls it on every pass. resolvectl replaces a link's
 // configuration rather than appending to it, so the second call is a no-op in effect.
-func (r *Resolvectl) Configure(ctx context.Context, iface string, server netip.AddrPort, domains []string) error {
+func (r *System) Configure(ctx context.Context, iface string, server netip.AddrPort, domains []string) error {
 	if len(domains) == 0 {
 		// Nothing to route here. Reverting rather than configuring an empty set: a link
 		// left pointing at this resolver with no domains would still be consulted for
@@ -92,7 +92,7 @@ func (r *Resolvectl) Configure(ctx context.Context, iface string, server netip.A
 // The reason this package exists rather than one that edits resolv.conf: there is a real
 // undo, so the agent can take its configuration off without holding a copy of somebody
 // else's and hoping it is still current (Invariant 20).
-func (r *Resolvectl) Revert(ctx context.Context, iface string) error {
+func (r *System) Revert(ctx context.Context, iface string) error {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	if out, err := r.run(ctx, "revert", iface); err != nil {
@@ -102,7 +102,7 @@ func (r *Resolvectl) Revert(ctx context.Context, iface string) error {
 }
 
 // run invokes resolvectl and returns its output, bounded, for the error message.
-func (r *Resolvectl) run(ctx context.Context, args ...string) (string, error) {
+func (r *System) run(ctx context.Context, args ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, r.path, args...).CombinedOutput()
 	return logx.Safe(strings.TrimSpace(string(out))), err
 }
