@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meshpnet/meshp/internal/nftables"
+	"github.com/meshpnet/meshp/internal/egresslock"
 	"github.com/meshpnet/meshp/internal/wglink"
 )
 
@@ -38,13 +38,23 @@ func capture(t *testing.T, f findings) string {
 func TestAStrandedMachineIsToldHowToFixItByHand(t *testing.T) {
 	out := capture(t, findings{locked: true, claimed: true})
 
-	for _, want := range []struct{ text, why string }{
-		{"nft delete table inet " + nftables.LockTableName,
-			"the exact command, because there is no way to search for it"},
-		{"systemctl start meshpd", "the thing to try first, which fixes it without root surgery"},
-	} {
-		if !strings.Contains(out, want.text) {
-			t.Errorf("missing %q\n  needed because: %s\n\n%s", want.text, want.why, out)
+	if !strings.Contains(out, "systemctl start meshpd") {
+		t.Errorf("missing %q\n  needed because: it is the thing to try first, which fixes "+
+			"it without root surgery\n\n%s", "systemctl start meshpd", out)
+	}
+
+	// The firewall half, asked of the platform that would have installed it. This used to
+	// assert the nftables command as a literal and passed on macOS only because macOS had no
+	// lock to print — the moment it grew one, the literal would have been a test asserting
+	// that a Mac is told to run `nft`.
+	lock := egresslock.Undo()
+	if len(lock) == 0 {
+		t.Fatal("this platform can refuse egress and offers no way to undo it by hand")
+	}
+	for _, command := range lock {
+		if !strings.Contains(out, command) {
+			t.Errorf("missing %q\n  needed because: it is the exact command, and there is "+
+				"no way to search for it\n\n%s", command, out)
 		}
 	}
 
@@ -73,13 +83,17 @@ func TestAStrandedMachineIsToldHowToFixItByHand(t *testing.T) {
 // there teaches them the output is guesswork, and the next instruction gets ignored too.
 func TestOnlyTheRelevantUndoIsOffered(t *testing.T) {
 	lockOnly := capture(t, findings{locked: true})
-	if strings.Contains(lockOnly, "ip rule del") {
-		t.Errorf("offered to remove routing rules that are not installed:\n%s", lockOnly)
+	for _, command := range wglink.EgressUndo() {
+		if strings.Contains(lockOnly, command) {
+			t.Errorf("offered to undo routing that is not claimed: %q\n%s", command, lockOnly)
+		}
 	}
 
 	routeOnly := capture(t, findings{claimed: true})
-	if strings.Contains(routeOnly, "nft delete table") {
-		t.Errorf("offered to remove a firewall table that is not installed:\n%s", routeOnly)
+	for _, command := range egresslock.Undo() {
+		if strings.Contains(routeOnly, command) {
+			t.Errorf("offered to remove a lock that is not installed: %q\n%s", command, routeOnly)
+		}
 	}
 }
 
@@ -93,8 +107,11 @@ func TestAWorkingFullTunnelIsNotAFault(t *testing.T) {
 	}
 
 	out := capture(t, f)
-	if strings.Contains(out, "nft delete table") {
-		t.Errorf("a healthy machine was told to tear down its own protection:\n%s", out)
+	for _, command := range egresslock.Undo() {
+		if strings.Contains(out, command) {
+			t.Errorf("a healthy machine was told to tear down its own protection: %q\n%s",
+				command, out)
+		}
 	}
 	if !strings.Contains(out, "on purpose") {
 		t.Errorf("the output does not explain that the refusal is deliberate:\n%s", out)
@@ -119,8 +136,10 @@ func TestAnIdleMachineSaysMeshpIsNotTheCause(t *testing.T) {
 	if !strings.Contains(out, "not blocking anything") {
 		t.Errorf("a machine meshp is not touching was not told so:\n%s", out)
 	}
-	if strings.Contains(out, "nft delete") {
-		t.Errorf("offered surgery on a machine with nothing installed:\n%s", out)
+	for _, command := range egresslock.Undo() {
+		if strings.Contains(out, command) {
+			t.Errorf("offered surgery on a machine with nothing installed: %q\n%s", command, out)
+		}
 	}
 }
 

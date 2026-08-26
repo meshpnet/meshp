@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
-	"github.com/meshpnet/meshp/internal/nftables"
+	"github.com/meshpnet/meshp/internal/egresslock"
 	"github.com/meshpnet/meshp/internal/wglink"
 )
 
@@ -38,7 +38,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	// The kernel first, and deliberately before the daemon. What is refusing this machine's
 	// traffic is in the kernel whether or not anything is running, and the case that brought
 	// someone here is usually the one where nothing is.
-	f.locked = nftables.LockHeld(ctx)
+	f.locked = egresslock.Held(ctx)
 	f.claimed, _ = wglink.EgressHeld()
 
 	// A short timeout: an unresponsive daemon should not make the one command that explains
@@ -101,7 +101,12 @@ func report(f findings, socket string) {
 		fmt.Println("If meshpd will not start, undo it by hand:")
 		fmt.Println()
 		if f.locked {
-			fmt.Printf("    sudo nft delete table inet %s\n", nftables.LockTableName)
+			// From the platform that installed it, for the reason the routing half below
+			// gives. Until macOS grew a lock of its own this said `nft delete table` on
+			// every operating system, which is the #156 mistake with a different command.
+			for _, command := range egresslock.Undo() {
+				fmt.Printf("    %s\n", command)
+			}
 		}
 		if f.claimed {
 			// From the platform that made the claim, not written here. A command for the

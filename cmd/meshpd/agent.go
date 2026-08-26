@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/meshpnet/meshp/internal/agentstate"
 	"github.com/meshpnet/meshp/internal/controlurl"
 	"github.com/meshpnet/meshp/internal/dns"
+	"github.com/meshpnet/meshp/internal/egresslock"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
 	"github.com/meshpnet/meshp/internal/nftables"
@@ -64,6 +66,13 @@ type agent struct {
 	// apply (ADR-0007).
 	filterOnce sync.Once
 	filter     *nftables.Filter
+
+	// lock refuses egress outside the tunnel, opened once and shared. Its own field rather
+	// than the filter's, because since #167 they are separate capabilities and macOS has
+	// this one without the other: nftables enforces both on Linux, and on macOS the filter
+	// is nil while pf holds the lock (ADR-0026).
+	lockOnce sync.Once
+	lock     egresslock.Lock
 
 	// claims is what every membership on this device says it carries, shared so that two
 	// networks asking for the same customer prefix can each see the other. One device can
@@ -130,7 +139,7 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 	}, relay, a.filterOrNil(), log).
 		WithChooser(chooser).
 		WithEgress(routerOrNil()).
-		WithLock(a.lockOrNil()).
+		WithLock(a.ensureLock()).
 		WithProber(proberOrNil()).
 		WithClaims(a.claims).
 		WithNames(a.zones).
@@ -214,21 +223,21 @@ func (a *agent) reclaimEgressLock() {
 		}
 	}
 
-	filter := a.ensureFilter()
-	if filter == nil || !nftables.LockHeld(a.ctx) {
+	lock := a.ensureLock()
+	if lock == nil || !egresslock.Held(a.ctx) {
 		return
 	}
 
 	a.log.Warn("found a fail-closed lock from a previous run; this device had no egress",
-		"table", nftables.LockTableName,
 		"cause", "meshpd exited or was killed while a default route was claimed")
-	if err := filter.ApplyLock(a.ctx, "", nil, nil, false); err != nil {
+	if err := lock.ApplyLock(a.ctx, "", nil, nil, false); err != nil {
 		// The worst outcome this project has: a machine with no network and no obvious
 		// cause. Say what it is and how to undo it by hand, because whoever reads this is
-		// at a console on a host that cannot reach anything.
+		// at a console on a host that cannot reach anything — and from the platform that
+		// installed it, because a command for the wrong operating system is worse than none.
 		a.log.Error("could not remove it; this device still has no egress",
 			"error", err,
-			"fix", "run: nft delete table inet "+nftables.LockTableName)
+			"fix", strings.Join(egresslock.Undo(), " && "))
 		return
 	}
 	a.log.Info("removed it; egress is restored")
@@ -251,20 +260,27 @@ func (a *agent) ensureFilter() *nftables.Filter {
 	return a.filter
 }
 
-// lockOrNil converts a possibly-absent lock into the interface.
+// ensureLock opens the host's fail-closed lock, once.
 //
-// The same object as the filter on Linux, and the same trap: a nil *nftables.Filter assigned
-// straight to an interface is a non-nil interface holding a nil pointer, so the reconciler's
-// `r.lock == nil` check would pass and a host with no packet filter would report that it
-// fails closed.
+// Asked of internal/egresslock rather than assembled here, because the answer is different
+// on every platform and this file is not platform code: on Linux the lock is the nftables
+// filter, on macOS it is a pf anchor and there is no filter at all. The nil-interface trap
+// is handled there — a nil concrete pointer put into an interface is a non-nil interface, so
+// the reconciler's `r.lock == nil` check would pass and a host with no way to refuse egress
+// would report that it fails closed.
 //
-// Its own function rather than reusing filterOrNil's result because the two stop being the
-// same thing on a platform that has one and not the other, which is what the split is for.
-func (a *agent) lockOrNil() tunnel.EgressLock {
-	if f := a.ensureFilter(); f != nil {
-		return f
-	}
-	return nil
+// Lazily, because it needs privileges to answer honestly and a daemon that refused to start
+// without them could not report why it has no lock.
+func (a *agent) ensureLock() egresslock.Lock {
+	a.lockOnce.Do(func() {
+		a.lock = egresslock.New(a.ctx)
+		if a.lock == nil {
+			a.log.Warn("this host cannot refuse egress outside the tunnel",
+				"os", runtime.GOOS,
+				"note", "networks that require fail-closed egress will report this device as unconverged")
+		}
+	})
+	return a.lock
 }
 
 // filterOrNil converts a possibly-absent filter into the interface.

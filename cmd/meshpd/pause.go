@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/agentstate"
-	"github.com/meshpnet/meshp/internal/nftables"
+	"github.com/meshpnet/meshp/internal/egresslock"
 	"github.com/meshpnet/meshp/internal/wglink"
 )
 
@@ -93,15 +94,16 @@ func (a *agent) releaseEgress() {
 		}
 	}
 
-	filter := a.ensureFilter()
-	if filter == nil || !nftables.LockHeld(a.ctx) {
+	lock := a.ensureLock()
+	if lock == nil || !egresslock.Held(a.ctx) {
 		return
 	}
-	if err := filter.ApplyLock(a.ctx, "", nil, nil, false); err != nil {
+	if err := lock.ApplyLock(a.ctx, "", nil, nil, false); err != nil {
 		// The worst outcome this project has: a machine with no network and no obvious
-		// cause. Whoever reads this is at a console on a host that cannot reach anything.
+		// cause. Whoever reads this is at a console on a host that cannot reach anything,
+		// so the command comes from the platform that installed the lock.
 		a.log.Error("could not remove the fail-closed lock; this device still has no egress",
-			"error", err, "fix", "run: nft delete table inet "+nftables.LockTableName)
+			"error", err, "fix", strings.Join(egresslock.Undo(), " && "))
 	}
 }
 
