@@ -4,6 +4,7 @@ package wglink
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 
 	"golang.org/x/net/route"
@@ -99,6 +100,13 @@ func addrOf(a route.Addr) netip.Addr {
 // Returns -1 for anything that is not a contiguous mask. A non-contiguous netmask is legal
 // in the routing socket's encoding and meaningless as a prefix length, so it is skipped
 // rather than rounded into something that would then be compared against a plan.
+//
+// net.IPMask.Size does both jobs and is used rather than counted by hand, which is how this
+// was written first and got wrong: the contiguity check rejected every mask whose length was
+// not a multiple of eight. A /24 passed and a /1 and a /12 did not, so Observe silently
+// dropped those routes and the reconciler could never withdraw one. Size returns a zero
+// length for a mask that is not contiguous, which is the same answer this needs and is
+// already correct.
 func maskBits(a route.Addr, want int) int {
 	var raw []byte
 	switch v := a.(type) {
@@ -113,27 +121,13 @@ func maskBits(a route.Addr, want int) int {
 		return -1
 	}
 
-	bits := 0
-	for i, b := range raw {
-		if b == 0xff {
-			bits += 8
-			continue
-		}
-		for mask := byte(0x80); mask != 0 && b&mask != 0; mask >>= 1 {
-			bits++
-		}
-		// Everything after the first non-full byte must be zero, or this is not a prefix.
-		for _, rest := range raw[i+1:] {
-			if rest != 0 {
-				return -1
-			}
-		}
-		if b&(b+1) != 0 {
-			return -1
-		}
-		break
+	ones, bits := net.IPMask(raw).Size()
+	if bits == 0 {
+		// Not contiguous. Size reports both as zero for those, and a zero length is
+		// otherwise a legitimate answer for a mask of all zeroes.
+		return -1
 	}
-	return bits
+	return ones
 }
 
 // isLocalRoute reports whether a route is the kernel's own entry for an interface address.

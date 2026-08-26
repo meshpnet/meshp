@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os/exec"
 	"sync"
@@ -109,7 +110,12 @@ func (r *Router) Claim(iface string, endpoints []netip.AddrPort, excluded []neti
 		r.viaLocal = append(r.viaLocal, prefix)
 	}
 
-	for _, prefix := range append(append([]netip.Prefix{}, egressHalves...), egressHalves6...) {
+	halves, err := halvesFor(iface)
+	if err != nil {
+		_ = r.releaseLocked()
+		return err
+	}
+	for _, prefix := range halves {
 		if err := addRoute(prefix, "-interface", iface); err != nil {
 			_ = r.releaseLocked()
 			return fmt.Errorf("wglink: claiming %s: %w", prefix, err)
@@ -117,6 +123,47 @@ func (r *Router) Claim(iface string, endpoints []netip.AddrPort, excluded []neti
 		r.claimed = append(r.claimed, prefix)
 	}
 	return nil
+}
+
+// halvesFor is the halves to claim, for the address families this tunnel actually carries.
+//
+// Not both unconditionally, which is what this did first. A network with no IPv6 address
+// pool gives its devices a tunnel with no IPv6 address, and routing ::/1 into an interface
+// that cannot carry it fails — so the whole claim failed, and a full tunnel never worked on
+// an IPv4-only network. Claiming a family the tunnel has no address for would be wrong even
+// if the kernel allowed it: it would take the machine's IPv6 traffic and drop it.
+func halvesFor(iface string) ([]netip.Prefix, error) {
+	device, err := net.InterfaceByName(iface)
+	if err != nil {
+		return nil, fmt.Errorf("wglink: reading %s: %w", iface, err)
+	}
+	addrs, err := interfaceAddresses(device)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []netip.Prefix
+	for _, addr := range addrs {
+		switch {
+		case addr.Addr().Is4() && !hasFamily(out, true):
+			out = append(out, egressHalves...)
+		case addr.Addr().Is6() && !hasFamily(out, false):
+			out = append(out, egressHalves6...)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("wglink: %s has no addresses, so there is nothing to route into it", iface)
+	}
+	return out, nil
+}
+
+func hasFamily(prefixes []netip.Prefix, v4 bool) bool {
+	for _, prefix := range prefixes {
+		if prefix.Addr().Is4() == v4 {
+			return true
+		}
+	}
+	return false
 }
 
 // Release gives the routing back by removing exactly what was added.

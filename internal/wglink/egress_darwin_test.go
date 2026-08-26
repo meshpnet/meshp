@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"testing"
 
+	"golang.org/x/net/route"
+
 	"github.com/meshpnet/meshp/internal/wgplan"
 )
 
@@ -109,6 +111,15 @@ func TestClaimingAndReleasingTheDefaultRoute(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Apply(iface, opDestroy()) })
 
+	// Addressed, because a real claim is only ever made on a tunnel that has one — and
+	// because Claim now decides which address families to take from what the interface
+	// actually carries. A bare utun was not a realistic fixture and hid that.
+	if err := l.Apply(iface, wgplan.Op{
+		Kind: wgplan.AddAddress, Prefix: netip.MustParsePrefix("100.90.77.1/32"),
+	}); err != nil {
+		t.Fatalf("addressing the interface: %v", err)
+	}
+
 	real, ok, err := l.(*darwinLink).resolve(iface)
 	if err != nil || !ok {
 		t.Fatalf("resolving the interface: %v", err)
@@ -160,5 +171,40 @@ func TestClaimingAndReleasingTheDefaultRoute(t *testing.T) {
 		} else if present {
 			t.Errorf("%s is still in the table after releasing", half)
 		}
+	}
+}
+
+// A netmask is read correctly whatever its length.
+//
+// Written after the round-trip test failed with "0.0.0.0/1 is not in the table after
+// claiming" — the routes were there and the reader could not see them. The contiguity check
+// rejected every mask whose length was not a multiple of eight, so a /24 was found and a /1
+// and a /12 were not.
+//
+// That is not only this file's problem: interfaceRoutes uses the same parsing for Observe,
+// so a route with a length like /12 was invisible to the reconciler and could never be
+// withdrawn. Pinned here because the failure looks like "the route was not added" and is
+// nothing of the sort.
+func TestNetmasksOfEveryLengthAreRead(t *testing.T) {
+	for _, tc := range []struct {
+		mask [4]byte
+		want int
+	}{
+		{[4]byte{0x00, 0, 0, 0}, 0},
+		{[4]byte{0x80, 0, 0, 0}, 1}, // the halves this file claims with
+		{[4]byte{0xff, 0xf0, 0, 0}, 12},
+		{[4]byte{0xff, 0xff, 0xff, 0}, 24},
+		{[4]byte{0xff, 0xff, 0xff, 0xff}, 32},
+	} {
+		addr := &route.Inet4Addr{IP: tc.mask}
+		if got := maskBits(addr, 32); got != tc.want {
+			t.Errorf("maskBits(%v) = %d, want %d", tc.mask, got, tc.want)
+		}
+	}
+
+	// And a mask that is not contiguous is refused rather than rounded into a length it
+	// does not have.
+	if got := maskBits(&route.Inet4Addr{IP: [4]byte{0xff, 0x0f, 0, 0}}, 32); got != -1 {
+		t.Errorf("a non-contiguous mask read as /%d", got)
 	}
 }
