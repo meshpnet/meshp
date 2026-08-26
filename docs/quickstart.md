@@ -8,7 +8,7 @@ deployment — it runs the control plane over plaintext on loopback and uses a t
 database. [Self-hosting](self-hosting.md) is the version you would put in front of real
 devices.
 
-Every command on this page has been run. Steps 1 to 6 were executed exactly as written
+Every command on this page has been run. Steps 1 to 5 were executed exactly as written
 against a fresh checkout; the tunnel coming up is covered by `make e2e-tunnel` in CI, on
 Linux, because that is the only place it can be. If something here does not work, that is a
 bug and worth an issue.
@@ -31,29 +31,17 @@ cd meshp
 cp .env.example .env
 ```
 
-Two secrets. `MESHP_SECRET_KEY` is required — the control plane refuses to start without
-it. `MESHP_ADMIN_TOKEN` is the **bootstrap secret**: it exists to create the first account
-on a deployment that has none, and to get back into one that has locked itself out. It is
-used twice on this page and then not again.
+One secret. `MESHP_SECRET_KEY` is what enrolment challenges and session signatures are
+derived from, and the control plane refuses to start without it.
 
 ```bash
-export MESHP_BOOTSTRAP="$(openssl rand -base64 32)"
-{
-  echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)"
-  echo "MESHP_ADMIN_TOKEN=$MESHP_BOOTSTRAP"
-} >> .env
+echo "MESHP_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 ```
 
-Kept in a shell variable as well as written to the file, because steps 2 and 3 use it.
-Reading it back out of `.env` is the obvious thing and it does not work: the example file
-already declares both keys empty, so appending leaves two lines with the same name.
-Compose takes the last one and is fine; a `grep`-and-`cut` takes both, and the resulting
-`Authorization` header has a newline in the middle of it — which the server rejects as a
-malformed request, with no hint that the token was the problem.
-
-It is called `MESHP_BOOTSTRAP` in the shell here to keep it visible that this is not the
-credential you will be using. A shared secret that can do everything, with no identity
-behind it, is the thing accounts exist to replace (ADR-0024).
+You may have seen `MESHP_ADMIN_TOKEN` mentioned elsewhere. It is a shared secret that can do
+everything, it exists so a deployment with no accounts has a way back in, and **this page
+does not use it**. Leave it unset until you want that way back in; [self-hosting](self-hosting.md)
+says what it is for.
 
 ```bash
 docker compose up -d
@@ -67,84 +55,42 @@ until curl -fsS http://localhost:8080/readyz >/dev/null 2>&1; do sleep 1; done
 echo "control plane is ready"
 ```
 
-## 2. Make an organisation and give yourself an account
+## 2. Give yourself an account
 
-Both with the bootstrap secret, because there is nobody yet who could do it otherwise.
-This is the whole of what that secret is for.
-
-An organisation is the tenant a network belongs to. The slug is what appears in URLs and
-in the page's network picker; the name is what people read.
+One command, against the database, before anything is serving:
 
 ```bash
-ORG=$(curl -fsS -X POST \
-  -H "Authorization: Bearer $MESHP_BOOTSTRAP" \
-  -H 'Content-Type: application/json' \
-  -d '{"slug":"acme","name":"Acme"}' \
-  http://localhost:8080/api/v1/organizations | jq -r .organization_id)
+docker compose run --rm control --bootstrap \
+  --organisation acme \
+  --email you@example.com \
+  --token-permissions organization.networks.create,organization.networks.read,network.read,network.enrollment_tokens.write
 ```
 
-Now an account for yourself. **The first person in an organisation becomes its owner** —
-somebody has to be able to grant a role, and on a fresh organisation there is nobody who
-can. Everybody you add afterwards is an administrator unless you say otherwise.
+It asks for a password twice — on the terminal, so it is never in your shell history — and
+prints three things:
+
+```
+organisation  acme
+account       you@example.com (owner)
+token         meshp_api_...
+```
+
+**The first person in an organisation becomes its owner**, because somebody has to be able
+to grant a role and on a fresh organisation there is nobody who can. Everybody you add later
+is an administrator unless you say otherwise.
+
+**The token is shown once.** It carries only the permissions you named above and never more
+than you hold at the time it is used, so demoting yourself later demotes it too. Keep it in
+the shell for the rest of this page:
 
 ```bash
-curl -fsS -X POST \
-  -H "Authorization: Bearer $MESHP_BOOTSTRAP" \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"you@example.com","name":"You","password":"a passphrase you will remember"}' \
-  "http://localhost:8080/api/v1/organizations/$ORG/users" | jq -r '.email + " is the " + .role'
+export MESHP_TOKEN=meshp_api_...   # the token printed above
 ```
 
-That is the last time the bootstrap secret appears on this page. From here on you are a
-person, and everything is done as you.
+Ask for no permissions and it mints none — say what a credential is for, or do without one.
+`GET /api/v1/permissions` lists what there is to choose from once you are signed in.
 
-## 3. Sign in and mint a token for your scripts
-
-Sign in, keeping the session cookie:
-
-```bash
-curl -fsS -c meshp-cookies.txt -o /dev/null -X POST \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"you@example.com","password":"a passphrase you will remember"}' \
-  http://localhost:8080/api/v1/ui/session
-```
-
-Then mint an API token. This is the credential the rest of this page uses, and the one to
-put in a script or a CI job: it belongs to you, it carries the permissions you name and
-never more than you hold, and it can be revoked on its own without touching your password.
-
-```bash
-MESHP_TOKEN=$(curl -fsS -b meshp-cookies.txt \
-  -H "Origin: http://localhost:8080" \
-  -H 'Content-Type: application/json' \
-  -X POST -d '{
-    "name": "quickstart",
-    "permissions": [
-      "organization.networks.create", "organization.networks.read",
-      "network.read", "network.devices.read", "network.enrollment_tokens.write"
-    ]
-  }' \
-  http://localhost:8080/api/v1/me/tokens | jq -r .token)
-
-echo "token: ${MESHP_TOKEN:0:18}..."
-```
-
-Three things about that request are worth a sentence each.
-
-**`Origin` is required**, and only for a cookie. Anything that changes something and
-authenticates with a session cookie has to say which site it came from — a browser always
-does, and `curl` has to be told. A request carrying a bearer token instead, like every
-other command on this page, needs no such header.
-
-**Permissions are named, not implied.** A credential minted without saying what it is for
-ends up being used for everything, and this is the one moment somebody is thinking about
-the question. `GET /api/v1/permissions` lists what there is to choose from.
-
-**The token is shown once.** The control plane stores only a hash, so if you lose it you
-mint another and revoke this one — which is `DELETE /api/v1/me/tokens/{id}`, and
-`GET /api/v1/me/tokens` lists what you have out.
-
-## 4. Make a network
+## 3. Make a network
 
 With your token now. Note that you do not name the organisation: a token acts within its
 owner's, and you belong to exactly one.
@@ -168,7 +114,7 @@ Pick addresses that do not collide with anything your devices already reach. `10
 sits inside the carrier-grade NAT range, which is unusual enough on a LAN to be a
 reasonable default and is what the rest of these docs assume.
 
-## 5. Mint an enrolment token
+## 4. Mint an enrolment token
 
 ```bash
 TOKEN=$(curl -fsS -X POST \
@@ -185,7 +131,7 @@ that has nothing yet, and it is spent on use. The prefixes tell them apart at a 
 
 It is single-use here and expires in ten minutes. Treat it like a password.
 
-## 6. Join a device
+## 5. Join a device
 
 Build the binaries, or install a release:
 
@@ -213,7 +159,7 @@ traffic goes.
 `meshp status` should show a live session and an applied state version that matches the
 network's. With one device there are no peers yet, which is correct rather than broken.
 
-## 7. Join a second device
+## 6. Join a second device
 
 Mint another token — tokens here are single-use, so the first one is spent:
 
@@ -262,19 +208,19 @@ device and the history panel below says who did it.
 Signing in needs TLS anywhere that is not loopback; `localhost` is the exception that keeps
 this quickstart working without a certificate.
 
-## What to do with the bootstrap secret
+## About that admin token you did not need
 
-Leave it configured, and stop using it.
+Nothing on this page used `MESHP_ADMIN_TOKEN`, and the deployment you just built has none.
 
-It is how you get back in if everybody forgets their password or the last owner leaves, and
-a self-hosted deployment has no support line to call — so removing it would mean the only
-recovery was editing the database by hand. What it should not be is the credential in your
-scripts: it has no identity, so the audit trail can only ever say "the bootstrap secret did
-this", and it cannot be scoped or revoked without locking out whatever else is using it.
+That is the point. It is a single shared secret that can do everything, with no identity —
+so the audit trail can only ever record that "the bootstrap secret" did something, and it
+cannot be scoped or revoked without locking out whatever else is using it.
 
-Once an account exists, every use of it is logged at warning level for exactly that reason.
-If you see that line, something is still reaching for the shared secret when it could be
-using an account.
+What it is still good for is getting back in when nobody can sign in: the last owner has
+left, or everybody has forgotten their password. A self-hosted deployment has no support
+line to call, and the alternative recovery is editing the database by hand. Set it if you
+want that, keep it where you keep a root password, and expect a warning in the log every
+time something uses it once accounts exist.
 
 ## Where to go next
 
