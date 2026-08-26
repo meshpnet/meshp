@@ -33,6 +33,8 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0022](0022-web-view-in-the-control-plane.md) | The web view ships inside the control plane and polls one snapshot |
 | [0023](0023-the-overview-says-what-is-wrong.md) | The overview says what is wrong, not only what is true |
 | [0024](0024-users-and-the-admin-token.md) | Local user accounts, scoped API tokens, and what becomes of the admin token |
+| [0025](0025-the-bus-is-postgresql.md) | The bus is PostgreSQL LISTEN/NOTIFY, not Redis |
+| [0026](0026-fail-closed-on-macos.md) | Fail-closed egress on macOS lives in a pf anchor under `com.apple` |
 
 ## Format
 
