@@ -73,6 +73,23 @@ func main() {
 		generateRelayKey = flag.Bool("generate-relay-key", false,
 			"print a new relay signing keypair and exit")
 
+		// Standing a deployment up: an organisation and the first account, against the
+		// database rather than over HTTP (#161). What it removes is not only typing —
+		// creating the first account over the API needs MESHP_ADMIN_TOKEN, so a deployment
+		// could not have an account without first having a shared secret that can do
+		// everything. With this it can.
+		doBootstrap = flag.Bool("bootstrap", false,
+			"create this deployment's organisation and first owner account, then exit")
+		bootstrapOrg = flag.String("organisation", "",
+			"with --bootstrap: the slug for the organisation your networks belong to")
+		bootstrapOrgName = flag.String("organisation-name", "",
+			"with --bootstrap: what people read; defaults to the slug")
+		bootstrapEmail = flag.String("email", "",
+			"with --bootstrap: the email address of the person who will own this deployment")
+		bootstrapToken = flag.String("token-permissions", "",
+			"with --bootstrap: comma-separated permissions for an API token to print; "+
+				"omitted mints none")
+
 		// Where this deployment's relays are, as id=host:port[,host:port];id=... Several
 		// addresses per relay because one port is not enough: the agent tries them in order,
 		// so the port most likely to get through belongs first.
@@ -110,6 +127,24 @@ func main() {
 	}
 
 	log := newLogger(*logLevel)
+
+	if *doBootstrap {
+		// Its own store, opened and closed here: this does not serve anything, and holding
+		// the pool open for a command that exits would be a connection nobody uses.
+		if err := runBootstrap(context.Background(), log, runConfig{
+			databaseURL: *databaseURL,
+			skipMigrate: *skipMigrate,
+		}, bootstrapOptions{
+			Organization:     *bootstrapOrg,
+			Name:             *bootstrapOrgName,
+			Email:            *bootstrapEmail,
+			TokenPermissions: splitPermissions(*bootstrapToken),
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "meshp-control:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Missing configuration is a mistake rather than a transient condition, so it
 	// fails now and loudly. An unreachable database is the opposite and is retried.

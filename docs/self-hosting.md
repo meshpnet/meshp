@@ -48,12 +48,22 @@ derived from. The control plane refuses to start without it. **Changing it inval
 outstanding challenge and session**, so agents reconnect — survivable, but not something to
 do casually.
 
-`MESHP_ADMIN_TOKEN` is the **bootstrap secret**, and it has exactly two jobs (ADR-0024 §5):
+`MESHP_ADMIN_TOKEN` is the **bootstrap secret**, and it now has exactly one job: getting you
+back in when nobody else can — the last owner has left, or everybody has forgotten their
+password — because a self-hosted deployment has no support line to call.
 
-- it creates the first account on a deployment that has none, which is the only way a fresh
-  deployment can have one;
-- it is how you get back in when nobody else can — the last owner left, everybody forgot
-  their password — because a self-hosted deployment has no support line to call.
+It used to have two. Creating the first account was the other, and `meshp-control
+--bootstrap` does that against the database instead, so **a deployment can run without ever
+setting this**:
+
+```bash
+meshp-control --bootstrap --organisation acme --email you@example.com
+```
+
+It asks for a password on the terminal, makes the first person an owner, and can print an
+API token if you name the permissions it should carry. It refuses to run on a deployment
+that already has accounts, and adopts an organisation that already exists rather than
+refusing.
 
 It is not the credential to run anything with. It is a single shared secret with no
 identity, so the audit trail can only ever record that "the bootstrap secret" did
