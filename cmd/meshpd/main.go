@@ -17,9 +17,16 @@
 //   - Everything it installs, it can remove. An agent crash or uninstall must never
 //     leave a host without networking (Invariant 20).
 //
-// Neither is exercised yet, because nothing here touches the network stack. What this
-// build does is hold sessions and record what it is told, which is what makes the
-// convergence machinery testable before there is anything to converge.
+// Both are exercised now, which they were not when this was written: meshpd creates
+// interfaces, configures the host's resolver, loads packet-filter rules and claims default
+// routes, and every one of those it can take back off — including after a kill, which is
+// what reclaimEgressLock is for.
+//
+// What is left in this package is the wiring between those things and the sessions that
+// drive them. That is why so much of it converts a possibly-absent implementation into an
+// interface: whether this host has a data plane, a dialer, a packet filter or a way to
+// configure names is a different answer on every platform, and saying "no" honestly is the
+// job (#165).
 package main
 
 import (

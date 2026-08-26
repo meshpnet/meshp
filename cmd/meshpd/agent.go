@@ -136,38 +136,21 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 		AddressV6:     m.AddressV6,
 		ListenPort:    m.ListenPort,
 		ControlURL:    m.ControlURL,
-	}, relay, a.filterOrNil(), log).
+	}, relay, filterOrNil(a.ensureFilter()), log).
 		WithChooser(chooser).
-		WithEgress(routerOrNil()).
+		WithEgress(routerOrNil(wglink.NewRouter())).
 		WithLock(a.ensureLock()).
-		WithProber(proberOrNil()).
+		WithProber(proberOrNil(pathprobe.NewDialer())).
 		WithClaims(a.claims).
 		WithNames(a.zones).
-		WithSystemResolver(a.systemResolverOrNil(), a.resolver.Addr)
+		WithSystemResolver(resolverOrNil(a.ensureSystemResolver()), a.resolver.Addr)
 }
 
-// proberOrNil converts a possibly-absent dialer into the interface.
-//
-// Explicit for the reason routerOrNil is, and it has bitten this project already: a nil
-// *pathprobe.BoundDialer assigned straight to an interface is a non-nil interface holding a
-// nil pointer, so the reconciler's `r.prober == nil` check would pass and every probe would
-// panic on a platform that has no dialer.
-func proberOrNil() tunnel.Prober {
-	if d := pathprobe.NewDialer(); d != nil {
-		return d
-	}
-	return nil
-}
-
-// systemResolverOrNil converts a possibly-absent resolver configurer into the interface.
-//
-// Explicit for the reason routerOrNil and proberOrNil are: a nil *resolved.System
-// assigned straight to an interface is a non-nil interface holding a nil pointer, so the
-// reconciler's own nil check would pass and every reconcile would call a method on nothing.
+// ensureSystemResolver opens the host's resolver configurer, once.
 //
 // Once, and lazily: it asks systemd-resolved for its status, which is a process spawn, and
 // doing that per membership per reconcile would be a spawn a minute for nothing.
-func (a *agent) systemResolverOrNil() tunnel.SystemResolver {
+func (a *agent) ensureSystemResolver() *resolved.System {
 	a.systemResolverOnce.Do(func() {
 		a.systemResolver = resolved.New(a.ctx)
 		if a.systemResolver == nil {
@@ -176,22 +159,7 @@ func (a *agent) systemResolverOrNil() tunnel.SystemResolver {
 				"hint", "meshp status reports the resolver address; addresses always work")
 		}
 	})
-	if a.systemResolver == nil {
-		return nil
-	}
 	return a.systemResolver
-}
-
-// routerOrNil converts a possibly-absent router into the interface.
-//
-// Explicit for the same reason relayOrNil and filterOrNil are: a nil *wglink.Router assigned
-// straight to an interface is a non-nil interface holding a nil pointer, so every downstream
-// nil check would pass and the reconciler would believe this host can claim a default route.
-func routerOrNil() tunnel.Egress {
-	if r := wglink.NewRouter(); r != nil {
-		return r
-	}
-	return nil
 }
 
 // reclaimEgressLock removes a fail-closed lock left behind by a previous life.
@@ -283,18 +251,6 @@ func (a *agent) ensureLock() egresslock.Lock {
 	return a.lock
 }
 
-// filterOrNil converts a possibly-absent filter into the interface.
-//
-// Explicit for the same reason relayOrNil is: a nil *nftables.Filter assigned straight to
-// an interface is a non-nil interface holding a nil pointer, so every downstream nil check
-// would pass and the reconciler would believe it can enforce.
-func (a *agent) filterOrNil() tunnel.Filter {
-	if f := a.ensureFilter(); f != nil {
-		return f
-	}
-	return nil
-}
-
 // relayFor returns this membership's relay attachment, or nil when there is no data plane
 // to carry relayed packets into.
 //
@@ -330,37 +286,6 @@ type sessionHandle struct {
 	applier *deviceApplier
 	relay   *relaylink.Link
 	started time.Time
-}
-
-// relayOrNil and relayCredentials convert a possibly-absent link into interfaces.
-//
-// Explicitly, because a nil *relaylink.Link assigned straight to an interface produces a
-// non-nil interface holding a nil pointer: every `if relay != nil` downstream would be true
-// and the first call would panic. Platforms with no data plane take exactly that path.
-// pathsOrNil hands over the reconciler as a path reporter, or nothing.
-//
-// A typed nil would satisfy the interface and be called, so the nil check has to happen
-// here rather than at the call site — the same trap the control plane's presence hook
-// documents.
-func pathsOrNil(r *tunnel.Reconciler) sessionclient.PathReports {
-	if r == nil {
-		return nil
-	}
-	return r
-}
-
-func relayOrNil(l *relaylink.Link) tunnel.Relay {
-	if l == nil {
-		return nil
-	}
-	return l
-}
-
-func relayCredentials(l *relaylink.Link) sessionclient.RelayCredentials {
-	if l == nil {
-		return nil
-	}
-	return l
 }
 
 // relayStatus renders a link for the status socket, or nothing when there is no link.

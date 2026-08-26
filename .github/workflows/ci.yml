@@ -663,6 +663,12 @@ jobs:
       # exists because a list plus a comment asking the next person to keep it in step is
       # how #156 came to be reported as passing while breaking a test on macOS.
       #
+      # cmd/meshpd is here because it now has tests to run. internal/platformcheck logged it
+      # for weeks — "decides something from the operating system and has no tests at all" —
+      # and naming it before there was anything to run would have failed the job rather than
+      # testing anything. Its tests touch nothing on the host: no interface, no packet
+      # filter, no resolver, and nothing that could take this runner off the network.
+      #
       # internal/pf carries one test that is not about meshp's code at all.
       # TestTheAnchorPointADR0026DependsOnIsStillThere asks this runner's macOS whether its
       # main pf ruleset still evaluates anchors nested under com.apple. Fail-closed egress on
@@ -673,12 +679,12 @@ jobs:
       - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-user.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-user.log
 
       - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-root.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-root.log
 
       # A test that skipped in both runs never ran anywhere, which reports success while
       # testing nothing. Checked by name rather than by counting skips, because each run is
