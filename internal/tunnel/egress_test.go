@@ -25,6 +25,10 @@ func withEgress(t *testing.T) (*Reconciler, *fakeFilter, *fakeEgress, *[]string)
 	m.ControlURL = "https://198.51.100.10:8443"
 	r := New(newFakeLink(), m, nil, filter, nil)
 	r.egress = router
+	// The same object as the filter, which is what a Linux host has. The split exists for
+	// the platform where they differ, and these tests are about the ordering between the
+	// lock and the route rather than about which object provides which.
+	r.lock = filter
 	return r, filter, router, order
 }
 
@@ -237,6 +241,7 @@ func TestPreventLeaksReachesTheLock(t *testing.T) {
 	m.ControlURL = "https://198.51.100.10:8443"
 	r := New(newFakeLink(), m, nil, filter, nil)
 	r.egress = router
+	r.lock = filter
 
 	state := peerset.New()
 	state.Apply(&meshpv1.StateDelta{
@@ -272,5 +277,66 @@ func TestLeakPreventionIsNotAssumed(t *testing.T) {
 	}
 	if filter.dnsLocked[0] {
 		t.Error("DNS was refused for a network that never asked for it")
+	}
+}
+
+// A host that can refuse traffic and cannot enforce a policy is a host that fails closed.
+//
+// The whole reason ApplyLock left Filter. macOS is about to be exactly this: it will have a
+// pf ruleset that can drop what does not go through the tunnel, and no implementation of
+// ACLs, forwarding or prefix mapping. Before the split it had to have both or neither, and
+// "neither" meant a laptop could not be given a full tunnel at all.
+//
+// What this asserts is that the two capabilities are now independent in the direction that
+// matters: the lock goes on, and nothing pretends a policy was enforced.
+func TestAHostWithALockAndNoFilterStillFailsClosed(t *testing.T) {
+	lock := &fakeFilter{}
+	router := &fakeEgress{}
+	m := membership()
+	m.ControlURL = "https://198.51.100.10:8443"
+
+	// No filter at all — the shape of a platform with no ACL implementation.
+	r := New(newFakeLink(), m, nil, nil, nil)
+	r.egress = router
+	r.lock = lock
+
+	if _, err := r.Apply(context.Background(), egressState(1)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(lock.dnsLocked) == 0 {
+		t.Fatal("a host with a lock and no filter did not install one, so it cannot fail closed")
+	}
+	if len(router.events) == 0 {
+		t.Error("the route was never claimed, so the lock is refusing everything for nothing")
+	}
+}
+
+// And the converse: a host that can enforce a policy and cannot refuse traffic does not
+// claim the route when the network asks devices to fail closed.
+//
+// This held before the split too, through `r.filter == nil`. It is asserted here because the
+// split moved which field decides it, and getting that wrong would mean a device claiming a
+// default route while quietly declining to enforce the property it was claimed for — which
+// is the dishonesty ADR-0011 is written against.
+func TestAHostWithAFilterAndNoLockWillNotClaim(t *testing.T) {
+	filter := &fakeFilter{}
+	router := &fakeEgress{}
+	m := membership()
+	m.ControlURL = "https://198.51.100.10:8443"
+
+	r := New(newFakeLink(), m, nil, filter, nil)
+	r.egress = router
+	// No lock.
+
+	if _, err := r.Apply(context.Background(), egressState(1)); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(router.events) != 0 {
+		t.Errorf("a host that cannot fail closed claimed the default route anyway: %v", router.events)
+	}
+	if len(filter.dnsLocked) != 0 {
+		t.Error("something installed a lock through the filter, which is no longer its job")
 	}
 }

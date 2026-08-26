@@ -130,6 +130,7 @@ func (a *agent) reconcilerFor(m agentstate.Membership, relay tunnel.Relay, choos
 	}, relay, a.filterOrNil(), log).
 		WithChooser(chooser).
 		WithEgress(routerOrNil()).
+		WithLock(a.lockOrNil()).
 		WithProber(proberOrNil()).
 		WithClaims(a.claims).
 		WithNames(a.zones).
@@ -248,6 +249,22 @@ func (a *agent) ensureFilter() *nftables.Filter {
 		}
 	})
 	return a.filter
+}
+
+// lockOrNil converts a possibly-absent lock into the interface.
+//
+// The same object as the filter on Linux, and the same trap: a nil *nftables.Filter assigned
+// straight to an interface is a non-nil interface holding a nil pointer, so the reconciler's
+// `r.lock == nil` check would pass and a host with no packet filter would report that it
+// fails closed.
+//
+// Its own function rather than reusing filterOrNil's result because the two stop being the
+// same thing on a platform that has one and not the other, which is what the split is for.
+func (a *agent) lockOrNil() tunnel.EgressLock {
+	if f := a.ensureFilter(); f != nil {
+		return f
+	}
+	return nil
 }
 
 // filterOrNil converts a possibly-absent filter into the interface.
