@@ -16,8 +16,8 @@ bug and worth an issue.
 ## What you need
 
 - Linux, with root. This page is written for Linux because that is where the data plane is
-  complete. macOS brings a tunnel up, carries traffic and resolves mesh names; what it
-  cannot yet do is fail closed on egress. Windows and the mobile platforms enrol, hold an
+  complete. macOS brings a tunnel up, carries traffic, resolves mesh names and can take a
+  full-tunnel default route; what it cannot yet do is fail closed on egress. Windows and the mobile platforms enrol, hold an
   address, and report honestly that they have no tunnel.
 - Docker with the Compose plugin, for the control plane and its database.
 - A kernel that can create WireGuard interfaces. `sudo ip link add dev wgcheck type

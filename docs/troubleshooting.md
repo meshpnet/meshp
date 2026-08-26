@@ -81,8 +81,18 @@ SystemConfiguration store, so only this network's suffix comes to meshp and ever
 keeps going wherever it was already going. `scutil --dns` shows it as a resolver with a
 `domain` and a high `order`, which is the thing to look at when a mesh name does not answer.
 
-What macOS still does not have is fail-closed egress, so a full-tunnel group is reported
-unhonoured rather than silently half-applied.
+macOS can also be given a full tunnel now. It has no policy routing, so the claim is made
+the way wg-quick(8) makes it on this platform: `0.0.0.0/1` and `128.0.0.0/1`, which beat any
+default route without replacing it, plus explicit routes keeping the control plane and the
+relays off the tunnel they carry.
+
+What macOS still does not have is **fail-closed egress**. A network whose policy says
+`fail_closed` is true reports the group unhonoured rather than claiming the route and
+quietly not enforcing it, so a macOS device can be given a full tunnel only where an
+administrator has said fail-closed is not required — and `meshp status` says so.
+
+If a macOS machine has lost its network and you suspect meshp, `sudo meshp doctor` prints
+the exact `route -n delete` commands to give it back. Those two routes are what a claim is.
 
 On Linux, check that the kernel can make WireGuard interfaces at all:
 

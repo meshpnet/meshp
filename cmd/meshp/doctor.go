@@ -104,8 +104,12 @@ func report(f findings, socket string) {
 			fmt.Printf("    sudo nft delete table inet %s\n", nftables.LockTableName)
 		}
 		if f.claimed {
-			fmt.Printf("    sudo ip rule del fwmark %#x\n", wglink.EgressMark)
-			fmt.Printf("    sudo ip route flush table %d\n", wglink.EgressTable)
+			// From the platform that made the claim, not written here. A command for the
+			// wrong operating system is worse than none, and whoever is reading this is at
+			// a console on a machine with no network.
+			for _, command := range wglink.EgressUndo() {
+				fmt.Printf("    %s\n", command)
+			}
 		}
 		fmt.Println()
 		fmt.Println("Starting meshpd and undoing it by hand both restore this machine's")

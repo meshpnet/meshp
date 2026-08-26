@@ -661,12 +661,12 @@ jobs:
       - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ -count=1 -v 2>&1 | tee macos-user.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-user.log
 
       - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ -count=1 -v 2>&1 | tee macos-root.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-root.log
 
       # A test that skipped in both runs never ran anywhere, which reports success while
       # testing nothing. Checked by name rather than by counting skips, because each run is

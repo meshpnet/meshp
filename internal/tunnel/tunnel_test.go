@@ -904,7 +904,7 @@ type fakeEgress struct {
 	order    *[]string
 }
 
-func (e *fakeEgress) Claim(iface string) error {
+func (e *fakeEgress) Claim(iface string, _ []netip.AddrPort, _ []netip.Prefix) error {
 	if e.claimErr != nil {
 		return e.claimErr
 	}

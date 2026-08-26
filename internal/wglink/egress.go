@@ -16,3 +16,16 @@ const (
 	EgressMark  uint32 = 0x6d657368 // "mesh"
 	EgressTable uint32 = 0x6d657368
 )
+
+// EgressUndo is the exact commands that remove a default-route claim by hand.
+//
+// Per platform, because the claim is: Linux installs a routing rule and a table, macOS
+// installs routes. Here rather than in `meshp doctor` for the reason the constants above are
+// here — the person reading that output is at a console on a machine with no network, and a
+// command for the wrong operating system is worse than none.
+//
+// That failure has a precedent in this repository: `meshp doctor` recommended `systemctl` on
+// every platform until #156, because the command was written where it was printed rather
+// than where it was decided. Adding a second implementation of the claim was the moment to
+// not repeat it.
+func EgressUndo() []string { return egressUndo() }
