@@ -63,9 +63,10 @@ name layer resolves to the mapped address (ADR-0020), so a technician reaches bo
 than reaching whichever membership was written last.
 
 What does not, and matters: direct paths are unimplemented, so everything is relayed. The
-data plane is complete on Linux and nearly so on macOS — **a tunnel, names that resolve and
-a full-tunnel default route; what macOS still cannot do is fail closed on egress**, so a
-network requiring it reports the group unhonoured there rather than half-applying it.
+data plane is complete on Linux and on macOS — **a tunnel, names that resolve, a full-tunnel
+default route and fail-closed egress**, the last of these through a pf anchor rather than
+nftables (ADR-0026). What macOS still cannot do is enforce a network's packet filter, so a
+network with a policy reports the group unhonoured there rather than half-applying it.
 Windows and the mobile platforms enrol, hold an address, and report honestly that they have
 no tunnel and cannot filter.
 

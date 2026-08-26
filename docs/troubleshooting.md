@@ -42,8 +42,10 @@ recovery is to tell the control plane to stop, not to reach for a console.
 
 ### Recovering one machine
 
-`meshp doctor` prints the commands. They remove what meshp installed and nothing else — the
-lock lives in its own nftables table so it can be found and removed on its own, by `meshp
+`meshp doctor` prints the commands, and it prints the ones for the machine it is running on:
+the lock is an nftables table on Linux and a pf anchor on macOS, and a command for the wrong
+operating system is worse than none to somebody at a console with no network. Either way it
+is meshp's own and nothing else's, so it can be found and removed on its own — by `meshp
 down`, by the agent finding it on start-up, or by a person with a console and no idea what
 meshp is.
 
@@ -86,13 +88,28 @@ the way wg-quick(8) makes it on this platform: `0.0.0.0/1` and `128.0.0.0/1`, wh
 default route without replacing it, plus explicit routes keeping the control plane and the
 relays off the tunnel they carry.
 
-What macOS still does not have is **fail-closed egress**. A network whose policy says
-`fail_closed` is true reports the group unhonoured rather than claiming the route and
-quietly not enforcing it, so a macOS device can be given a full tunnel only where an
-administrator has said fail-closed is not required — and `meshp status` says so.
+macOS fails closed too, through `pf` rather than nftables. The rules go in an anchor called
+`com.apple/meshp`, which looks impolite and is deliberate: the `/etc/pf.conf` macOS ships
+references exactly one anchor point, and an anchor of meshp's own would be loaded and never
+evaluated (ADR-0026). meshp never writes that file. It also does not turn the packet filter
+on and off outright — pf is enabled with a reference count, so meshp taking a reference
+cannot switch it off underneath the application firewall or another VPN.
+
+Before it trusts the lock, the agent checks that the main ruleset still evaluates what is
+nested under Apple's anchor. If a macOS release ever changes that arrangement, the device
+reports that it cannot fail closed rather than reporting a lock that is loaded and being
+ignored. So a macOS upgrade that turns fail-closed networks into unhonoured route groups is
+worth reporting; a silent leak is what the check is there to make impossible.
+
+To see the lock:
+
+```bash
+sudo pfctl -a com.apple/meshp -s rules -v
+```
 
 If a macOS machine has lost its network and you suspect meshp, `sudo meshp doctor` prints
-the exact `route -n delete` commands to give it back. Those two routes are what a claim is.
+the exact commands to give it back: `sudo pfctl -a com.apple/meshp -F rules` for the lock,
+and the `route -n delete` commands for the routing. Those two routes are what a claim is.
 
 On Linux, check that the kernel can make WireGuard interfaces at all:
 

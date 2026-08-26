@@ -590,10 +590,14 @@ jobs:
       # run in CI. They need root, so the unprivileged test job skips them, and this job did
       # not name the package. They gated nothing. Adding it also gates the mapping tests,
       # which are the only place two customers on 192.168.1.0/24 are proven distinguishable.
-      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, the host resolver, and two customers on one prefix
+      # egresslock is here so its one real assertion has somewhere to run on this platform:
+      # it checks that the command `meshp doctor` tells a stranded person to type names a
+      # program this machine actually has, and every other Linux job would skip it for want
+      # of nftables.
+      - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, the host resolver, two customers on one prefix, and an undo that names a real program
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ ./internal/egresslock/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip
@@ -658,15 +662,23 @@ jobs:
       # platform, starts being required — and fails if this line falls behind. That test
       # exists because a list plus a comment asking the next person to keep it in step is
       # how #156 came to be reported as passing while breaking a test on macOS.
+      #
+      # internal/pf carries one test that is not about meshp's code at all.
+      # TestTheAnchorPointADR0026DependsOnIsStillThere asks this runner's macOS whether its
+      # main pf ruleset still evaluates anchors nested under com.apple. Fail-closed egress on
+      # this platform depends on that arrangement, and ADR-0026 accepts the risk that a
+      # release changes it. If that test fails, macOS has changed and meshp cannot fail
+      # closed here until somebody looks — it is not a flake and it is not the test being
+      # wrong.
       - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-user.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-user.log
 
       - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-root.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ -count=1 -v 2>&1 | tee macos-root.log
 
       # A test that skipped in both runs never ran anywhere, which reports success while
       # testing nothing. Checked by name rather than by counting skips, because each run is
