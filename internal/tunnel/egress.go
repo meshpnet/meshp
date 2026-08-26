@@ -35,13 +35,13 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 			"hint", "a full tunnel needs policy routing, which this host does not have")
 		return []string{"egress"}
 	}
-	if failClosed && r.filter == nil {
+	if failClosed && r.lock == nil {
 		// Refused rather than downgraded. An administrator asking for fail-closed is asking
 		// for the property that traffic never leaves outside the tunnel, and a device that
 		// claimed the route while quietly declining to enforce it would report the property
 		// and not have it — which is the dishonesty ADR-0011 is written against.
 		r.log.Error("this network asks devices to fail closed and this host cannot",
-			"hint", "fail-closed egress needs a packet filter, and this host has none")
+			"hint", "fail-closed egress needs a way to refuse traffic, and this host has none")
 		return []string{"egress"}
 	}
 
@@ -64,7 +64,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 	}
 
 	if failClosed {
-		if err := r.filter.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes, preventDNSLeaks); err != nil {
+		if err := r.lock.ApplyLock(ctx, iface, carve.Endpoints, carve.Prefixes, preventDNSLeaks); err != nil {
 			r.log.Error("cannot refuse egress outside the tunnel; not claiming a default route",
 				"error", logx.SafeError(err))
 			return []string{"egress"}
@@ -109,8 +109,8 @@ func (r *Reconciler) releaseEgress(ctx context.Context) {
 	// The lock comes off even when the routing did not, and its error is kept only if
 	// nothing else failed first. Leaving a lock behind because a route would not release is
 	// how a device ends up refusing everything with no explanation.
-	if r.filter != nil {
-		if err := r.filter.ApplyLock(ctx, "", nil, nil, false); err != nil && failed == nil {
+	if r.lock != nil {
+		if err := r.lock.ApplyLock(ctx, "", nil, nil, false); err != nil && failed == nil {
 			failed = err
 		}
 	}

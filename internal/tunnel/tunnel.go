@@ -103,6 +103,10 @@ type Reconciler struct {
 	// about it (ADR-0007); what it must not do is accept a policy and ignore it.
 	filter Filter
 
+	// lock refuses egress outside the tunnel, or is nil where this host cannot. Separate
+	// from filter because a platform can have one and not the other — see EgressLock.
+	lock EgressLock
+
 	// lastFilter is what was last successfully loaded, kept so an unchanged policy is not
 	// reloaded on every reconcile. Reloading is atomic and cheap, but it resets the drop
 	// counters an operator is reading.
@@ -182,6 +186,25 @@ type Reconciler struct {
 	relayed map[string]bool
 }
 
+// EgressLock makes the host refuse traffic that does not go through the tunnel.
+//
+// Separate from Filter, which it was part of until macOS needed one without the other. They
+// are both "the packet filter" on Linux and one implementation satisfies both, but they
+// answer different questions and the reconciler has always treated them that way: a host
+// with no filter cannot enforce a *policy* and reports `filter` unapplied, while a host with
+// no lock cannot *fail closed* and reports `egress`. Those are separate capabilities with
+// separate consequences, and combining them meant a platform had to have both or neither.
+//
+// The alternative was a macOS implementation of Filter that did the lock and refused
+// everything else, which would have a device claim it can enforce a policy and then fail on
+// every one — the dishonesty ADR-0007 and ADR-0011 are written against.
+type EgressLock interface {
+	// ApplyLock makes the host refuse egress that does not go through the tunnel. An empty
+	// interface name removes it, which is the only way it comes off: these rules are system
+	// state and outlive the process on purpose (ADR-0011).
+	ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error
+}
+
 // Filter enforces a packet filter on this host.
 //
 // An interface so the reconciler can be tested without root, and so a platform with no
@@ -195,11 +218,6 @@ type Filter interface {
 	// list means stop: a device that has been withdrawn must not go on being a gateway
 	// nobody knows about.
 	ApplyForward(ctx context.Context, iface string, groups []*meshpv1.AdvertisedRoutes_Group) error
-
-	// ApplyLock makes the host refuse egress that does not go through the tunnel. An empty
-	// interface name removes it, which is the only way it comes off: these rules are system
-	// state and outlive the process on purpose (ADR-0011).
-	ApplyLock(ctx context.Context, iface string, endpoints []netip.AddrPort, excluded []netip.Prefix, preventDNSLeaks bool) error
 
 	// ApplyMap makes this host reach colliding prefixes at the ranges allocated for them.
 	// An empty map means nothing collides and must remove whatever was installed before,
@@ -274,6 +292,16 @@ func (r *Reconciler) WithClaims(c *Claims) *Reconciler {
 //
 // Nil is meaningful and is the ordinary case: most devices are not full-tunnel, and a host
 // that cannot claim one reports the group unhonoured rather than half-claiming it.
+// WithLock lets this reconciler make the host refuse traffic that leaves outside the tunnel.
+//
+// Nil means it cannot, and a network asking devices to fail closed is reported unhonoured
+// rather than claimed and not enforced (ADR-0011). On Linux this is the same object as the
+// filter; on a platform that has one and not the other it is not.
+func (r *Reconciler) WithLock(l EgressLock) *Reconciler {
+	r.lock = l
+	return r
+}
+
 func (r *Reconciler) WithEgress(e Egress) *Reconciler {
 	r.egress = e
 	return r
