@@ -223,10 +223,19 @@ type Filter interface {
 // which way is the right one. Nil where the platform cannot do it, in which case a device
 // asked for a default route reports the group unhonoured rather than half-claiming it.
 type Egress interface {
-	// Claim sends everything except the tunnel's own packets through the tunnel. Which
-	// packets are the tunnel's own, and how they are recognised, belongs to the
-	// implementation — this package has no business knowing about firewall marks.
-	Claim(iface string) error
+	// Claim sends everything except the tunnel's own packets through the tunnel.
+	//
+	// The carve-out is passed rather than left to the implementation, which it was until
+	// macOS needed it. Linux recognises the tunnel's own packets by a firewall mark and so
+	// needs nothing here; macOS has no equivalent, and keeps the tunnel reachable by
+	// routing its endpoints around the tunnel explicitly. Both are "how this platform knows
+	// which packets are its own", which is the implementation's business — but only one of
+	// them can work it out unaided.
+	//
+	// endpoints are the control plane and the relays; excluded is everything else that must
+	// stay off the tunnel. Losing either is how a device routes its own outer packets into
+	// its own tunnel and disappears.
+	Claim(iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error
 
 	// Release gives the routing back.
 	Release() error

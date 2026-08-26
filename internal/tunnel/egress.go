@@ -70,7 +70,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 			return []string{"egress"}
 		}
 	}
-	if err := r.egress.Claim(iface); err != nil {
+	if err := r.egress.Claim(iface, carve.Endpoints, carve.Prefixes); err != nil {
 		// The lock is on and the route is not, which is the safe half of a half-done claim:
 		// the device sends nothing rather than sending it the wrong way. Taking the lock off
 		// again would restore the leak it was installed to prevent, so it stays, the group is

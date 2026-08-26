@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,11 +41,25 @@ func TestAStrandedMachineIsToldHowToFixItByHand(t *testing.T) {
 	for _, want := range []struct{ text, why string }{
 		{"nft delete table inet " + nftables.LockTableName,
 			"the exact command, because there is no way to search for it"},
-		{"ip rule del fwmark", "the routing half, which the firewall command does not undo"},
 		{"systemctl start meshpd", "the thing to try first, which fixes it without root surgery"},
 	} {
 		if !strings.Contains(out, want.text) {
 			t.Errorf("missing %q\n  needed because: %s\n\n%s", want.text, want.why, out)
+		}
+	}
+
+	// The routing half, which the firewall command does not undo — asked of the platform
+	// that would have installed it rather than written out here. This used to assert the
+	// Linux commands and passed only because CI ran it on Linux; a second implementation of
+	// the claim made that a test whose result depended on where it ran.
+	undo := wglink.EgressUndo()
+	if len(undo) == 0 {
+		t.Fatal("this platform can claim a default route and offers no way to undo one by hand")
+	}
+	for _, command := range undo {
+		if !strings.Contains(out, command) {
+			t.Errorf("missing %q\n  needed because: it is how the routing half comes off\n\n%s",
+				command, out)
 		}
 	}
 
@@ -128,16 +143,33 @@ func TestOnlyAStrandedMachineIsAFault(t *testing.T) {
 	}
 }
 
-// The mark has to be printed the way `ip` expects it, or the command on the screen does not
-// work when typed — which is the only thing this command is for.
-func TestTheMarkIsPrintedAsIpExpectsIt(t *testing.T) {
+// Whatever this platform prints has to be typeable as it stands, because the only thing this
+// command is for is being read off a screen by somebody who cannot look anything up.
+//
+// On Linux that means the mark in the hex form `ip rule` takes and the table in the decimal
+// form `ip route` takes — the numbers are one value used two ways and each tool wants it
+// differently. Asserted through EgressUndo rather than against literals so that a platform
+// whose claim is made of routes rather than rules is checked as strictly.
+func TestTheUndoCommandsAreTypeableAsPrinted(t *testing.T) {
 	out := capture(t, findings{claimed: true})
 
-	if !strings.Contains(out, "fwmark 0x6d657368") {
-		t.Errorf("the mark is not in the hex form `ip rule` takes:\n%s", out)
+	for _, command := range wglink.EgressUndo() {
+		if !strings.Contains(out, command) {
+			t.Errorf("%q is not on the screen as it would be typed:\n%s", command, out)
+		}
+		if strings.Contains(command, "%!") {
+			t.Errorf("%q has a formatting error in it", command)
+		}
 	}
-	if !strings.Contains(out, "flush table 1835365224") {
-		t.Errorf("the table is not in the decimal form `ip route` takes:\n%s", out)
+	if runtime.GOOS == "linux" {
+		// The two forms one number takes, which is the part a change to either constant
+		// would silently get wrong.
+		if !strings.Contains(out, "fwmark 0x6d657368") {
+			t.Errorf("the mark is not in the hex form `ip rule` takes:\n%s", out)
+		}
+		if !strings.Contains(out, "flush table 1835365224") {
+			t.Errorf("the table is not in the decimal form `ip route` takes:\n%s", out)
+		}
 	}
 	// And the two agree, since one number is used for both by design.
 	if wglink.EgressMark != wglink.EgressTable {
