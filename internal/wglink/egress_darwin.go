@@ -300,42 +300,143 @@ func EgressHeld() (bool, error) {
 	return present, nil
 }
 
+// routeEnd is where the routing table currently sends a prefix.
+//
+// Either a gateway address or an interface name, because those are the two ways a route can
+// be written and route(8) takes them as different flags.
+type routeEnd struct {
+	present bool
+	gateway netip.Addr
+	iface   string
+}
+
+// goesTo reports whether this is already the route a claim is asking for.
+func (t routeEnd) goesTo(via []string) bool {
+	if !t.present || len(via) != 2 {
+		return false
+	}
+	switch via[0] {
+	case "-interface":
+		return t.iface != "" && t.iface == via[1]
+	case "-gateway":
+		want, err := netip.ParseAddr(via[1])
+		return err == nil && t.gateway.IsValid() && t.gateway == want.Unmap()
+	}
+	return false
+}
+
+// routeTarget asks the kernel where a prefix currently goes.
+func routeTarget(prefix netip.Prefix) (routeEnd, error) {
+	rib, err := route.FetchRIB(0, route.RIBTypeRoute, 0)
+	if err != nil {
+		return routeEnd{}, fmt.Errorf("reading the routing table: %w", err)
+	}
+	msgs, err := route.ParseRIB(route.RIBTypeRoute, rib)
+	if err != nil {
+		return routeEnd{}, fmt.Errorf("parsing the routing table: %w", err)
+	}
+	for _, msg := range msgs {
+		m, ok := msg.(*route.RouteMessage)
+		if !ok || len(m.Addrs) < 2 {
+			continue
+		}
+		if got, ok := prefixOf(m); !ok || got != prefix {
+			continue
+		}
+		if link, ok := m.Addrs[1].(*route.LinkAddr); ok {
+			return routeEnd{present: true, iface: linkName(link)}, nil
+		}
+		return routeEnd{present: true, gateway: addrOf(m.Addrs[1]).Unmap()}, nil
+	}
+	return routeEnd{}, nil
+}
+
+// linkName is what an interface route points at, by name.
+//
+// The routing socket may send the name or only the index, so the index is resolved when it
+// has to be. An interface that has gone away since the message was read has no name, and a
+// route pointing at one is not a route any claim is asking for.
+func linkName(link *route.LinkAddr) string {
+	if link.Name != "" {
+		return link.Name
+	}
+	if link.Index == 0 {
+		return ""
+	}
+	iface, err := net.InterfaceByIndex(link.Index)
+	if err != nil {
+		return ""
+	}
+	return iface.Name
+}
+
 // addRoute makes one route exist and point where it is asked to.
 //
 // Idempotent because the reconciler calls this every pass, and "already there" is the
 // ordinary case rather than an error. What matters is what "already there" is taken to mean.
 //
-// It used to mean success. route(8) reports an existing destination as "File exists" and
-// exits non-zero without touching the route, so a destination whose gateway had gone stale
-// stayed stale for as long as the claim lasted — and on this platform the carve-out keeping
-// the relay and the control plane off the tunnel is a set of host routes pinned to whatever
-// gateway was current when the claim was made. A laptop that moved to another network kept
-// sending them to a gateway that is not on it. With fail-closed egress in force that is a
-// machine with no way out at all, and the reconciler running every minute could not fix it,
-// because every pass was told the route it wanted was already there (#160).
+// It used to mean success, decided from what route(8) printed. That was wrong twice over.
+// route(8) does not modify an existing destination, so a route whose gateway had gone stale
+// stayed stale — and on this platform the carve-out keeping the relay and the control plane
+// off the tunnel is a set of host routes pinned to whatever gateway was current when the
+// claim was made. A laptop that moved to another network went on sending them to a gateway
+// that is not on it, and with fail-closed egress in force that is a machine with no way out
+// at all. The reconciler running every minute could not fix it, because every pass was told
+// the route it wanted was already there (#160).
 //
-// So an existing destination is corrected rather than accepted. `route change` does it in
-// place, which matters: deleting first would leave a window with no route at all, and for
-// the halves that window is one where traffic leaves outside the tunnel. Replacing is the
-// fallback for a route that cannot be changed in place, because a leak measured in
+// The second mistake was reading that from the command's output at all. The first attempt at
+// this fix branched on route(8) exiting non-zero with "File exists", which is what the old
+// comment here claimed it does, and the correction never ran — so the tests below still
+// found the stale route. What the kernel says is the only thing that cannot be misread, so
+// this asks the routing table before and after rather than trusting either the exit code or
+// the message.
+//
+// Changing in place is preferred to replacing: deleting first leaves a window with no route
+// at all, and for the halves that window is one where traffic leaves outside the tunnel.
+// Replacing is the fallback for a route that cannot be changed, because a leak measured in
 // milliseconds is better than a claim that silently is not what it says.
 func addRoute(prefix netip.Prefix, via ...string) error {
-	out, err := routeCommand("add", prefix, via...)
-	if err == nil {
+	target, err := routeTarget(prefix)
+	if err != nil {
+		return err
+	}
+	if target.goesTo(via) {
 		return nil
 	}
-	if !bytes.Contains(out, []byte("File exists")) {
-		return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+
+	if !target.present {
+		out, err := routeCommand("add", prefix, via...)
+		if err == nil {
+			return nil
+		}
+		// It appeared between the read and the write, which is the only way this happens
+		// and is not a failure of anything.
+		if !bytes.Contains(out, []byte("File exists")) {
+			return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+		}
 	}
 
 	if _, err := routeCommand("change", prefix, via...); err == nil {
-		return nil
+		if now, err := routeTarget(prefix); err == nil && now.goesTo(via) {
+			return nil
+		}
 	}
+
 	if err := deleteRoute(prefix); err != nil {
 		return err
 	}
 	if out, err := routeCommand("add", prefix, via...); err != nil {
 		return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+	}
+
+	// Verified rather than assumed, because everything above this line was once assumed.
+	now, err := routeTarget(prefix)
+	if err != nil {
+		return err
+	}
+	if !now.goesTo(via) {
+		return fmt.Errorf("wglink: %s was replaced and still does not go to %s",
+			prefix, strings.Join(via, " "))
 	}
 	return nil
 }

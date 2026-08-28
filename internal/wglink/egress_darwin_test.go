@@ -446,3 +446,49 @@ func TestAHostRoutePinnedToTheWrongGatewayIsRepinned(t *testing.T) {
 			"the tunnel is unreachable and the tunnel cannot come back up", got, gateway)
 	}
 }
+
+// Whether a route already goes where a claim is asking for it to.
+//
+// This is the decision that says whether a correction happens at all, and getting it wrong
+// in the "yes it does" direction is the bug this whole mechanism exists to fix: a stale
+// carve-out that every pass believes is fine.
+func TestWhetherARouteAlreadyGoesWhereAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  routeEnd
+		via  []string
+		want bool
+	}{
+		{"the interface it was asked for", routeEnd{present: true, iface: "utun5"},
+			[]string{"-interface", "utun5"}, true},
+		{"a different interface", routeEnd{present: true, iface: "en0"},
+			[]string{"-interface", "utun5"}, false},
+		{"the gateway it was asked for",
+			routeEnd{present: true, gateway: netip.MustParseAddr("192.168.1.1")},
+			[]string{"-gateway", "192.168.1.1"}, true},
+		{"the gateway of a network this laptop has left",
+			routeEnd{present: true, gateway: netip.MustParseAddr("192.168.1.1")},
+			[]string{"-gateway", "10.0.0.1"}, false},
+
+		{"no route at all", routeEnd{}, []string{"-interface", "utun5"}, false},
+		// Not a state routeTarget can produce, and asserted anyway: goesTo answers for a
+		// struct rather than for the routing table, and "absent" has to beat whatever else
+		// the struct is carrying or a caller could be told a route it has not got is fine.
+		{"absent, and carrying a target anyway",
+			routeEnd{iface: "utun5", gateway: netip.MustParseAddr("192.168.1.1")},
+			[]string{"-interface", "utun5"}, false},
+		{"an interface route asked for by gateway",
+			routeEnd{present: true, iface: "utun5"}, []string{"-gateway", "192.168.1.1"}, false},
+		{"a gateway route asked for by interface",
+			routeEnd{present: true, gateway: netip.MustParseAddr("192.168.1.1")},
+			[]string{"-interface", "utun5"}, false},
+		{"an interface that has gone away, so it has no name",
+			routeEnd{present: true}, []string{"-interface", "utun5"}, false},
+		{"something that is not a way of naming a route",
+			routeEnd{present: true, iface: "utun5"}, []string{"-blackhole"}, false},
+	} {
+		if got := tc.end.goesTo(tc.via); got != tc.want {
+			t.Errorf("%s: goesTo = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
