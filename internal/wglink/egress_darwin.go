@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 
 	"golang.org/x/net/route"
@@ -52,11 +56,28 @@ var egressHalves6 = []netip.Prefix{
 	netip.MustParsePrefix("8000::/1"),
 }
 
+// egressRecordPath is where a claim is written down so that a later process can undo it.
+//
+// This is the routing half of what reclaimEgressLock does at start-up, and the reason it
+// needs a file at all is that macOS has no equivalent of the firewall mark. Linux finds a
+// claim it did not make by asking the kernel for the mark, which is a constant; the halves
+// are a constant here too, but the host routes keeping the relay and the control plane off
+// the tunnel are not — they are whatever that claim's endpoints were.
+//
+// Without this a restarted daemon can see that a claim exists, because EgressHeld reads the
+// routing table, and has no way to take it off. It would log that it found one, delete
+// nothing, and report success: Invariant 20 not holding on this platform, quietly.
+//
+// Under /var/run because routes do not survive a reboot either. Nothing depends on that
+// directory being cleared, though — a record that outlived its routes asks for deletions
+// that are already true, and deleteRoute treats those as success.
+var egressRecordPath = filepath.Join("/var/run/meshp", "egress-routes")
+
 // Router claims the default route on macOS.
 //
 // It remembers what it installed, because releasing means removing exactly those routes and
-// nothing else. That memory is this process's, so a Router that has never claimed cannot
-// release what a previous process did — see EgressHeld, which asks the kernel instead.
+// nothing else — and it writes the same list down, because that memory dies with the
+// process and the routes do not. See egressRecordPath.
 type Router struct {
 	mu       sync.Mutex
 	claimed  []netip.Prefix
@@ -122,6 +143,10 @@ func (r *Router) Claim(iface string, endpoints []netip.AddrPort, excluded []neti
 		}
 		r.claimed = append(r.claimed, prefix)
 	}
+
+	// Written last, so the record only ever describes a claim that is fully in place. A
+	// half-made claim has already been undone by the error paths above.
+	recordClaim(append(append([]netip.Prefix{}, r.viaLocal...), r.claimed...))
 	return nil
 }
 
@@ -179,15 +204,87 @@ func (r *Router) Release() error {
 // first would leave the rest installed, which on this path means a machine still sending
 // everything into a tunnel that is going away.
 func (r *Router) releaseLocked() error {
+	remembered := append(append([]netip.Prefix{}, r.claimed...), r.viaLocal...)
+
 	var errs []error
-	for _, prefix := range append(append([]netip.Prefix{}, r.claimed...), r.viaLocal...) {
+	for _, prefix := range releaseTargets(remembered, recordedClaim()) {
 		if err := deleteRoute(prefix); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	r.claimed, r.viaLocal = nil, nil
+	forgetClaim()
 	return errors.Join(errs...)
 }
+
+// releaseTargets is which routes a release should take off.
+//
+// Three cases, and the third is why this is a function of its own rather than three lines
+// inside releaseLocked — it is the one that guesses, and guessing wrong takes a machine off
+// the network.
+//
+//   - What this process installed, which is the ordinary release.
+//   - Plus what any process wrote down, which is how a restarted daemon undoes a claim it
+//     did not make.
+//   - And if there is neither, the halves. The only caller that reaches a release with
+//     nothing to go on is one that checked EgressHeld first, so something *is* holding the
+//     routing and the record has been lost. The halves are the part that captures every
+//     packet the machine sends; guessing at them is better than leaving somebody with no way
+//     out. The host routes cannot be guessed at and are left behind, which is survivable —
+//     they point at a gateway that works, and the next claim corrects them.
+func releaseTargets(remembered, recorded []netip.Prefix) []netip.Prefix {
+	out := append([]netip.Prefix{}, remembered...)
+	for _, prefix := range recorded {
+		if !slices.Contains(out, prefix) {
+			out = append(out, prefix)
+		}
+	}
+	if len(out) == 0 {
+		out = append(append(out, egressHalves...), egressHalves6...)
+	}
+	return out
+}
+
+// recordClaim writes down what this claim installed.
+//
+// Best effort, and deliberately not fatal: a claim that worked is worth having even on a
+// host where /var/run cannot be written. What is lost is the ability of the *next* process
+// to undo it precisely, which releaseLocked falls back for.
+func recordClaim(prefixes []netip.Prefix) {
+	if err := os.MkdirAll(filepath.Dir(egressRecordPath), 0o700); err != nil {
+		return
+	}
+	var b strings.Builder
+	for _, prefix := range prefixes {
+		b.WriteString(prefix.String())
+		b.WriteString("\n")
+	}
+	_ = os.WriteFile(egressRecordPath, []byte(b.String()), 0o600)
+}
+
+// recordedClaim reads back what some process claimed, or nothing.
+//
+// Unparseable lines are skipped rather than failing the read. A record that has been
+// corrupted still names routes that ought to come off, and refusing the whole file over one
+// bad line would leave a machine holding all of them.
+func recordedClaim() []netip.Prefix {
+	raw, err := os.ReadFile(egressRecordPath)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for _, line := range strings.Split(string(raw), "\n") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+		out = append(out, prefix)
+	}
+	return out
+}
+
+// forgetClaim removes the record, once the routes it names are gone.
+func forgetClaim() { _ = os.Remove(egressRecordPath) }
 
 // EgressHeld reports whether a default route claim is in place, whoever made it.
 //
@@ -203,11 +300,48 @@ func EgressHeld() (bool, error) {
 	return present, nil
 }
 
-// addRoute installs one route, treating "it is already there" as success.
+// addRoute makes one route exist and point where it is asked to.
 //
-// Idempotent because the reconciler calls this every pass. route(8) reports an existing
-// route as "File exists" and exits non-zero, which is not a failure of anything.
+// Idempotent because the reconciler calls this every pass, and "already there" is the
+// ordinary case rather than an error. What matters is what "already there" is taken to mean.
+//
+// It used to mean success. route(8) reports an existing destination as "File exists" and
+// exits non-zero without touching the route, so a destination whose gateway had gone stale
+// stayed stale for as long as the claim lasted — and on this platform the carve-out keeping
+// the relay and the control plane off the tunnel is a set of host routes pinned to whatever
+// gateway was current when the claim was made. A laptop that moved to another network kept
+// sending them to a gateway that is not on it. With fail-closed egress in force that is a
+// machine with no way out at all, and the reconciler running every minute could not fix it,
+// because every pass was told the route it wanted was already there (#160).
+//
+// So an existing destination is corrected rather than accepted. `route change` does it in
+// place, which matters: deleting first would leave a window with no route at all, and for
+// the halves that window is one where traffic leaves outside the tunnel. Replacing is the
+// fallback for a route that cannot be changed in place, because a leak measured in
+// milliseconds is better than a claim that silently is not what it says.
 func addRoute(prefix netip.Prefix, via ...string) error {
+	out, err := routeCommand("add", prefix, via...)
+	if err == nil {
+		return nil
+	}
+	if !bytes.Contains(out, []byte("File exists")) {
+		return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+	}
+
+	if _, err := routeCommand("change", prefix, via...); err == nil {
+		return nil
+	}
+	if err := deleteRoute(prefix); err != nil {
+		return err
+	}
+	if out, err := routeCommand("add", prefix, via...); err != nil {
+		return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+	}
+	return nil
+}
+
+// routeCommand runs one route(8) verb against one prefix.
+func routeCommand(verb string, prefix netip.Prefix, via ...string) ([]byte, error) {
 	family := "-inet"
 	if prefix.Addr().Is6() {
 		family = "-inet6"
@@ -215,15 +349,8 @@ func addRoute(prefix netip.Prefix, via ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	args := append([]string{"-n", "add", family, prefix.String()}, via...)
-	out, err := exec.CommandContext(ctx, "/sbin/route", args...).CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if bytes.Contains(out, []byte("File exists")) {
-		return nil
-	}
-	return fmt.Errorf("route add %s: %w: %s", prefix, err, trimNewline(out))
+	args := append([]string{"-n", verb, family, prefix.String()}, via...)
+	return exec.CommandContext(ctx, "/sbin/route", args...).CombinedOutput()
 }
 
 // deleteRoute removes one, treating "it is not there" as success.

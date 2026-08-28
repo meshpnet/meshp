@@ -17,6 +17,7 @@ Start here.
 |---|---|
 | [Invariants](INVARIANTS.md) | The claims this system makes, written so they can be checked by machines. |
 | [Decision records](adr/) | Why things are the way they are. |
+| [macOS laptop checks](testing/macos-laptop.md) | The things CI cannot prove, because a hosted runner never sleeps and never changes networks. |
 
 ## If you are evaluating meshp
 

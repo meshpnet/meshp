@@ -4,6 +4,11 @@ package wglink
 
 import (
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/net/route"
@@ -206,5 +211,238 @@ func TestNetmasksOfEveryLengthAreRead(t *testing.T) {
 	// does not have.
 	if got := maskBits(&route.Inet4Addr{IP: [4]byte{0xff, 0x0f, 0, 0}}, 32); got != -1 {
 		t.Errorf("a non-contiguous mask read as /%d", got)
+	}
+}
+
+// A claim has to be undoable by a process that did not make it.
+//
+// ADR-0011 keeps a full tunnel's routing in place across a crash on purpose, and Invariant 20
+// says the agent must never leave a host without networking. What joins those two is
+// meshpd finding the claim again on start-up and taking it off — and until this was written
+// down, macOS could not: Release removed what its own Router remembered, a restarted daemon
+// remembered nothing, and reclaimEgressLock logged that it had found a stale claim, deleted
+// nothing, and reported success.
+//
+// Linux has never had this problem because it finds its claim by the firewall mark, which is
+// a constant the kernel holds. This is that, for a platform with no marks.
+func TestAClaimIsWrittenDownSoAnotherProcessCanUndoIt(t *testing.T) {
+	egressRecordPath = filepath.Join(t.TempDir(), "egress-routes")
+
+	want := []netip.Prefix{
+		netip.MustParsePrefix("192.0.2.7/32"),
+		netip.MustParsePrefix("0.0.0.0/1"),
+	}
+	recordClaim(want)
+
+	got := recordedClaim()
+	if len(got) != len(want) {
+		t.Fatalf("wrote %d routes and read back %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("route %d is %s, want %s", i, got[i], want[i])
+		}
+	}
+
+	forgetClaim()
+	if left := recordedClaim(); len(left) != 0 {
+		t.Errorf("the record survived the release it describes: %v", left)
+	}
+}
+
+// A record that has been damaged still names the routes it can.
+//
+// Refusing the whole file over one bad line would leave a machine holding every route in it,
+// which is the outcome the record exists to prevent.
+func TestADamagedRecordStillNamesWhatItCan(t *testing.T) {
+	egressRecordPath = filepath.Join(t.TempDir(), "egress-routes")
+	if err := os.WriteFile(egressRecordPath,
+		[]byte("0.0.0.0/1\nnot a prefix\n\n128.0.0.0/1\n"), 0o600); err != nil {
+		t.Fatalf("writing a damaged record: %v", err)
+	}
+
+	got := recordedClaim()
+	if len(got) != 2 {
+		t.Fatalf("read %d routes out of a damaged record, want 2: %v", len(got), got)
+	}
+}
+
+// And the whole of it against the routing table: one Router claims, a different one releases.
+//
+// The second Router stands in for a restarted daemon. It shares nothing with the first but
+// the record on disk, which is exactly what reclaimEgressLock has to work from.
+func TestARestartedDaemonCanReleaseAClaimItDidNotMake(t *testing.T) {
+	requireRoot(t)
+	egressRecordPath = filepath.Join(t.TempDir(), "egress-routes")
+
+	// TEST-NET-1 rather than the halves: this is about whether the record is enough to find
+	// a route again, and it should not need to take the machine's traffic to prove it.
+	pinned := netip.MustParsePrefix("192.0.2.0/24")
+	t.Cleanup(func() { _ = deleteRoute(pinned) })
+
+	if err := addRoute(pinned, "-interface", "lo0"); err != nil {
+		t.Fatalf("adding %s: %v", pinned, err)
+	}
+	recordClaim([]netip.Prefix{pinned})
+
+	// A Router that has claimed nothing, which is what a daemon has after a kill -9.
+	if err := (&Router{}).Release(); err != nil {
+		t.Fatalf("releasing a claim this process did not make: %v", err)
+	}
+
+	present, err := routeExists(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if present {
+		t.Error("a restarted daemon could not take off the route a previous one left; " +
+			"this machine keeps sending traffic into a tunnel that is gone")
+	}
+	if left := recordedClaim(); len(left) != 0 {
+		t.Errorf("the record outlived the routes it named: %v", left)
+	}
+}
+
+// Which routes a release takes off, including the case where it has to guess.
+//
+// The guess is the interesting one and the reason this is a function rather than three lines
+// inside releaseLocked: getting it wrong in one direction leaves a machine sending every
+// packet into a tunnel that is gone, and in the other deletes routes meshp never made.
+func TestWhatAReleaseTakesOff(t *testing.T) {
+	halves := netip.MustParsePrefix("0.0.0.0/1")
+	endpoint := netip.MustParsePrefix("192.0.2.7/32")
+	excluded := netip.MustParsePrefix("192.168.1.0/24")
+
+	t.Run("the ordinary release takes off what this process installed", func(t *testing.T) {
+		got := releaseTargets([]netip.Prefix{halves, endpoint}, nil)
+		if len(got) != 2 || got[0] != halves || got[1] != endpoint {
+			t.Errorf("got %v", got)
+		}
+	})
+
+	t.Run("a restarted daemon takes off what was written down", func(t *testing.T) {
+		got := releaseTargets(nil, []netip.Prefix{halves, endpoint})
+		if len(got) != 2 {
+			t.Fatalf("a release with nothing but a record took off %d routes: %v", len(got), got)
+		}
+		if !slices.Contains(got, endpoint) {
+			t.Error("the host route pinning an endpoint to the old gateway was left behind")
+		}
+	})
+
+	t.Run("what is remembered and what is recorded are not counted twice", func(t *testing.T) {
+		got := releaseTargets([]netip.Prefix{halves, endpoint}, []netip.Prefix{halves, excluded})
+		if len(got) != 3 {
+			t.Errorf("got %d routes, want 3 distinct: %v", len(got), got)
+		}
+	})
+
+	t.Run("with nothing to go on it takes off the halves", func(t *testing.T) {
+		got := releaseTargets(nil, nil)
+		if len(got) == 0 {
+			t.Fatal("a release with no record took nothing off, which is the bug this " +
+				"whole mechanism exists to fix: the machine goes on sending every packet " +
+				"into a tunnel that is gone")
+		}
+		for _, half := range append(append([]netip.Prefix{}, egressHalves...), egressHalves6...) {
+			if !slices.Contains(got, half) {
+				t.Errorf("%s was not taken off, so half the address space still points at "+
+					"a tunnel that is gone", half)
+			}
+		}
+		if slices.Contains(got, endpoint) {
+			t.Error("a release with nothing to go on invented a host route to delete")
+		}
+	})
+}
+
+// routeVia reports what the routing table says about a destination — the value of one of
+// route(8)'s "key: value" lines, such as `interface` or `gateway`.
+func routeVia(t *testing.T, destination, key string) string {
+	t.Helper()
+	out, err := exec.Command("/sbin/route", "-n", "get", destination).CombinedOutput()
+	if err != nil {
+		t.Fatalf("route -n get %s: %v: %s", destination, err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		name, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if found && name == key {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatalf("route -n get %s printed no %s:\n%s", destination, key, out)
+	return ""
+}
+
+// A route that is already there but points somewhere else is corrected.
+//
+// This is the one that made a macOS laptop unable to survive changing networks. The carve-out
+// keeping the relay and the control plane off the tunnel is a set of host routes pinned to
+// whatever gateway was current when the claim was made, and every reconcile re-makes the
+// claim against the gateway the machine is using *now* — which was the whole design. But
+// route(8) reports an existing destination as "File exists" without touching it, and addRoute
+// read that as success. So the correcting pass corrected nothing, once a minute, forever.
+//
+// With fail-closed egress in force since ADR-0026, the consequence is not a slow tunnel. It
+// is a laptop that moved to another network and has no way out of it at all.
+func TestARouteThatPointsSomewhereElseIsCorrected(t *testing.T) {
+	requireRoot(t)
+
+	elsewhere := routeVia(t, "default", "interface")
+	if elsewhere == "lo0" {
+		t.Skip("this machine's default route is on loopback, so there is no second " +
+			"interface to be wrong about")
+	}
+
+	// TEST-NET-1: reserved, routed nowhere, and nothing on this machine wants it.
+	prefix := netip.MustParsePrefix("192.0.2.0/24")
+	t.Cleanup(func() { _ = deleteRoute(prefix) })
+
+	if err := addRoute(prefix, "-interface", "lo0"); err != nil {
+		t.Fatalf("adding %s: %v", prefix, err)
+	}
+	if got := routeVia(t, "192.0.2.1", "interface"); got != "lo0" {
+		t.Fatalf("the route was added and points at %q, so this test is not measuring what "+
+			"it thinks", got)
+	}
+
+	// The same destination, somewhere else. This is what a laptop changing networks asks
+	// for on the next reconcile.
+	if err := addRoute(prefix, "-interface", elsewhere); err != nil {
+		t.Fatalf("re-pointing %s: %v", prefix, err)
+	}
+	if got := routeVia(t, "192.0.2.1", "interface"); got != elsewhere {
+		t.Errorf("the route still points at %q rather than %q.\n"+
+			"A carve-out pinned to a gateway the machine has left is never corrected, so a "+
+			"laptop that changes networks while failing closed has no way out of the new one.",
+			got, elsewhere)
+	}
+}
+
+// And the same for a route named by gateway rather than by interface, which is the form the
+// carve-out actually uses.
+func TestAHostRoutePinnedToTheWrongGatewayIsRepinned(t *testing.T) {
+	requireRoot(t)
+
+	gateway, err := defaultGateway()
+	if err != nil {
+		t.Skipf("this machine has no IPv4 default route: %v", err)
+	}
+
+	prefix := netip.MustParsePrefix("192.0.2.9/32")
+	t.Cleanup(func() { _ = deleteRoute(prefix) })
+
+	// Loopback stands in for the gateway of a network the laptop has left: on-link, so the
+	// route can be installed, and not where anything should be sent.
+	if err := addRoute(prefix, "-gateway", "127.0.0.1"); err != nil {
+		t.Fatalf("pinning %s to loopback: %v", prefix, err)
+	}
+	if err := addRoute(prefix, "-gateway", gateway.String()); err != nil {
+		t.Fatalf("re-pinning %s to %s: %v", prefix, gateway, err)
+	}
+
+	if got := routeVia(t, "192.0.2.9", "gateway"); got != gateway.String() {
+		t.Errorf("the host route still goes via %q rather than %q; the endpoint it keeps off "+
+			"the tunnel is unreachable and the tunnel cannot come back up", got, gateway)
 	}
 }
