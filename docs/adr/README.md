@@ -36,6 +36,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0025](0025-the-bus-is-postgresql.md) | The bus is PostgreSQL LISTEN/NOTIFY, not Redis |
 | [0026](0026-fail-closed-on-macos.md) | Fail-closed egress on macOS lives in a pf anchor under `com.apple` |
 | [0027](0027-sign-in-slows-down-it-does-not-lock-out.md) | A guessed-at account slows down; it is never locked out |
+| [0028](0028-the-windows-data-plane-is-wintun.md) | The Windows data plane is WinTun, shipped beside the binary |
 
 ## Format
 
