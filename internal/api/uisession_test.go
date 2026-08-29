@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -290,4 +291,92 @@ func TestADeploymentWithNoAccountsCannotSignIn(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("signing in to a deployment with no accounts = %d, want 401", resp.StatusCode)
 	}
+}
+
+// Six wrong passwords for one address and the seventh is told to wait.
+//
+// A 429 rather than the shared refusal, which is not a leak: failures are counted for every
+// address whether or not an account exists, so being told to wait says nothing about whether
+// there is anybody here to sign in as (ADR-0027). Answering 401 would tell somebody who has
+// mistyped that their password is wrong, which is false and makes them keep trying.
+func TestAGuessedAtAccountIsToldToWait(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "target@example.com")
+
+	var status int
+	var body map[string]any
+	var headers http.Header
+	for i := 0; i < 8; i++ {
+		status, headers, body = postSignIn(t, h, "target@example.com", "not the password")
+		if status == http.StatusTooManyRequests {
+			break
+		}
+		if status != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401 or 429: %v", i+1, status, body)
+		}
+	}
+
+	if status != http.StatusTooManyRequests {
+		t.Fatal("eight wrong passwords for one address were all answered the same way; " +
+			"nothing is slowing this account down")
+	}
+
+	// From this endpoint rather than from the per-address limiter in front of it, which
+	// answers 429 too. Without this the test would pass on a build where the account
+	// throttle did nothing at all.
+	message, _ := body["message"].(string)
+	if !strings.Contains(message, "failed sign-ins for that address") {
+		t.Errorf("the refusal came from somewhere else: %q", message)
+	}
+
+	// Actionable, or a browser has nothing to do but retry immediately and make it worse.
+	retry := headers.Get("Retry-After")
+	if retry == "" {
+		t.Error("no Retry-After, so nothing knows how long to wait")
+	} else if seconds, err := strconv.Atoi(retry); err != nil || seconds <= 0 || seconds > 60 {
+		t.Errorf("Retry-After is %q; it should be a whole number of seconds up to the "+
+			"one-minute ceiling ADR-0027 sets", retry)
+	}
+
+	// And it is a wait, not a lockout: the message has to say so, because somebody reading
+	// it needs to know whether to sit and wait or to go and find an administrator.
+	if !strings.Contains(message, "Nothing is locked") {
+		t.Errorf("the refusal does not say the account is not locked: %q", message)
+	}
+}
+
+// A different address is unaffected, or one person mistyping would slow down everybody.
+func TestSlowingOneAddressDoesNotSlowAnother(t *testing.T) {
+	h := newHarness(t)
+	createUser(t, h, "target@example.com")
+	createUser(t, h, "bystander@example.com")
+
+	for i := 0; i < 8; i++ {
+		postSignIn(t, h, "target@example.com", "not the password")
+	}
+
+	if cookie := signIn(t, h, "bystander@example.com", testPassword); cookie == nil {
+		t.Error("an address nobody guessed at could not sign in")
+	}
+}
+
+// postSignIn attempts a sign-in and returns everything the server said about it.
+func postSignIn(t *testing.T, h *harness, email, plain string) (int, http.Header, map[string]any) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"email": email, "password": plain})
+	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/api/v1/ui/session",
+		bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	return resp.StatusCode, resp.Header, body
 }

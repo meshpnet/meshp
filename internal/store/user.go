@@ -295,6 +295,19 @@ func userFrom(id, org uuid.UUID, email, name string, created time.Time, suspende
 func (s *Store) SignIn(ctx context.Context, req SignInRequest) (Session, error) {
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
+	// Before the address is looked up and before any password work, which is the point of it:
+	// the purpose is not to do the guess (ADR-0027). Keyed on what was submitted rather than
+	// on a user id, because at this moment nobody knows whether there is a user — and finding
+	// out first would make the delay itself answer whether the account exists.
+	key := signInKey(email)
+	wait, err := s.signInWait(ctx, key)
+	if err != nil {
+		return Session{}, err
+	}
+	if wait > 0 {
+		return Session{}, SignInThrottled{RetryAfter: wait}
+	}
+
 	candidates, err := s.Queries().FindUsersByEmail(ctx, email)
 	if err != nil {
 		return Session{}, fmt.Errorf("store: looking up the address: %w", err)
@@ -314,21 +327,26 @@ func (s *Store) SignIn(ctx context.Context, req SignInRequest) (Session, error) 
 
 	switch {
 	case len(candidates) > 1:
+		// Not counted as a failure. Nothing was guessed at — the answer is "say which
+		// organisation", and the next attempt names one and is counted like any other.
 		return Session{}, ErrSignInAmbiguous
 	case len(candidates) == 0:
 		// The work is still done, against a hash of nothing, so that an unknown address
 		// takes about as long as a known one. Without it, response time answers "does this
 		// person have an account here" for anybody who cares to measure.
 		_ = password.Verify(decoyHash, req.Password)
+		s.noteSignInFailure(ctx, key, email)
 		return Session{}, ErrSignInRefused
 	}
 
 	user := candidates[0]
 	if user.PasswordHash == nil || user.SuspendedAt != nil || user.DeletedAt != nil {
 		_ = password.Verify(decoyHash, req.Password)
+		s.noteSignInFailure(ctx, key, email)
 		return Session{}, ErrSignInRefused
 	}
 	if err := password.Verify(*user.PasswordHash, req.Password); err != nil {
+		s.noteSignInFailure(ctx, key, email)
 		return Session{}, ErrSignInRefused
 	}
 
@@ -346,6 +364,10 @@ func (s *Store) SignIn(ctx context.Context, req SignInRequest) (Session, error) 
 			}
 		}
 	}
+
+	// Right answer: the run is over, whoever it came from. An attacker sustaining a penalty
+	// against somebody loses it the moment that person gets in.
+	s.clearSignInFailures(ctx, key)
 
 	token, hash, err := newSessionToken()
 	if err != nil {

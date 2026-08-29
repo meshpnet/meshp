@@ -35,6 +35,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0024](0024-users-and-the-admin-token.md) | Local user accounts, scoped API tokens, and what becomes of the admin token |
 | [0025](0025-the-bus-is-postgresql.md) | The bus is PostgreSQL LISTEN/NOTIFY, not Redis |
 | [0026](0026-fail-closed-on-macos.md) | Fail-closed egress on macOS lives in a pf anchor under `com.apple` |
+| [0027](0027-sign-in-slows-down-it-does-not-lock-out.md) | A guessed-at account slows down; it is never locked out |
 
 ## Format
 
