@@ -11,7 +11,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const clearSignInFailures = `-- name: ClearSignInFailures :execrows
+DELETE FROM sign_in_failures WHERE email_hash = $1
+`
+
+// scope: global as above. A success clears the run, whoever it came from.
+func (q *Queries) ClearSignInFailures(ctx context.Context, emailHash []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, clearSignInFailures, emailHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
 
 const countUsers = `-- name: CountUsers :one
 SELECT count(*)::bigint FROM users WHERE deleted_at IS NULL
@@ -188,6 +202,28 @@ func (q *Queries) FindUsersByEmail(ctx context.Context, email string) ([]FindUse
 	return items, nil
 }
 
+const getSignInFailures = `-- name: GetSignInFailures :one
+SELECT email_hash, failures, first_failed_at, last_failed_at
+FROM sign_in_failures
+WHERE email_hash = $1
+`
+
+// scope: global a failed sign-in is not a tenant's property. The address is all that has been
+// offered at this point and it has not been shown to belong to anybody — narrowing this by
+// organisation would mean knowing whose account it is, which is the thing the caller does not
+// yet know and must not be made to reveal (ADR-0027).
+func (q *Queries) GetSignInFailures(ctx context.Context, emailHash []byte) (SignInFailure, error) {
+	row := q.db.QueryRow(ctx, getSignInFailures, emailHash)
+	var i SignInFailure
+	err := row.Scan(
+		&i.EmailHash,
+		&i.Failures,
+		&i.FirstFailedAt,
+		&i.LastFailedAt,
+	)
+	return i, err
+}
+
 const getUserForOrganizationByEmail = `-- name: GetUserForOrganizationByEmail :one
 SELECT id, organization_id, email, name, password_hash, suspended_at, deleted_at
 FROM users
@@ -308,6 +344,42 @@ func (q *Queries) ListUsersForOrganization(ctx context.Context, organizationID u
 	return items, nil
 }
 
+const recordSignInFailure = `-- name: RecordSignInFailure :one
+INSERT INTO sign_in_failures (email_hash, failures, first_failed_at, last_failed_at)
+VALUES ($1, 1, now(), now())
+ON CONFLICT (email_hash) DO UPDATE
+SET failures = CASE
+        WHEN sign_in_failures.last_failed_at < now() - $2::interval THEN 1
+        ELSE sign_in_failures.failures + 1
+    END,
+    first_failed_at = CASE
+        WHEN sign_in_failures.last_failed_at < now() - $2::interval THEN now()
+        ELSE sign_in_failures.first_failed_at
+    END,
+    last_failed_at = now()
+RETURNING email_hash, failures, first_failed_at, last_failed_at
+`
+
+type RecordSignInFailureParams struct {
+	EmailHash  []byte
+	ResetAfter pgtype.Interval
+}
+
+// scope: global as above.
+// Consecutive, so a run that has gone quiet starts again rather than resuming: an address
+// that failed six times yesterday should not pay yesterday's penalty today.
+func (q *Queries) RecordSignInFailure(ctx context.Context, arg RecordSignInFailureParams) (SignInFailure, error) {
+	row := q.db.QueryRow(ctx, recordSignInFailure, arg.EmailHash, arg.ResetAfter)
+	var i SignInFailure
+	err := row.Scan(
+		&i.EmailHash,
+		&i.Failures,
+		&i.FirstFailedAt,
+		&i.LastFailedAt,
+	)
+	return i, err
+}
+
 const setUserPasswordHash = `-- name: SetUserPasswordHash :execrows
 UPDATE users SET password_hash = $2, updated_at = now()
 WHERE id = $1 AND deleted_at IS NULL
@@ -378,6 +450,20 @@ DELETE FROM user_sessions WHERE expires_at < now() OR idle_expires_at < now()
 // leave every other organisation's dead rows behind and make the sweep a per-tenant chore.
 func (q *Queries) SweepExpiredUserSessions(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, sweepExpiredUserSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const sweepSignInFailures = `-- name: SweepSignInFailures :execrows
+DELETE FROM sign_in_failures WHERE last_failed_at < now() - $1::interval
+`
+
+// scope: global a run of failures that has gone quiet belongs to nobody and is removed on
+// everybody's behalf, exactly as an expired session is.
+func (q *Queries) SweepSignInFailures(ctx context.Context, olderThan pgtype.Interval) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepSignInFailures, olderThan)
 	if err != nil {
 		return 0, err
 	}

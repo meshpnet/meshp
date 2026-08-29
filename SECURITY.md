@@ -32,9 +32,10 @@ Out of scope: anything you deploy meshp on top of, and the deployment examples u
 `deploy/`, which are illustrative and say so.
 
 **Read this before you spend time on it.** meshp is pre-alpha and the README says not to
-deploy it. The data plane is Linux-only. Reports are still welcome and will be handled as
-above — but a finding that a half-built feature is half-built is not one, and there are
-several of those in the open issues already.
+deploy it. The data plane exists on Linux and macOS and nowhere else, and macOS cannot
+enforce a network's packet filter. Reports are still welcome and will be handled as above —
+but a finding that a half-built feature is half-built is not one, and there are several of
+those in the open issues already.
 
 ## Accounts, credentials and what happens to them
 
@@ -82,12 +83,17 @@ authenticated by cookie must carry an `Origin` naming this host.
 
 Said plainly, because a security policy that only lists strengths is not one:
 
-- **There is no lockout after repeated failures, and no per-account rate limit.** Sign-in
-  is throttled, but by the same per-address limiter the enrolment endpoints use, which is
-  deliberately generous — so it bounds a flood from one host and does nothing about a slow
-  distributed attempt on one account. Argon2id at 64 MiB makes online guessing expensive
-  rather than impossible. ADR-0024 names this as work its own decision creates; it is
-  tracked in [#148](https://github.com/meshpnet/meshp/issues/148).
+- **An account can still be guessed at, more slowly.** Five consecutive failures for an
+  address cost nothing; after that each attempt waits, doubling to a ceiling of one minute
+  (ADR-0027). That takes an attacker from roughly a million guesses a day to about fourteen
+  hundred. It is a slowdown and not a lockout, deliberately — a lockout is a denial of
+  service aimed at the account holder, and anyone who knows an address could impose it. So
+  fourteen hundred guesses a day is the residual exposure, and a weak password is still a
+  weak password. The answer to that is the second factor below.
+- **An attacker can make an account inconvenient to reach.** One failed attempt a minute,
+  sustained, keeps an address waiting more often than not. That is inherent to any
+  per-account throttle; here the window is a minute, any successful sign-in clears it, and
+  ten consecutive failures are reported in the log.
 - **There is no second factor.** The `mfa_enrolled_at` column exists and nothing writes it.
   ADR-0024 §1 commits to TOTP in the open core rather than as a paid feature.
 - **There is no password reset flow yet.** An administrator sets a password directly. The

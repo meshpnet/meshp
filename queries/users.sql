@@ -103,3 +103,39 @@ DELETE FROM user_sessions WHERE expires_at < now() OR idle_expires_at < now();
 -- the bootstrap secret, that there is now an account they could be using instead — a
 -- question no organisation owns.
 SELECT count(*)::bigint FROM users WHERE deleted_at IS NULL;
+
+-- name: GetSignInFailures :one
+-- scope: global a failed sign-in is not a tenant's property. The address is all that has been
+-- offered at this point and it has not been shown to belong to anybody — narrowing this by
+-- organisation would mean knowing whose account it is, which is the thing the caller does not
+-- yet know and must not be made to reveal (ADR-0027).
+SELECT email_hash, failures, first_failed_at, last_failed_at
+FROM sign_in_failures
+WHERE email_hash = $1;
+
+-- name: RecordSignInFailure :one
+-- scope: global as above.
+-- Consecutive, so a run that has gone quiet starts again rather than resuming: an address
+-- that failed six times yesterday should not pay yesterday's penalty today.
+INSERT INTO sign_in_failures (email_hash, failures, first_failed_at, last_failed_at)
+VALUES ($1, 1, now(), now())
+ON CONFLICT (email_hash) DO UPDATE
+SET failures = CASE
+        WHEN sign_in_failures.last_failed_at < now() - sqlc.arg(reset_after)::interval THEN 1
+        ELSE sign_in_failures.failures + 1
+    END,
+    first_failed_at = CASE
+        WHEN sign_in_failures.last_failed_at < now() - sqlc.arg(reset_after)::interval THEN now()
+        ELSE sign_in_failures.first_failed_at
+    END,
+    last_failed_at = now()
+RETURNING email_hash, failures, first_failed_at, last_failed_at;
+
+-- name: ClearSignInFailures :execrows
+-- scope: global as above. A success clears the run, whoever it came from.
+DELETE FROM sign_in_failures WHERE email_hash = $1;
+
+-- name: SweepSignInFailures :execrows
+-- scope: global a run of failures that has gone quiet belongs to nobody and is removed on
+-- everybody's behalf, exactly as an expired session is.
+DELETE FROM sign_in_failures WHERE last_failed_at < now() - sqlc.arg(older_than)::interval;

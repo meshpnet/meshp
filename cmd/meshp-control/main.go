@@ -369,6 +369,7 @@ func run(ctx context.Context, log *slog.Logger, cfg runConfig) error {
 		log.Info("api serving", "admin_enabled", cfg.adminToken != "")
 
 		go pruneDeltaLog(ctx, log, st, cfg.deltaRetention)
+		go sweepExpired(ctx, log, st)
 	}()
 
 	defer func() {
@@ -637,6 +638,48 @@ func pruneDeltaLog(ctx context.Context, log *slog.Logger, st *store.Store, reten
 		if res.Rows > 0 {
 			log.Info("pruned the state change log",
 				"networks", res.Networks, "rows", res.Rows, "retention", retention)
+		}
+	}
+}
+
+// sweepExpired removes rows that have run out.
+//
+// Two tables, one loop, because they are the same chore: expired sessions and runs of failed
+// sign-ins that have gone quiet both belong to nobody and are removed on everybody's behalf.
+//
+// The session sweep is not new. Store.SweepSessions has existed since sessions did and
+// nothing has ever called it, so a deployment's user_sessions table has been growing by one
+// row per sign-in and shrinking only when somebody signs out — a mechanism nothing reached
+// (ADR-0018), found while adding the second table that needs the same treatment (#148).
+//
+// Hourly, and failures are not fatal. Both tables grow until the next sweep succeeds, which
+// is a size problem rather than a correctness one: an expired session is already refused by
+// the query that reads it, and a stale run of failures already produces no delay.
+func sweepExpired(ctx context.Context, log *slog.Logger, st *store.Store) {
+	const sweepInterval = time.Hour
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		// Bounded on its own, so a sweep cannot outlive the interval and overlap the next.
+		sweepCtx, cancel := context.WithTimeout(ctx, sweepInterval/2)
+		sessions, sessionsErr := st.SweepSessions(sweepCtx)
+		failures, failuresErr := st.SweepSignInFailures(sweepCtx)
+		cancel()
+
+		if err := errors.Join(sessionsErr, failuresErr); err != nil {
+			log.Error("could not sweep expired rows", "error", err)
+			continue
+		}
+		if sessions > 0 || failures > 0 {
+			log.Info("swept expired rows",
+				"sessions", sessions, "sign_in_failures", failures)
 		}
 	}
 }

@@ -298,6 +298,13 @@ type RouteGroupPrefix struct {
 	Prefix       netip.Prefix
 }
 
+type SignInFailure struct {
+	EmailHash     []byte
+	Failures      int32
+	FirstFailedAt time.Time
+	LastFailedAt  time.Time
+}
+
 type StateChange struct {
 	ID            int64
 	NetworkID     uuid.UUID

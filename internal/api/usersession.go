@@ -2,8 +2,11 @@ package api
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,7 +71,23 @@ func (s *Server) signInWithPassword(w http.ResponseWriter, r *http.Request, emai
 		UserAgent:    r.UserAgent(),
 		SourceIP:     requestAddr(r),
 	})
+	var slow store.SignInThrottled
 	switch {
+	case errors.As(err, &slow):
+		// A 429 rather than the shared refusal, and it is not a leak: the count is kept for
+		// every address whether or not an account exists, so being told to wait says nothing
+		// about whether there is anybody here to sign in as (ADR-0027). Answering 401 would
+		// tell somebody who has mistyped six times that their password is wrong, which is
+		// false and makes them keep trying.
+		seconds := int(math.Ceil(slow.RetryAfter.Seconds()))
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		s.log.Warn("a sign-in was refused for arriving too fast",
+			"email", logx.Safe(email), "remote", logx.Safe(clientKey(r)), "retry_after_s", seconds)
+		httpx.Error(w, s.log, http.StatusTooManyRequests, "rate_limited",
+			fmt.Sprintf("too many failed sign-ins for that address; try again in %d second(s). "+
+				"Nothing is locked: the wait is at most a minute and a correct password clears it.",
+				seconds))
+		return
 	case errors.Is(err, store.ErrSignInAmbiguous):
 		// Named as its own failure because it is the one a person can act on, and the
 		// action is not "try a different password". ADR-0021 refuses an ambiguous name the
