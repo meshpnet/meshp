@@ -68,11 +68,12 @@ default route and fail-closed egress**, the last of these through a pf anchor ra
 nftables (ADR-0026). What macOS still cannot do is enforce a network's packet filter, so a
 network with a policy reports the group unhonoured there rather than half-applying it.
 
-**Windows has a tunnel and nothing above it yet.** A WinTun adapter comes up, carries an
-address and a route, and is configured exactly as the other two are (ADR-0028) — but names
-do not resolve, a full tunnel cannot be claimed, and it cannot fail closed or filter. Each
-of those is reported unhonoured rather than half-applied. The mobile platforms enrol, hold
-an address, and report honestly that they have no tunnel at all.
+**Windows has a tunnel and names.** A WinTun adapter comes up, carries an address and a
+route, and is configured exactly as the other two are (ADR-0028); mesh names resolve through
+the Name Resolution Policy Table, which routes by name rather than by interface so nothing
+else on the machine is captured (ADR-0029). What it cannot do yet is claim a full tunnel,
+fail closed, or filter — each reported unhonoured rather than half-applied. The mobile
+platforms enrol, hold an address, and report honestly that they have no tunnel at all.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.

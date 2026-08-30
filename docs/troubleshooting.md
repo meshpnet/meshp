@@ -75,12 +75,28 @@ sudo meshp status
 there yet, so a device enrols, holds an address, and reports honestly that it has no tunnel
 rather than pretending.
 
-On Windows there **is** a tunnel as of ADR-0028, reported as `userspace`, and nothing above
-it: names do not resolve, a full tunnel cannot be claimed, and it can neither fail closed nor
-filter. Each of those is reported unhonoured rather than half-applied, so a Windows device
-can be given a network with no policy and no egress group and nothing else. It needs
-`wintun.dll` beside `meshpd.exe`; without it the tunnel fails with a message naming the file
-and where to put it.
+On Windows there **is** a tunnel as of ADR-0028, reported as `userspace`, and names resolve
+as of ADR-0029. What it cannot do yet is claim a full tunnel, fail closed, or filter — each
+reported unhonoured rather than half-applied, so a Windows device can be given a network with
+no policy and no egress group. It needs `wintun.dll` beside `meshpd.exe`; without it the
+tunnel fails with a message naming the file and where to put it.
+
+Names work differently here than anywhere else, in one way worth knowing before it surprises
+somebody. **meshp's resolver listens on port 53 on Windows**, where on Linux and macOS it
+takes whatever port the kernel has spare. Windows names a DNS server by address alone: a rule
+naming a port is accepted, stores no server, and silently answers nothing for that domain — so
+53 is the only thing expressible (ADR-0029). If something else on the machine already holds
+`127.0.0.1:53`, and WSL and Docker Desktop both can, meshpd says so at start-up and carries on
+without names rather than configuring something that does not work.
+
+To see the rules meshp installed:
+
+```powershell
+Get-DnsClientNrptRule | Where-Object { $_.NameServers -contains "127.0.0.1" }
+```
+
+They are removed when a membership leaves. Nothing else in that table is meshp's, and meshp
+does not touch it: a rule it did not create carries no marker of its own and is left alone.
 
 On macOS there **is** a tunnel, and `meshp status` reports its kind as `userspace` — macOS
 has no WireGuard in the kernel, so wireguard-go moves the packets. Expect lower throughput
