@@ -25,6 +25,20 @@ linters:
       # it is here for — catching actual typos — and stops demanding that the
       # schema be renamed.
 
+  exclusions:
+    rules:
+      # The filtering platform's structure definitions, taken from wireguard-windows under
+      # its own licence (ADR-0030). They are kept whole rather than trimmed to what meshp
+      # references, so that they stay diffable against upstream when it changes — deleting
+      # the constants nothing here uses would turn the next update from a copy into a merge.
+      #
+      # Narrow on purpose: two files, one linter. Excluding the package would also hide
+      # findings in the files meshp wrote, which is where the value is — and those files were
+      # never linted at all until #186, because the lint job only ever saw Linux.
+      - path: internal/wfp/types_windows(_32|_64)?\.go
+        linters:
+          - unused
+
 formatters:
   enable:
     - gofmt
@@ -33,6 +47,7 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/meshpnet/meshp
+
 
 issues:
   max-same-issues: 0

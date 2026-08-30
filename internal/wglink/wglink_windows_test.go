@@ -3,6 +3,7 @@
 package wglink
 
 import (
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -209,7 +210,7 @@ func TestAMissingDLLSaysWhichFileAndWhereItGoes(t *testing.T) {
 	// And it leaves everything else alone, or every unrelated failure would come with
 	// advice about a DLL.
 	other := errSomethingElse{}
-	if got := wintunHint(other); got != error(other) {
+	if got := wintunHint(other); !errors.Is(got, other) {
 		t.Errorf("an unrelated error was decorated: %v", got)
 	}
 	if wintunHint(nil) != nil {
