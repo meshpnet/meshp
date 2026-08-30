@@ -15,11 +15,9 @@ bug and worth an issue.
 
 ## What you need
 
-- Linux, with root. This page is written for Linux because that is where the data plane is
-  complete. macOS is complete too — a tunnel, mesh names, a full-tunnel default route and
-  fail-closed egress — except that it cannot enforce a network's packet filter. Windows
-  is complete too, by a different mechanism at every layer, and shares the one gap macOS has.
-  The mobile platforms enrol, hold an address, and report honestly that they have no tunnel.
+- Linux, with root. This page is written for Linux because that is where the data plane
+  has been longest; macOS and Windows carry traffic too, and
+  [what each platform can do](platforms.md) says where each still falls short.
 - Docker with the Compose plugin, for the control plane and its database.
 - A kernel that can create WireGuard interfaces. `sudo ip link add dev wgcheck type
   wireguard && sudo ip link del dev wgcheck` tells you in one line.

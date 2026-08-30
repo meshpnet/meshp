@@ -15,6 +15,7 @@ Start here.
 
 | | |
 |---|---|
+| [What each platform can do](platforms.md) | Capability by capability, derived from the code rather than written from memory. |
 | [Invariants](INVARIANTS.md) | The claims this system makes, written so they can be checked by machines. |
 | [Decision records](adr/) | Why things are the way they are. |
 | [macOS laptop checks](testing/macos-laptop.md) | The things CI cannot prove, because a hosted runner never sleeps and never changes networks. |
@@ -32,10 +33,9 @@ Two worth starting with:
   tunnel drops, and why that is worth the support tickets.
 
 And the honest one: the [status section of the README](../README.md#status) says what does
-not work. The data plane is complete on Linux and on macOS — a tunnel, working names, a
-full-tunnel route and fail-closed egress, though macOS still cannot enforce a network's
-packet filter, and neither can Windows, which is otherwise complete. The mobile platforms
-have no tunnel at all. Nothing discovers direct paths anywhere.
+not work, and [what each platform can do](platforms.md) says it capability by capability —
+derived from the code, so it cannot quietly go out of date. Nothing discovers direct paths
+anywhere.
 If you need something that works this afternoon, the README names three projects that will
 serve you better today.
 

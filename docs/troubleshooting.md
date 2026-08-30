@@ -75,11 +75,11 @@ sudo meshp status
 there yet, so a device enrols, holds an address, and reports honestly that it has no tunnel
 rather than pretending.
 
-On Windows there **is** a tunnel as of ADR-0028, reported as `userspace`, and names resolve
-as of ADR-0029. It takes a full tunnel and fails closed as well, so the only thing a Windows
-device cannot do is enforce a network's packet filter — reported unhonoured rather than
-half-applied. It needs `wintun.dll` beside `meshpd.exe`; without it the tunnel fails with a
-message naming the file and where to put it.
+On Windows the tunnel is a WinTun adapter, reported as `userspace` (ADR-0028). It needs
+`wintun.dll` beside `meshpd.exe`; without it the tunnel fails with a message naming the file
+and where to put it. What this platform can and cannot do is in
+[what each platform can do](platforms.md), and anything it cannot is reported unhonoured
+rather than half-applied.
 
 Failing closed works differently here than anywhere else, and the difference shows up exactly
 once: **there is no command that takes the lock off.** On Linux it is an nftables table and on
@@ -115,15 +115,18 @@ Get-DnsClientNrptRule | Where-Object { $_.NameServers -contains "127.0.0.1" }
 They are removed when a membership leaves. Nothing else in that table is meshp's, and meshp
 does not touch it: a rule it did not create carries no marker of its own and is left alone.
 
-On macOS there **is** a tunnel, and `meshp status` reports its kind as `userspace` — macOS
-has no WireGuard in the kernel, so wireguard-go moves the packets. Expect lower throughput
-and higher CPU than the same host would manage on Linux; that is the platform, not a fault.
+On macOS `meshp status` reports the tunnel's kind as `userspace` — macOS has no WireGuard in
+the kernel, so wireguard-go moves the packets. Expect lower throughput and higher CPU than
+the same host would manage on Linux; that is the platform, not a fault. The same is true of
+Windows, and [what each platform can do](platforms.md) is where the capability question is
+answered.
 Names resolve on macOS too: the agent writes a supplemental match domain into the
 SystemConfiguration store, so only this network's suffix comes to meshp and everything else
 keeps going wherever it was already going. `scutil --dns` shows it as a resolver with a
 `domain` and a high `order`, which is the thing to look at when a mesh name does not answer.
 
-macOS can also be given a full tunnel now. It has no policy routing, so the claim is made
+A full tunnel on macOS is made without policy routing, which the platform does not have, so
+the claim is made
 the way wg-quick(8) makes it on this platform: `0.0.0.0/1` and `128.0.0.0/1`, which beat any
 default route without replacing it, plus explicit routes keeping the control plane and the
 relays off the tunnel they carry.
