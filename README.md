@@ -62,17 +62,14 @@ twice. Each colliding prefix is given a mapped range allocated by the control pl
 name layer resolves to the mapped address (ADR-0020), so a technician reaches both rather
 than reaching whichever membership was written last.
 
-What does not, and matters: direct paths are unimplemented, so everything is relayed. The
-data plane is complete on Linux and on macOS — **a tunnel, names that resolve, a full-tunnel
-default route and fail-closed egress**, the last of these through a pf anchor rather than
-nftables (ADR-0026). What macOS still cannot do is enforce a network's packet filter, so a
-network with a policy reports the group unhonoured there rather than half-applying it.
+What does not, and matters: direct paths are unimplemented, so everything is relayed, and
+the data plane exists on three of the five platforms ADR-0015 commits to. **Linux, macOS and
+Windows carry traffic; Android and iOS do not yet** — a device there enrols, holds an address,
+and reports honestly that it has no tunnel rather than pretending.
 
-**Windows is complete too**, by a different route at every layer: a WinTun adapter rather
-than a utun (ADR-0028), the Name Resolution Policy Table rather than a resolver dictionary
-(ADR-0029), and meshp's own filtering-platform provider rather than a pf anchor (ADR-0030).
-Like macOS it cannot enforce a network's packet filter. The mobile platforms enrol, hold an
-address, and report honestly that they have no tunnel at all.
+Which capability each platform has, and which mechanism it reaches it by, is in
+[docs/platforms.md](docs/platforms.md). That page is checked against the code, so it is right
+rather than recent.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
