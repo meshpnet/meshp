@@ -765,10 +765,14 @@ jobs:
       # which means an unelevated run would report success while testing nothing. A skip is
       # therefore a failure here, exactly as it is for the Linux and macOS jobs. GitHub's
       # Windows runners are elevated; the check below is what notices if that ever changes.
-      - name: an adapter comes up, is configured through wgctrl, and is observed back
+      # internal/resolved joins for the same reason wglink is here: whether the DNS client
+      # reads the policy meshp writes cannot be reasoned about. ADR-0029 records that Windows
+      # accepts a rule it cannot use and reports success, so the test that matters resolves a
+      # name and waits for the query to arrive rather than checking that a registry key exists.
+      - name: an adapter comes up, is configured through wgctrl, and a configured name reaches meshp
         shell: pwsh
         run: |
-          go test ./internal/wglink/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: report, and refuse a test that did not run

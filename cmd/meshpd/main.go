@@ -89,14 +89,22 @@ func main() {
 	log.Info("meshpd stopped cleanly")
 }
 
-// dnsListenAddr is where the resolver listens.
+// dnsListenAddr is where the resolver listens, which is not the same everywhere.
 //
-// Loopback, because the kill switch permits loopback unconditionally and a resolver anybody
-// on the café Wi-Fi could query would tell them what machines are in your customers'
-// networks. Port zero: the kernel picks, and what it picked is read back and reported,
-// because 53 is almost always already taken by whatever the machine was using before and
-// fighting it would break the host's existing DNS to install ours.
-var dnsListenAddr = netip.MustParseAddrPort("127.0.0.1:0")
+// Loopback on every platform, because the kill switch permits loopback unconditionally and a
+// resolver anybody on the café Wi-Fi could query would tell them what machines are in your
+// customers' networks.
+//
+// The port is where they part company, and it is a platform's answer rather than a
+// preference. Linux and macOS take zero — the kernel picks, and what it picked is read back
+// and reported — because 53 is almost always already taken and fighting it would break the
+// host's existing DNS to install ours. Both can be told about a port afterwards.
+//
+// Windows cannot. It names a DNS server by address alone; a rule naming a port is accepted,
+// stores nothing, and black-holes the domain while reporting success (ADR-0029). So there the
+// resolver competes for 53 like everybody else, and a host that cannot have it reports that
+// names will not resolve rather than configuring something that does not work.
+var dnsListenAddr = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), dnsListenPort)
 
 func run(ctx context.Context, log *slog.Logger, stateDir, socketPath, socketGroup string, reconcileEvery time.Duration) error {
 	agent := newAgent(ctx, log, stateDir, reconcileEvery)
