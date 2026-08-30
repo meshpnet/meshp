@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"runtime"
 	"flag"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
@@ -85,21 +85,31 @@ type findings struct {
 // and the thing that would undo it is not running.
 func (f findings) strandedEgress() bool { return (f.locked || f.claimed) && !f.daemonUp }
 
-
-
-
+// startMeshpdCommand is how meshpd is started on this machine, as something typeable.
+//
+// The whole of #66. `doctor` told everybody to run `systemctl start meshpd`, which is a
+// command two of the three platforms with a data plane do not have — and this is the one
+// screen ADR-0011 says has to carry commands that work, because whoever is reading it has no
+// network and cannot look anything up.
+//
+// Linux gets the unit under deploy/systemd. Nothing else gets a service manager, because
+// meshp does not yet define one: there is no launchd plist and no Windows service in this
+// repository, so naming a label for either would put a command on the screen that fails.
+// Running the binary is what is true on those platforms today, and it is what somebody
+// debugging is doing anyway.
+//
+// When deploy/ grows a plist or a service definition, this is where the command for it goes.
 func startMeshpdCommand() string {
 	if runtime.GOOS == "linux" {
 		return "sudo systemctl start meshpd"
 	}
-	return "start meshpd however this system starts services"
+	return "sudo meshpd"
 }
 
+// startMeshpdHint is the same command in a sentence, for the branch that is prose rather
+// than a block somebody types.
 func startMeshpdHint() string {
-	if runtime.GOOS == "linux" {
-		return "Start it with 'sudo systemctl start meshpd'."
-	}
-	return "Start meshpd however this system starts services."
+	return "Start it with '" + startMeshpdCommand() + "'."
 }
 
 func report(f findings, socket string) {

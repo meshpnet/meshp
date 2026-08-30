@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -38,9 +39,9 @@ func capture(t *testing.T, f findings) string {
 func TestAStrandedMachineIsToldHowToFixItByHand(t *testing.T) {
 	out := capture(t, findings{locked: true, claimed: true})
 
-	if !strings.Contains(out, "systemctl start meshpd") {
+	if !strings.Contains(out, startMeshpdCommand()) {
 		t.Errorf("missing %q\n  needed because: it is the thing to try first, which fixes "+
-			"it without root surgery\n\n%s", "systemctl start meshpd", out)
+			"it without root surgery\n\n%s", startMeshpdCommand(), out)
 	}
 
 	// The firewall half, asked of the platform that would have installed it. This used to
@@ -193,5 +194,67 @@ func TestTheUndoCommandsAreTypeableAsPrinted(t *testing.T) {
 	// And the two agree, since one number is used for both by design.
 	if wglink.EgressMark != wglink.EgressTable {
 		t.Error("the mark and the table have drifted apart")
+	}
+}
+
+// The command to start meshpd is this machine's, not Linux's.
+//
+// #66: `doctor` told every platform to run `systemctl start meshpd`, and two of the three
+// with a data plane have no systemd. This is the one screen ADR-0011 says must carry
+// commands that work — whoever is reading it has no network and cannot look anything up — so
+// a command for the wrong operating system is worse than none.
+//
+// Asserted through startMeshpdCommand rather than against literals, for the reason the undo
+// commands are: a test that spelled out the Linux string would pass on the Linux jobs and
+// say nothing about anywhere else. Both the macOS and Windows jobs run this package.
+func TestTheStartCommandIsForThisMachine(t *testing.T) {
+	command := startMeshpdCommand()
+
+	if command == "" {
+		t.Fatal("this platform is told nothing about how to start meshpd")
+	}
+	if strings.Contains(command, "%!") {
+		t.Errorf("%q has a formatting error in it", command)
+	}
+
+	// Typeable as it stands. The failure this guards against is a sentence where a command
+	// should be — "start meshpd however this system starts services" passes a platform check
+	// and loses the point #66 is about.
+	fields := strings.Fields(strings.TrimPrefix(command, "sudo "))
+	if len(fields) == 0 {
+		t.Fatalf("%q names no program", command)
+	}
+	if _, err := exec.LookPath(fields[0]); err != nil && runtime.GOOS != "windows" {
+		// meshpd itself will not be on PATH in a test run, which is the honest case here:
+		// what matters is that a program is named at all.
+		if fields[0] != "meshpd" {
+			t.Errorf("%q names %q, which this machine does not have", command, fields[0])
+		}
+	}
+
+	// And it reaches both screens: the stranded one, and the one a machine with no meshp
+	// state shows. Those were separate literals before #66 and only one of them was fixed.
+	for _, f := range []findings{{locked: true, claimed: true}, {}} {
+		if out := capture(t, f); !strings.Contains(out, command) {
+			t.Errorf("the start command is not on this screen:\n%s", out)
+		}
+	}
+}
+
+// Linux keeps its unit, because deploy/systemd is real. Nothing else names a service
+// manager, because meshp does not define one — there is no launchd plist and no Windows
+// service in this repository, so a label for either would be a command that fails.
+func TestOnlyLinuxIsToldToUseSystemd(t *testing.T) {
+	command := startMeshpdCommand()
+	switch runtime.GOOS {
+	case "linux":
+		if !strings.Contains(command, "systemctl") {
+			t.Errorf("Linux is not told to use its unit: %q", command)
+		}
+	default:
+		if strings.Contains(command, "systemctl") {
+			t.Errorf("%s is told to run systemctl, which it does not have: %q",
+				runtime.GOOS, command)
+		}
 	}
 }
