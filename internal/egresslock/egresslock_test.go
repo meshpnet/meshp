@@ -28,7 +28,7 @@ func TestAPlatformThatCanLockSaysHowToStop(t *testing.T) {
 	commands := Undo()
 
 	switch runtime.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
 		if len(commands) == 0 {
 			t.Fatal("this platform has a lock and offers no way to take it off by hand")
 		}
@@ -43,7 +43,9 @@ func TestAPlatformThatCanLockSaysHowToStop(t *testing.T) {
 		if strings.Contains(command, "%!") {
 			t.Errorf("%q has a formatting error in it", command)
 		}
-		if !strings.HasPrefix(command, "sudo ") {
+		// Root is asked for where asking is how it is done. Windows has no sudo: the undo
+		// there is a restart, which an administrator's console runs as it stands.
+		if runtime.GOOS != "windows" && !strings.HasPrefix(command, "sudo ") {
 			t.Errorf("%q is printed to somebody at a console and does not ask for root", command)
 		}
 	}

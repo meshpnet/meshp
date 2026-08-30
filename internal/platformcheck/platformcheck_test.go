@@ -1,5 +1,5 @@
 // Package platformcheck holds one test: every package whose behaviour depends on the
-// operating system is tested on macOS in CI, not only on Linux.
+// operating system is tested somewhere it actually runs, not only on Linux.
 //
 // It exists because CI reported a change as good when it was not. #156 makes `meshp doctor`
 // stop recommending `systemctl` where there is no systemd, and it breaks a test that asserts
@@ -18,6 +18,7 @@ package platformcheck
 
 import (
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -30,29 +31,29 @@ import (
 // repoRoot is where the module lives, from this package's directory.
 const repoRoot = "../.."
 
-// macOSJobPackages finds the packages a `go test` line runs.
+// jobPackages finds the packages a `go test` line runs.
 //
 // Read out of the workflow rather than duplicated here, because a copy would be one more
 // thing to keep in step and this test exists because that does not work.
 //
-// Applied to the macOS job's block alone, which the first version of this got wrong: run
+// Applied to one job's block at a time, which the first version of this got wrong: run
 // against the whole file it also matched the Linux job, so internal/nftables and
 // internal/pathprobe counted as covered on macOS while being tested only on Linux — the
 // exact thing this is here to catch, satisfied by the thing it is checking against.
-var macOSJobPackages = regexp.MustCompile(`go test ((?:\./[^\s]+/ )+)-count=1`)
+var jobPackages = regexp.MustCompile(`go test ((?:\./[^\s]+/ )+)-count=1`)
 
-// macOSJob is the block of the workflow belonging to the macOS job.
+// job is the block of the workflow belonging to one job.
 //
 // By indentation, because that is what YAML gives us and pulling in a parser for one field
 // would be a dependency for a test. A job ends where the next one at the same indentation
 // begins.
-func macOSJob(t *testing.T, workflow string) string {
+func job(t *testing.T, workflow, name string) string {
 	t.Helper()
-	const header = "\n  dataplane-macos:\n"
+	header := "\n  " + name + ":\n"
 	start := strings.Index(workflow, header)
 	if start < 0 {
-		t.Fatal("no dataplane-macos job in the workflow; if it was renamed, this test needs " +
-			"to learn the new name rather than be deleted")
+		t.Fatalf("no %s job in the workflow; if it was renamed, this test needs to learn the "+
+			"new name rather than be deleted", name)
 	}
 	rest := workflow[start+len(header):]
 
@@ -176,26 +177,64 @@ func hasTests(t *testing.T, pkg string) bool {
 	return false
 }
 
-func TestEveryPlatformSensitivePackageIsTestedOnMacOS(t *testing.T) {
+// buildableOn reports whether a package has any file the given platform would compile.
+//
+// Asked of go/build rather than worked out from filenames, because working it out from
+// filenames is what this test was doing wrong: it required internal/wfp to run on macOS,
+// where the package has no files at all and `go test` would fail rather than test anything.
+//
+// The question a guard about platform coverage should ask is "can this run there", and the
+// only thing that answers it correctly is the same code the toolchain uses.
+func buildableOn(t *testing.T, pkg, goos, goarch string) bool {
+	t.Helper()
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH = goos, goarch
+	ctx.CgoEnabled = false
+
+	dir := filepath.Join(repoRoot, pkg)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", pkg, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		if ok, err := ctx.MatchFile(dir, entry.Name()); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// packagesRunBy reads the packages one job's `go test` lines name.
+func packagesRunBy(t *testing.T, workflow, jobName string) map[string]bool {
+	t.Helper()
+	matches := jobPackages.FindAllStringSubmatch(job(t, workflow, jobName), -1)
+	if len(matches) == 0 {
+		t.Fatalf("found no `go test ./pkg/ ... -count=1` line in the %s job; if it changed "+
+			"shape, this test needs to learn the new one rather than be deleted", jobName)
+	}
+	out := map[string]bool{}
+	for _, match := range matches {
+		for _, pkg := range strings.Fields(match[1]) {
+			out[strings.Trim(pkg, "./")] = true
+		}
+	}
+	return out
+}
+
+func TestEveryPlatformSensitivePackageIsTestedWhereItRuns(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github/workflows/ci.yml"))
 	if err != nil {
 		t.Fatalf("reading the workflow: %v", err)
 	}
 
-	// The macOS job runs the same package list twice, privileged and not. Either occurrence
-	// answers the question; taking the union means a package named in only one of them
-	// still counts, which is right — it ran somewhere on macOS.
-	matches := macOSJobPackages.FindAllStringSubmatch(macOSJob(t, string(workflow)), -1)
-	if len(matches) == 0 {
-		t.Fatal("found no `go test ./pkg/ ... -count=1` line in the workflow; if the macOS " +
-			"job changed shape, this test needs to learn the new one rather than be deleted")
-	}
-	tested := map[string]bool{}
-	for _, match := range matches {
-		for _, pkg := range strings.Fields(match[1]) {
-			tested[strings.Trim(pkg, "./")] = true
-		}
-	}
+	// Each job runs the same package list more than once — privileged and not on macOS.
+	// Either occurrence answers the question; the union is right, because a package named in
+	// only one of them still ran there.
+	onMacOS := packagesRunBy(t, string(workflow), "dataplane-macos")
+	onWindows := packagesRunBy(t, string(workflow), "dataplane-windows")
 
 	for pkg := range platformSensitive(t) {
 		if !hasTests(t, pkg) {
@@ -206,11 +245,27 @@ func TestEveryPlatformSensitivePackageIsTestedOnMacOS(t *testing.T) {
 			t.Logf("%s decides something from the operating system and has no tests at all", pkg)
 			continue
 		}
-		if !tested[pkg] {
-			t.Errorf("%s decides something from the operating system and is not run by the "+
-				"macOS job in .github/workflows/ci.yml.\n"+
-				"Add ./%s/ to both `go test` lines there, or explain here why it does not "+
-				"need to run on macOS.", pkg, pkg)
+
+		// Where a package can run decides where it must be tested. Requiring macOS of a
+		// package with no macOS files is how this test asked for a job that could only fail:
+		// internal/wfp is the filtering platform and exists on exactly one operating system.
+		switch {
+		case buildableOn(t, pkg, "darwin", "arm64"):
+			if !onMacOS[pkg] {
+				t.Errorf("%s decides something from the operating system, builds on macOS, "+
+					"and is not run by the macOS job in .github/workflows/ci.yml.\n"+
+					"Add ./%s/ to both `go test` lines there, or explain here why it does "+
+					"not need to run on macOS.", pkg, pkg)
+			}
+		case buildableOn(t, pkg, "windows", "amd64"):
+			if !onWindows[pkg] {
+				t.Errorf("%s decides something from the operating system, builds only on "+
+					"Windows, and is not run by the Windows job in .github/workflows/ci.yml.\n"+
+					"Add ./%s/ to the `go test` line there.", pkg, pkg)
+			}
+		default:
+			t.Logf("%s decides something from the operating system and builds on neither "+
+				"macOS nor Windows, so no job here can run it", pkg)
 		}
 	}
 }

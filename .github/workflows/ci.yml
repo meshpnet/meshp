@@ -769,10 +769,10 @@ jobs:
       # reads the policy meshp writes cannot be reasoned about. ADR-0029 records that Windows
       # accepts a rule it cannot use and reports success, so the test that matters resolves a
       # name and waits for the query to arrive rather than checking that a registry key exists.
-      - name: an adapter comes up, is configured through wgctrl, and a configured name reaches meshp
+      - name: an adapter comes up, names reach meshp, and a lock refuses what it does not name
         shell: pwsh
         run: |
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/wfp/ ./internal/egresslock/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: report, and refuse a test that did not run
