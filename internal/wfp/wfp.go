@@ -138,7 +138,13 @@ func isAlreadyExists(err error) bool { return isFwpErr(err, fwpErrAlreadyExists)
 // Success on the way out, for the reason removal is idempotent everywhere else in this
 // project: teardown runs whether or not anything was installed.
 func isGone(err error) bool {
-	return isFwpErr(err, fwpErrNotFound) || isFwpErr(err, fwpErrFilterNotFound)
+	for _, code := range []uintptr{fwpErrNotFound, fwpErrFilterNotFound,
+		fwpErrSublayerNotFound, fwpErrProviderNotFound} {
+		if isFwpErr(err, code) {
+			return true
+		}
+	}
+	return false
 }
 
 func isFwpErr(err error, code uintptr) bool {
@@ -149,11 +155,18 @@ func isFwpErr(err error, code uintptr) bool {
 // The filtering platform's own error codes, which are HRESULT-shaped rather than Win32 and
 // are not in x/sys/windows.
 //
-// Only the two this package has to tell apart from everything else: an object that is already
-// there, which is success on the reconcile path, and one that is not, which is success on the
-// way out.
+// Only the ones this package has to tell apart from everything else: an object already there,
+// which is success on the reconcile path, and one that is not, which is success on the way
+// out. Everything else is a failure the caller should hear about.
+//
+// There is an absent code per kind of object rather than one shared one, which cost a CI run
+// to find out: removing a lock that was never installed reported "the sublayer does not
+// exist" and was treated as a failure, so every teardown on a device that had never claimed a
+// route would have logged one.
 const (
-	fwpErrAlreadyExists  = 0x80320009
-	fwpErrFilterNotFound = 0x80320003
-	fwpErrNotFound       = 0x80320008
+	fwpErrFilterNotFound   = 0x80320003
+	fwpErrProviderNotFound = 0x80320005
+	fwpErrSublayerNotFound = 0x80320007
+	fwpErrNotFound         = 0x80320008
+	fwpErrAlreadyExists    = 0x80320009
 )

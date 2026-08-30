@@ -23,12 +23,18 @@ func New(ctx context.Context) Lock {
 // Held reports whether a lock left by any process is currently installed.
 func Held(ctx context.Context) bool { return wfp.Held(ctx) }
 
-// Undo is the exact commands that take the lock off by hand.
+// Undo is the exact command that takes the lock off by hand.
 //
-// meshp's filters hang beneath a provider of its own, so removing the provider takes them and
-// nothing else — which is why this is one command rather than a list. netsh is on every
-// Windows and needs nothing installed, which matters because whoever reads this is at a
-// console on a machine with no network.
-func Undo() []string {
-	return []string{`netsh wfp show state` + " (meshp's filters are under the provider named meshp)"}
-}
+// A restart, which is not a cop-out on this platform: the filtering platform has no
+// command-line interface that deletes anything. netsh can show the state and not change it,
+// and PowerShell has no cmdlet for a WFP provider — the objects are reachable only through
+// the API meshp calls.
+//
+// What makes a restart an answer rather than a shrug is that meshp's filters are deliberately
+// not persistent (ADR-0030). They are lost when the filter engine stops, so a reboot clears
+// them exactly as it clears an nftables table on Linux or a pf anchor on macOS. The
+// difference is only that on those platforms there is also a command, and here there is not.
+//
+// Printed second, after `meshp doctor` has already said that starting meshpd removes it —
+// which is the answer that does not cost somebody their open windows.
+func Undo() []string { return []string{"shutdown /r /t 0"} }
