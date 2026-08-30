@@ -34,7 +34,8 @@ Two worth starting with:
 And the honest one: the [status section of the README](../README.md#status) says what does
 not work. The data plane is complete on Linux and on macOS — a tunnel, working names, a
 full-tunnel route and fail-closed egress, though macOS still cannot enforce a network's
-packet filter — and absent elsewhere; nothing discovers direct paths yet.
+packet filter. Windows has a tunnel and nothing above it yet, and the mobile platforms have
+none. Nothing discovers direct paths anywhere.
 If you need something that works this afternoon, the README names three projects that will
 serve you better today.
 

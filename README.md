@@ -67,8 +67,12 @@ data plane is complete on Linux and on macOS — **a tunnel, names that resolve,
 default route and fail-closed egress**, the last of these through a pf anchor rather than
 nftables (ADR-0026). What macOS still cannot do is enforce a network's packet filter, so a
 network with a policy reports the group unhonoured there rather than half-applying it.
-Windows and the mobile platforms enrol, hold an address, and report honestly that they have
-no tunnel and cannot filter.
+
+**Windows has a tunnel and nothing above it yet.** A WinTun adapter comes up, carries an
+address and a route, and is configured exactly as the other two are (ADR-0028) — but names
+do not resolve, a full tunnel cannot be claimed, and it cannot fail closed or filter. Each
+of those is reported unhonoured rather than half-applied. The mobile platforms enrol, hold
+an address, and report honestly that they have no tunnel at all.
 
 It is public from the first commit because the design decisions are the
 interesting part and we would rather be argued with early.
