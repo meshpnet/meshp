@@ -182,13 +182,27 @@ func TestRemovingALockThatIsNotThere(t *testing.T) {
 	}
 }
 
-// A host that cannot reach the filtering platform says so rather than finding out per apply.
-func TestWithoutPrivilegeThisHostSaysItCannotLock(t *testing.T) {
-	if windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("this is about what an unprivileged agent reports; the unprivileged run covers it")
-	}
-	if New(t.Context()) != nil {
-		t.Error("an agent that cannot open the filter engine reported that it can refuse egress")
+// What this host says it can do matches what it can do.
+//
+// Both directions in one test, and not two that skip. The Windows job runs once and always
+// elevated — unlike macOS, where an unprivileged pass is the default and sudo gives the
+// other — so a test gated on *not* being administrator could never run there, and the job's
+// refusal to accept a skip is what caught it.
+//
+// The property is the one ADR-0007 and ADR-0011 both turn on: a host reports what it can
+// enforce, and an agent that claimed fail-closed egress and then failed to install it on
+// every reconcile would be placed in networks that require the property and never have it.
+func TestWhatThisHostSaysItCanDoMatchesItsPrivilege(t *testing.T) {
+	elevated := windows.GetCurrentProcessToken().IsElevated()
+	lock := New(t.Context())
+
+	switch {
+	case elevated && lock == nil:
+		t.Error("an elevated agent reported that it cannot refuse egress, so a network that " +
+			"requires fail-closed would report this device unconverged for no reason")
+	case !elevated && lock != nil:
+		t.Error("an agent that cannot open the filter engine reported that it can refuse " +
+			"egress; it would accept a fail-closed network and fail on every pass")
 	}
 }
 
