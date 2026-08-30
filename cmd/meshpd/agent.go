@@ -20,6 +20,7 @@ import (
 	"github.com/meshpnet/meshp/internal/egresslock"
 	"github.com/meshpnet/meshp/internal/enrollclient"
 	"github.com/meshpnet/meshp/internal/keys"
+	"github.com/meshpnet/meshp/internal/netwatch"
 	"github.com/meshpnet/meshp/internal/nftables"
 	"github.com/meshpnet/meshp/internal/pathprobe"
 	"github.com/meshpnet/meshp/internal/peerset"
@@ -73,6 +74,13 @@ type agent struct {
 	// is nil while pf holds the lock (ADR-0026).
 	lockOnce sync.Once
 	lock     egresslock.Lock
+
+	// watch reports when this machine's networking moves, and watchFanout is every
+	// reconciler waiting to hear about it. Nil where the platform cannot say, in which case
+	// the reconcile timer is the whole of the recovery (#172).
+	watchOnce   sync.Once
+	watch       <-chan struct{}
+	watchFanout map[chan struct{}]struct{}
 
 	// claims is what every membership on this device says it carries, shared so that two
 	// networks asking for the same customer prefix can each see the other. One device can
@@ -482,23 +490,102 @@ func (a *agent) ensureSession(m agentstate.Membership) {
 }
 
 // reconcileLoop re-applies desired state periodically for as long as the session lives.
+// reconcileLoop re-applies desired state on a timer, and whenever the machine's networking
+// moves underneath it.
+//
+// Two sources and they are not redundant. The ticker is what makes correction *certain*: a
+// notification that is missed, coalesced away, or never sent because the platform did not
+// consider something a change still has to be put right eventually. The watcher is what makes
+// it *prompt*.
+//
+// Prompt matters more than it sounds. On macOS and Windows the routes keeping the relay and
+// the control plane off the tunnel are pinned to whatever gateway was current when the claim
+// was made — neither platform has Linux's firewall mark — so on a new network they point at a
+// gateway that is not there. A device that is failing closed then has no way out at all until
+// the next pass, which is why waiting a minute for a laptop that changed rooms was worth
+// fixing (#172).
 func (a *agent) reconcileLoop(ctx context.Context, applier *deviceApplier) {
 	if a.reconcileEvery <= 0 {
 		return
 	}
 	ticker := time.NewTicker(a.reconcileEvery)
 	defer ticker.Stop()
+
+	// Nil where this platform cannot say. The loop then behaves exactly as it did before this
+	// existed — a receive on a nil channel blocks forever, so the select falls through to the
+	// ticker — and the agent says so once rather than pretending to a promptness it has not
+	// got.
+	changes := a.networkChanges(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			applier.reconcile(ctx)
+		case <-changes:
+			a.log.Info("this machine's networking changed; reconciling now rather than waiting",
+				"interval", a.reconcileEvery)
+		}
+		applier.reconcile(ctx)
+	}
+}
+
+// networkChanges opens the watcher, once, and shares it.
+//
+// Once because it is a socket on two platforms and a set of kernel callbacks on the third, and
+// a device in several networks would otherwise open one per membership — each reporting the
+// same change, each waking a different reconciler. Shared, so one change wakes all of them,
+// which is what a change of network actually is.
+func (a *agent) networkChanges(ctx context.Context) <-chan struct{} {
+	a.watchOnce.Do(func() {
+		a.watch = netwatch.Watch(ctx)
+		if a.watch == nil {
+			a.log.Info("this host cannot be told when its networking changes",
+				"os", runtime.GOOS,
+				"consequence", "a change of network is noticed at the next reconcile",
+				"interval", a.reconcileEvery)
+			return
+		}
+		a.watchFanout = map[chan struct{}]struct{}{}
+		go a.fanOutNetworkChanges(ctx)
+	})
+
+	if a.watch == nil {
+		return nil
+	}
+	mine := make(chan struct{}, 1)
+	a.mu.Lock()
+	a.watchFanout[mine] = struct{}{}
+	a.mu.Unlock()
+	return mine
+}
+
+// fanOutNetworkChanges delivers one watcher's signal to every reconciler.
+//
+// Non-blocking per listener, for the reason the watcher itself is: a reconciler busy with the
+// last change must not stop the next one reaching the others, and a change that arrives while
+// one is already pending is the same answer anyway.
+func (a *agent) fanOutNetworkChanges(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-a.watch:
+			if !ok {
+				return
+			}
+			a.mu.Lock()
+			for listener := range a.watchFanout {
+				select {
+				case listener <- struct{}{}:
+				default:
+				}
+			}
+			a.mu.Unlock()
 		}
 	}
 }
 
-// setApplied records that a version was applied, and persists it.
 func (a *agent) setApplied(membershipID uuid.UUID, appliedVersion int64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

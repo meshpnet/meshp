@@ -597,7 +597,7 @@ jobs:
       - name: interfaces, routes, teardown, a packet across the tunnel, a bound probe, the host resolver, two customers on one prefix, and an undo that names a real program
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ ./internal/egresslock/ -count=1 -v 2>&1 | tee dataplane.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/pathprobe/ ./internal/resolved/ ./internal/nftables/ ./internal/egresslock/ ./internal/netwatch/ -count=1 -v 2>&1 | tee dataplane.log
         continue-on-error: false
 
       - name: report, and refuse a silent skip
@@ -679,12 +679,12 @@ jobs:
       - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-user.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-user.log
 
       - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-root.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-root.log
 
       # A test that skipped in both runs never ran anywhere, which reports success while
       # testing nothing. Checked by name rather than by counting skips, because each run is
@@ -772,7 +772,7 @@ jobs:
       - name: an adapter comes up, names reach meshp, and a lock refuses what it does not name
         shell: pwsh
         run: |
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/wfp/ ./internal/egresslock/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/wfp/ ./internal/egresslock/ ./internal/netwatch/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: report, and refuse a test that did not run
