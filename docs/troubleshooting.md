@@ -76,10 +76,27 @@ there yet, so a device enrols, holds an address, and reports honestly that it ha
 rather than pretending.
 
 On Windows there **is** a tunnel as of ADR-0028, reported as `userspace`, and names resolve
-as of ADR-0029. What it cannot do yet is claim a full tunnel, fail closed, or filter — each
-reported unhonoured rather than half-applied, so a Windows device can be given a network with
-no policy and no egress group. It needs `wintun.dll` beside `meshpd.exe`; without it the
-tunnel fails with a message naming the file and where to put it.
+as of ADR-0029. It takes a full tunnel and fails closed as well, so the only thing a Windows
+device cannot do is enforce a network's packet filter — reported unhonoured rather than
+half-applied. It needs `wintun.dll` beside `meshpd.exe`; without it the tunnel fails with a
+message naming the file and where to put it.
+
+Failing closed works differently here than anywhere else, and the difference shows up exactly
+once: **there is no command that takes the lock off.** On Linux it is an nftables table and on
+macOS a pf anchor, and both can be removed by hand from a console. Windows' filtering platform
+has no command-line interface that changes anything — netsh shows its state and PowerShell has
+no cmdlet for a provider — so `meshp doctor` offers a restart instead. That is a real undo
+rather than a shrug: meshp's filters are deliberately not persistent (ADR-0030), so a reboot
+clears them exactly as it clears the other two. Starting meshpd is still the first answer and
+costs nobody their open windows.
+
+To see what meshp installed:
+
+```powershell
+netsh wfp show state
+```
+
+Its filters are under a provider named `meshp`, and nothing else in that table is meshp's.
 
 Names work differently here than anywhere else, in one way worth knowing before it surprises
 somebody. **meshp's resolver listens on port 53 on Windows**, where on Linux and macOS it

@@ -33,8 +33,7 @@ Out of scope: anything you deploy meshp on top of, and the deployment examples u
 
 **Read this before you spend time on it.** meshp is pre-alpha and the README says not to
 deploy it. The data plane exists on Linux, macOS and Windows and nowhere else; macOS cannot
-enforce a network's packet filter, and Windows has a tunnel and name resolution but no
-full-tunnel route, no fail-closed egress and no filtering. Reports are still welcome and
+enforce a network's packet filter, and neither can Windows. Reports are still welcome and
 will be handled as above —
 but a finding that a half-built feature is half-built is not one, and there are several of
 those in the open issues already.
