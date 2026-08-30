@@ -24,9 +24,9 @@ import (
 func addFilter(session uintptr, slot string, layer windows.GUID, action wtFwpActionType,
 	weight uint8, conditions []wtFwpmFilterCondition0, description string) error {
 
-	displayData, err := createWtFwpmDisplayData0("meshp", description)
+	displayData, err := displayData("meshp", description)
 	if err != nil {
-		return wrapErr(err)
+		return err
 	}
 
 	filter := wtFwpmFilter0{

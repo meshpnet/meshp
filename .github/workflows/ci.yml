@@ -40,6 +40,18 @@ jobs:
           cache: true
       - run: make lint
 
+      # The lint above sees this tree as Linux, because that is what it is running on. Every
+      # file built for another platform is invisible to it, and `make lint` on a developer's
+      # Mac has the mirror-image blind spot — between them, a _windows.go file was checked by
+      # nobody.
+      #
+      # That was survivable while the only non-Linux files were stubs. internal/wfp is nine
+      # hundred lines of syscall code and had never been linted at all when this was added
+      # (#186). The target below has existed since the first data plane and its own comment
+      # anticipated exactly this; nothing called it, which is the shape ADR-0018 is about.
+      - name: and for the platforms this runner is not
+        run: make lint-cross
+
       # go.mod carried a stale "// indirect" on a module imported directly, because
       # nothing checked. -diff writes nothing, so a failure here leaves no mess behind.
       - name: go.mod is tidy

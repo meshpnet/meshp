@@ -40,7 +40,6 @@ var (
 	procFwpmTransactionBegin0    = modfwpuclnt.NewProc("FwpmTransactionBegin0")
 	procFwpmTransactionCommit0   = modfwpuclnt.NewProc("FwpmTransactionCommit0")
 	procFwpmTransactionAbort0    = modfwpuclnt.NewProc("FwpmTransactionAbort0")
-	procFwpmFreeMemory0          = modfwpuclnt.NewProc("FwpmFreeMemory0")
 )
 
 // result turns a filtering-platform return value into an error.
@@ -114,8 +113,4 @@ func fwpmTransactionCommit0(engine uintptr) error {
 func fwpmTransactionAbort0(engine uintptr) error {
 	r, _, _ := procFwpmTransactionAbort0.Call(engine)
 	return result(r)
-}
-
-func fwpmFreeMemory0(p unsafe.Pointer) {
-	_, _, _ = procFwpmFreeMemory0.Call(uintptr(p))
 }

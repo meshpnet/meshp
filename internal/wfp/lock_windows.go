@@ -7,11 +7,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"golang.org/x/sys/windows"
-	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"net"
 	"net/netip"
 	"sort"
+
+	"golang.org/x/sys/windows"
+	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
 // ErrUnsupported means this host cannot refuse egress outside the tunnel.

@@ -33,16 +33,17 @@
 package wfp
 
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// wfpObjectInstaller is what runTransaction takes.
+// wfpObjectInstaller is the shape of an operation run inside a filter transaction.
 //
 // Declared here rather than in the borrowed files because it belongs to the half that is
-// meshp's: blocker.go is the file it came from and blocker.go is the file not taken.
+// meshp's: it came from blocker.go, and blocker.go is the file not taken.
 type wfpObjectInstaller func(uintptr) error
 
 // providerKey and sublayerKey are meshp's namespace in the filtering platform.
@@ -84,7 +85,7 @@ var (
 func openSession() (uintptr, error) {
 	var handle uintptr
 	if err := fwpmEngineOpen0(nil, cRPC_C_AUTHN_WINNT, nil, nil, unsafe.Pointer(&handle)); err != nil {
-		return 0, fmt.Errorf("wfp: opening the filter engine: %w", wrapErr(err))
+		return 0, fmt.Errorf("wfp: opening the filter engine: %w", err)
 	}
 	return handle, nil
 }
@@ -99,9 +100,9 @@ func openSession() (uintptr, error) {
 // software has installed in its own sublayers. Within meshp's sublayer the filters' own
 // weights decide, which is where the policy actually lives.
 func registerBaseObjects(session uintptr) error {
-	displayData, err := createWtFwpmDisplayData0("meshp", "meshp fail-closed egress")
+	displayData, err := displayData("meshp", "meshp fail-closed egress")
 	if err != nil {
-		return wrapErr(err)
+		return err
 	}
 
 	provider := wtFwpmProvider0{
@@ -110,7 +111,7 @@ func registerBaseObjects(session uintptr) error {
 	}
 	if err := fwpmProviderAdd0(session, &provider, 0); err != nil &&
 		!isAlreadyExists(err) {
-		return fmt.Errorf("wfp: registering meshp as a filter provider: %w", wrapErr(err))
+		return fmt.Errorf("wfp: registering meshp as a filter provider: %w", err)
 	}
 
 	sublayer := wtFwpmSublayer0{
@@ -121,7 +122,7 @@ func registerBaseObjects(session uintptr) error {
 	}
 	if err := fwpmSubLayerAdd0(session, &sublayer, 0); err != nil &&
 		!isAlreadyExists(err) {
-		return fmt.Errorf("wfp: registering meshp's sublayer: %w", wrapErr(err))
+		return fmt.Errorf("wfp: registering meshp's sublayer: %w", err)
 	}
 	return nil
 }
@@ -148,8 +149,8 @@ func isGone(err error) bool {
 }
 
 func isFwpErr(err error, code uintptr) bool {
-	errno, ok := err.(windows.Errno)
-	return ok && uintptr(errno) == code
+	var errno windows.Errno
+	return errors.As(err, &errno) && uintptr(errno) == code
 }
 
 // The filtering platform's own error codes, which are HRESULT-shaped rather than Win32 and
@@ -170,3 +171,30 @@ const (
 	fwpErrNotFound         = 0x80320008
 	fwpErrAlreadyExists    = 0x80320009
 )
+
+// displayData is the name and description every filtering-platform object carries.
+//
+// Written here rather than borrowed. The three small helpers that came with the type
+// definitions have been absorbed, so what is borrowed is now only the struct layouts — which
+// is the whole of what ADR-0030 justified borrowing, and it means everything else in this
+// package is linted rather than exempted (#186).
+func displayData(name, description string) (*wtFwpmDisplayData0, error) {
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, fmt.Errorf("wfp: naming a filter object: %w", err)
+	}
+	descriptionPtr, err := windows.UTF16PtrFromString(description)
+	if err != nil {
+		return nil, fmt.Errorf("wfp: describing a filter object: %w", err)
+	}
+	return &wtFwpmDisplayData0{name: namePtr, description: descriptionPtr}, nil
+}
+
+// filterWeight is a filter's position within meshp's sublayer.
+//
+// Higher is evaluated first, and every action this package installs is terminating, so the
+// highest weight that matches decides. That is what makes "permit these, refuse everything
+// else" expressible here at all — the ordering the other two platforms get from a list.
+func filterWeight(weight uint8) wtFwpValue0 {
+	return wtFwpValue0{_type: cFWP_UINT8, value: uintptr(weight)}
+}
