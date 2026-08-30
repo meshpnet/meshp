@@ -4,6 +4,7 @@ package netwatch
 
 import (
 	"context"
+
 	"golang.org/x/sys/unix"
 )
 
