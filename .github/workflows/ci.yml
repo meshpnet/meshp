@@ -715,12 +715,88 @@ jobs:
           fi
           echo "every test ran in at least one of the two runs"
 
+  dataplane-windows:
+    name: data plane (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      # wintun.dll is not part of Windows and is not in this repository (ADR-0028): a binary
+      # in git is one nobody reviews and every clone carries. It is fetched from the
+      # WireGuard project's own distribution point and checked against a hash recorded here,
+      # so an upgrade is a diff a person can see rather than a silent change of bytes.
+      - name: fetch WinTun, and refuse anything but the bytes we expect
+        shell: pwsh
+        run: |
+          $zip = "wintun-0.14.1.zip"
+          $wantZip = "07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51"
+          $wantDll = "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE"
+
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/$zip" -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($got -ne $wantZip) {
+            throw "wintun zip is $got, expected $wantZip. Either upstream republished it or " +
+                  "this download is not what it claims to be. Do not update the hash without " +
+                  "finding out which."
+          }
+          Expand-Archive $zip -DestinationPath wintun-extracted
+          $dll = "wintun-extracted\wintun\bin\amd64\wintun.dll"
+          $gotDll = (Get-FileHash $dll -Algorithm SHA256).Hash
+          if ($gotDll -ne $wantDll) { throw "wintun.dll is $gotDll, expected $wantDll" }
+
+      # Beside the test binary, because that is where Windows looks. The DLL search is
+      # relative to the executable rather than to the working directory, which is also why
+      # `go run` can never find it — see ADR-0028.
+      #
+      # `go test` builds a binary per package into a temporary directory and runs it there,
+      # so the DLL goes somewhere on the default search path instead. System32 is the
+      # runner's own disposable machine; nothing here does that to a real host, where meshp
+      # ships the DLL beside meshpd.exe.
+      - name: put the DLL where a test binary will find it
+        shell: pwsh
+        run: Copy-Item wintun-extracted\wintun\bin\amd64\wintun.dll $env:WINDIR\System32\wintun.dll
+
+      # Creating a WinTun adapter installs a driver, so these tests skip without elevation,
+      # which means an unelevated run would report success while testing nothing. A skip is
+      # therefore a failure here, exactly as it is for the Linux and macOS jobs. GitHub's
+      # Windows runners are elevated; the check below is what notices if that ever changes.
+      - name: an adapter comes up, is configured through wgctrl, and is observed back
+        shell: pwsh
+        run: |
+          go test ./internal/wglink/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: report, and refuse a test that did not run
+        if: always()
+        shell: pwsh
+        run: |
+          $skipped = Select-String -Path windows.log -Pattern '^\s*--- SKIP: ' |
+            ForEach-Object { ($_.Line -replace '.*--- SKIP: ', '') -replace ' .*', '' }
+
+          "### Data plane (Windows)"
+          ""
+          '```'
+          Select-String -Path windows.log -Pattern '^(--- |ok|FAIL)' | ForEach-Object { $_.Line }
+          '```'
+
+          if ($skipped) {
+            "these tests skipped, so nothing here was exercised:"
+            $skipped
+            throw "the Windows data plane tests did not run"
+          }
+          "every test ran"
+
   ci-required:
     name: ci
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, reachability, image, dataplane, dataplane-macos, vuln, fuzz-seeds, dco]
+    needs: [lint, test, cross, proto, integration, migrations, migrations-immutable, standalone, reachability, image, dataplane, dataplane-macos, dataplane-windows, vuln, fuzz-seeds, dco]
     steps:
       - name: report
         run: |
