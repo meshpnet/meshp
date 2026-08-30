@@ -234,11 +234,27 @@ func (l *windowsLink) createDevice(name string, mtu int) error {
 	// Named for what meshp calls the interface, so `wg show` agrees with the rest of the
 	// product. On this platform the UAPI is a named pipe under
 	// \\.\pipe\ProtectedPrefix\Administrators\WireGuard\, and wireguard-go creates it owned
-	// by LocalSystem — which is what wgctrl insists on before it will dial one. That is a
-	// deployment constraint rather than a detail: meshpd has to run with enough privilege to
-	// hand a pipe to LocalSystem, which a Windows service does and an ordinary elevated
-	// process may not.
+	// by LocalSystem — which is what wgctrl insists on before it will dial one.
+	//
+	// Handing an object to a security identity you are not is refused by default, even to an
+	// administrator: Windows answers ERROR_INVALID_OWNER, which prints as "this security ID
+	// may not be assigned as the owner of this object" and names neither the identity nor the
+	// remedy. A service running as LocalSystem never meets it, because it already is the
+	// owner it is assigning. Anybody running meshpd from an elevated prompt does, and so does
+	// CI.
+	//
+	// SeRestorePrivilege is the documented way through, and an administrator already holds
+	// it — it is disabled in the token rather than absent. So it is enabled for exactly the
+	// call that needs it and put back immediately, rather than held for the life of a daemon:
+	// while enabled it also permits writing files regardless of their permissions, which is
+	// far more than publishing a pipe needs.
+	restore, err := withRestorePrivilege()
+	if err != nil {
+		dev.Close()
+		return fmt.Errorf("wglink: preparing to publish the control pipe for %s: %w", name, err)
+	}
 	listener, err := ipc.UAPIListen(name)
+	restore()
 	if err != nil {
 		dev.Close()
 		return fmt.Errorf("wglink: listening on the control pipe for %s: %w", name, err)
@@ -504,4 +520,44 @@ func wintunHint(err error) error {
 	}
 	return fmt.Errorf("%w (wintun.dll has to sit beside meshpd.exe; Windows looks for it "+
 		"next to the executable, not in the working directory, so `go run` never finds it)", err)
+}
+
+// withRestorePrivilege enables SeRestorePrivilege and returns the undo.
+//
+// Enabled rather than assumed present, and put back rather than left on. An administrator's
+// token carries this privilege disabled; a LocalSystem service's carries it enabled already,
+// in which case this is a pair of no-ops that still return a working undo.
+//
+// A failure to enable is not a failure here. The privilege may genuinely be absent — a
+// service account can be denied it by policy — and the honest place to find that out is the
+// call that needed it, whose error names the pipe and the owner. Returning an error from
+// this function instead would replace a specific diagnosis with a vague one.
+func withRestorePrivilege() (func(), error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		return func() {}, fmt.Errorf("opening this process's token: %w", err)
+	}
+
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil,
+		windows.StringToUTF16Ptr("SeRestorePrivilege"), &luid); err != nil {
+		_ = token.Close()
+		return func() {}, fmt.Errorf("looking up SeRestorePrivilege: %w", err)
+	}
+
+	enable := windows.Tokenprivileges{PrivilegeCount: 1}
+	enable.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	// The error is deliberately not checked here, and neither is ERROR_NOT_ALL_ASSIGNED:
+	// this call succeeds while assigning nothing when the privilege is not held, and the
+	// caller finds that out from the pipe rather than from a second-guess here.
+	_ = windows.AdjustTokenPrivileges(token, false, &enable, 0, nil, nil)
+
+	return func() {
+		var disable windows.Tokenprivileges
+		disable.PrivilegeCount = 1
+		disable.Privileges[0] = windows.LUIDAndAttributes{Luid: luid}
+		_ = windows.AdjustTokenPrivileges(token, false, &disable, 0, nil, nil)
+		_ = token.Close()
+	}, nil
 }
