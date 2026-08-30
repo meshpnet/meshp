@@ -136,3 +136,31 @@ func TestOnlyAnAbsentStateFileCountsAsNotEnrolled(t *testing.T) {
 		}
 	}
 }
+
+// The resolver listens on loopback, wherever it is.
+//
+// Not a preference: the fail-closed lock permits loopback unconditionally, and a resolver
+// anybody on the café Wi-Fi could query would tell them what machines are in a customer's
+// network. The port differs by platform (ADR-0029) and the address must not.
+func TestTheResolverIsOnLoopbackEverywhere(t *testing.T) {
+	if !dnsListenAddr.Addr().IsLoopback() {
+		t.Errorf("the resolver listens on %s, which is reachable from off this machine",
+			dnsListenAddr)
+	}
+
+	// And the port is the platform's answer rather than a constant. Windows cannot be told
+	// about a port at all, so it takes 53; everywhere else asks the kernel for a spare one
+	// so meshp is not competing with whatever was already resolving names here.
+	switch runtime.GOOS {
+	case "windows":
+		if dnsListenAddr.Port() != 53 {
+			t.Errorf("Windows resolver port is %d; a rule naming any other port is accepted "+
+				"and black-holes the domain (ADR-0029)", dnsListenAddr.Port())
+		}
+	default:
+		if dnsListenAddr.Port() != 0 {
+			t.Errorf("port is %d; asking for a fixed one puts meshp in a fight with whatever "+
+				"this machine already runs on it", dnsListenAddr.Port())
+		}
+	}
+}
