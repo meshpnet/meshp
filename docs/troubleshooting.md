@@ -71,9 +71,16 @@ reachable.
 sudo meshp status
 ```
 
-`interface meshp0 (not up)` on Windows or a mobile platform is correct for now: there is no
-data plane there yet, so a device enrols, holds an address, and reports honestly that it has
-no tunnel rather than pretending.
+`interface meshp0 (not up)` on a mobile platform is correct for now: there is no data plane
+there yet, so a device enrols, holds an address, and reports honestly that it has no tunnel
+rather than pretending.
+
+On Windows there **is** a tunnel as of ADR-0028, reported as `userspace`, and nothing above
+it: names do not resolve, a full tunnel cannot be claimed, and it can neither fail closed nor
+filter. Each of those is reported unhonoured rather than half-applied, so a Windows device
+can be given a network with no policy and no egress group and nothing else. It needs
+`wintun.dll` beside `meshpd.exe`; without it the tunnel fails with a message naming the file
+and where to put it.
 
 On macOS there **is** a tunnel, and `meshp status` reports its kind as `userspace` — macOS
 has no WireGuard in the kernel, so wireguard-go moves the packets. Expect lower throughput
