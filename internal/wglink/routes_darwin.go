@@ -151,3 +151,28 @@ func isLocalRoute(m *route.RouteMessage) bool {
 	const rtfLocal = 0x200000 // RTF_LOCAL
 	return m.Flags&rtfLocal != 0
 }
+
+// kernelOwned reports whether a prefix is one the operating system maintains itself, rather
+// than one meshp could have installed.
+//
+// Every route on a meshp interface counts as meshp's here, because macOS offers nothing to
+// distinguish them by: a routing message has no field saying who installed it. Linux has a
+// protocol number and Windows has an origin; this is the platform that has neither, so the
+// question has to be asked about the prefix instead. Adding an IPv6 address installs the
+// link-local prefix and the multicast prefixes alongside it, reported as ordinary routes
+// through the interface.
+//
+// Reporting them costs more than a wasted comparison. The planner withdraws them, the kernel
+// restores them, and the route socket reports the change — which since #184 wakes the
+// reconciler, so the agent runs the same four operations twice a second for as long as it is
+// up. That shipped, and was found by running it on a laptop rather than by any test.
+//
+// Deliberately a question about the prefix rather than about the routing message: the flags
+// that distinguish these differ between platforms and, for the multicast entries, do not
+// distinguish them at all. What is reliable is that an address meshp hands out comes from the
+// network's own range (ADR-0005) and is never link-local or multicast, so nothing excluded
+// here could have been ours to install.
+func kernelOwned(prefix netip.Prefix) bool {
+	addr := prefix.Addr()
+	return addr.IsLinkLocalUnicast() || addr.IsMulticast()
+}

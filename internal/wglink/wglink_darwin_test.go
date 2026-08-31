@@ -287,6 +287,10 @@ func TestAConvergedInterfacePlansToNothing(t *testing.T) {
 	key := genDarwinKey(t)
 	t.Cleanup(func() { _ = l.Apply(name, wgplan.Op{Kind: wgplan.DestroyDevice}) })
 
+	// A peer with an allowed IP, so the plan has a route of its own to get right. Without
+	// one this could pass by filtering everything: a reader that reported no routes at all
+	// would leave nothing to withdraw, and the agent would instead re-add its own route on
+	// every pass — the same loop wearing the other face.
 	want := wgplan.Interface{
 		Name:       name,
 		PrivateKey: key,
@@ -295,6 +299,10 @@ func TestAConvergedInterfacePlansToNothing(t *testing.T) {
 			netip.MustParsePrefix("100.90.78.1/32"),
 			netip.MustParsePrefix("fd7c:6d65:7368:90::1/128"),
 		},
+		Peers: []wgplan.Peer{{
+			PublicKey:  genDarwinPublicKey(t),
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("100.90.78.0/24")},
+		}},
 	}
 
 	first, err := wgplan.For(want, wgplan.Observed{})
@@ -342,6 +350,17 @@ func genDarwinKey(t *testing.T) wgplan.Key {
 		t.Fatal(err)
 	}
 	return wgplan.Key(k.String())
+}
+
+// genDarwinPublicKey is somebody else's public half, for a peer. Distinct from
+// genDarwinKey, which makes a private key for the device itself.
+func genDarwinPublicKey(t *testing.T) wgplan.Key {
+	t.Helper()
+	k, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wgplan.Key(k.PublicKey().String())
 }
 
 func hasPrefix(all []netip.Prefix, want netip.Prefix) bool {
