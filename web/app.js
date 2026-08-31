@@ -38,11 +38,13 @@ function may(permission) {
 }
 
 /**
- * A token this page has just minted, held here rather than in the DOM.
+ * A token this page has just minted, held here rather than only in the DOM.
  *
- * The view is replaced wholesale by every poll, and the control plane stores only a hash, so
- * a secret drawn straight into the page would be unrecoverable within a few seconds of
- * existing — and somebody would click again, minting another credential nobody can use.
+ * The control plane stores only a hash, so the moment after minting is the only moment that
+ * secret exists. It lives in state because every render describes the whole page: a token
+ * that existed only in the node it was drawn into would be gone the first time a render
+ * did not know to draw it, and somebody would click again and mint another credential
+ * nobody can use.
  */
 let mintedToken = null;
 /** Which network that token was minted for, so moving away clears it. */
@@ -123,15 +125,159 @@ function el(tag, attrs = {}, ...children) {
 }
 
 /**
+ * Drops the children a renderer declined to produce.
+ *
+ * Nullish children go, the same way el() drops them — and for a reason that only appeared
+ * once the page had controls that are absent for some people. `replaceChildren` stringifies
+ * what it is given, so a panel that renders as null for somebody without the permission for
+ * it put the word "null" on their screen.
+ */
+function wanted(nodes) {
+  return nodes.flat().filter((node) => node !== null && node !== undefined && node !== false);
+}
+
+/**
  * Replaces the view.
  *
- * Nullish children are dropped, the same way el() drops them — and for a reason that only
- * appeared once the page had controls that are absent for some people. `replaceChildren`
- * stringifies what it is given, so a panel that renders as null for somebody without the
- * permission for it put the word "null" on their screen.
+ * For the views drawn once, in answer to something a person did: signing in, picking a
+ * network, an error where a network used to be. The polled view uses update() instead.
  */
 function show(...nodes) {
-  view.replaceChildren(...nodes.filter((node) => node !== null && node !== undefined && node !== false));
+  view.replaceChildren(...wanted(nodes));
+}
+
+// --- keeping the page still -------------------------------------------------------------
+//
+// The polled view is redrawn every few seconds on a screen somebody is reading. Replacing
+// it wholesale is the obvious way to do that, and it is what this file did while the page
+// could only be read. It stopped being tenable when the page gained controls: destroying a
+// node takes with it a half-made text selection, a click that straddles the redraw, and the
+// focus ring.
+//
+// So the polled view is updated in place. Renderers are unchanged and still describe the
+// whole page — nothing above this line knows any of it is happening — and morph() works out
+// the difference. Three things it is careful about, each of them a consequence of a node now
+// outliving the render that built it:
+//
+//   * **A list that reorders needs keys.** Devices with faults sort to the top, so the row
+//     somebody is reading moves at exactly the moment something has gone wrong. `data-key`
+//     says which row is which. Without it, one device developing a fault would rewrite every
+//     row between it and the top, which is the bug this is here to fix wearing a smaller hat.
+//   * **A listener outlives the render that attached it.** It must not close over the data
+//     it was built beside, because that data is now old. A control that acts on something
+//     reads what it is acting on at the moment it is clicked.
+//   * **A control with a write in flight is not the page's to redraw.** It has been disabled
+//     and relabelled by a click that has not finished.
+//
+// This is the hand-written reconciliation ADR-0022 §3 anticipated, in one place rather than
+// spread through twenty renderers. It is deliberately not a framework: it has no components,
+// no state and no lifecycle, and it is only ever called with a tree somebody just built.
+
+/** What identifies a node between renders, where its position is not enough. */
+function keyOf(node) {
+  return node.nodeType === Node.ELEMENT_NODE ? node.getAttribute("data-key") : null;
+}
+
+/**
+ * Something a click put on the page rather than a render — the error shown against the
+ * control that failed. It belongs to no render, so no render takes it away; it removes
+ * itself on a timer. Without this an error would last until the next poll, which is to say
+ * about long enough to notice and not long enough to read.
+ */
+function isTransient(node) {
+  return node.nodeType === Node.ELEMENT_NODE && node.hasAttribute("data-transient");
+}
+
+/** Whether a node that is here can become the one that is wanted, or has to be replaced. */
+function comparable(live, next) {
+  if (live.nodeType !== next.nodeType) return false;
+  if (live.nodeType !== Node.ELEMENT_NODE) return true;
+  return live.tagName === next.tagName && keyOf(live) === keyOf(next);
+}
+
+/** Makes the node that is here into the one that is wanted, without replacing it. */
+function morph(live, next) {
+  if (live.nodeType !== Node.ELEMENT_NODE) {
+    if (live.nodeValue !== next.nodeValue) live.nodeValue = next.nodeValue;
+    return;
+  }
+  // Left exactly as the click left it. Handing back an enabled button for an action already
+  // under way is how somebody mints a second enrolment token nobody asked for.
+  if (live.hasAttribute("data-busy")) return;
+
+  for (const attr of next.attributes) {
+    if (live.getAttribute(attr.name) !== attr.value) live.setAttribute(attr.name, attr.value);
+  }
+  for (const attr of [...live.attributes]) {
+    if (!next.hasAttribute(attr.name)) live.removeAttribute(attr.name);
+  }
+  // Which option is selected is a property, not an attribute, so the loop above cannot see
+  // it, and without it the picker would go on naming the network somebody navigated away
+  // from. Read before the children are reconciled, not after: morphChildren() takes nodes
+  // out of `next` as it uses them, so by the time it returns `next` no longer holds the
+  // option this is asking about.
+  const chosen = live.tagName === "SELECT" ? next.value : null;
+  morphChildren(live, next);
+  if (chosen !== null && live.value !== chosen) live.value = chosen;
+}
+
+/**
+ * Reconciles one element's children against what is wanted.
+ *
+ * Keyed children are found by key wherever they are, so a list that reorders moves nodes
+ * rather than rewriting them. Unkeyed children are matched by position, which is right for
+ * the fixed furniture — a heading, a label, the cells of a row — that never moves.
+ *
+ * Nodes are taken out of `next` as they are used. That tree was built by the caller for this
+ * call and is discarded afterwards.
+ */
+function morphChildren(live, next) {
+  const keyed = new Map();
+  for (let node = live.firstChild; node; node = node.nextSibling) {
+    const key = keyOf(node);
+    if (key !== null && !keyed.has(key)) keyed.set(key, node);
+  }
+
+  let cursor = live.firstChild;
+  const skipHeld = () => {
+    while (cursor && isTransient(cursor)) cursor = cursor.nextSibling;
+  };
+  skipHeld();
+
+  for (const want of [...next.childNodes]) {
+    const key = keyOf(want);
+    let match = null;
+    if (key !== null) {
+      const candidate = keyed.get(key);
+      keyed.delete(key);
+      if (candidate && comparable(candidate, want)) match = candidate;
+    } else if (cursor && keyOf(cursor) === null && comparable(cursor, want)) {
+      match = cursor;
+    }
+
+    if (match === null) {
+      live.insertBefore(want, cursor);
+      continue;
+    }
+    if (match === cursor) {
+      cursor = cursor.nextSibling;
+      skipHeld();
+    } else {
+      live.insertBefore(match, cursor);
+    }
+    morph(match, want);
+  }
+
+  while (cursor) {
+    const stale = cursor;
+    cursor = cursor.nextSibling;
+    if (!isTransient(stale)) live.removeChild(stale);
+  }
+}
+
+/** Updates the view in place. The polled path; see above for why it is not show(). */
+function update(...nodes) {
+  morphChildren(view, el("div", {}, ...wanted(nodes)));
 }
 
 // --- what counts as broken ------------------------------------------------------------
@@ -178,7 +324,7 @@ function renderVerdict(data, faultCount) {
 
   return el(
     "div",
-    { class: `panel verdict ${faultCount ? "problems" : ""}` },
+    { class: `panel verdict ${faultCount ? "problems" : ""}`, "data-key": "verdict" },
     el(
       "h1",
       {},
@@ -222,7 +368,7 @@ function renderGroup(group) {
 
     return el(
       "li",
-      { class: `carrier ${advertiser.viable ? "" : "not-viable"}` },
+      { class: `carrier ${advertiser.viable ? "" : "not-viable"}`, "data-key": advertiser.membership_id },
       dot(HEALTH_CLASS[health] || "unknown", health),
       el("span", { class: "who" }, advertiser.device_name),
       el("span", { class: "why" }, bits.join(" · ")),
@@ -231,7 +377,7 @@ function renderGroup(group) {
 
   return el(
     "div",
-    { class: "panel" },
+    { class: "panel", "data-key": group.id },
     el(
       "div",
       { class: "group" },
@@ -243,7 +389,7 @@ function renderGroup(group) {
         el(
           "ul",
           { class: "prefixes" },
-          group.prefixes.map((prefix) => el("li", {}, prefix)),
+          group.prefixes.map((prefix) => el("li", { "data-key": prefix }, prefix)),
         ),
         group.stable_egress_ip ? el("div", { class: "meta mono" }, `egress ${group.stable_egress_ip}`) : null,
       ),
@@ -287,7 +433,9 @@ function renderDevices(devices) {
 
     return el(
       "tr",
-      { class: faults.length ? "attention" : "" },
+      // Keyed, because this list reorders: a device that develops a fault sorts to the top,
+      // which is the moment somebody is most likely to be reading the row it displaced.
+      { class: faults.length ? "attention" : "", "data-key": device.membership_id },
       el(
         "td",
         {},
@@ -304,7 +452,7 @@ function renderDevices(devices) {
           ? el(
               "ul",
               { class: "faults" },
-              faults.map((fault) => el("li", {}, fault.message)),
+              faults.map((fault) => el("li", { "data-key": fault.message }, fault.message)),
             )
           : el("span", { class: "note" }, "—"),
       ),
@@ -351,29 +499,41 @@ function renderDevices(devices) {
  * Runs a write.
  *
  * `refresh` is opt-in, and the two callers below want opposite things. Revoking a device
- * must refresh: a page that changed something and kept showing the old state makes somebody
- * click twice, and on a revoke the second click is the one that does damage. Minting a token
- * must not: the poll re-renders this whole view every few seconds, so anything drawn here
- * and not held in state is gone within one tick — which for a secret shown exactly once
- * means a person clicking again and leaking another credential nobody can use.
+ * must refresh, and through start() rather than the poll timer: a page that changed
+ * something and kept showing the old state makes somebody click twice, and on a revoke the
+ * second click is the one that does damage. Minting a token must not, because it changes
+ * nothing the overview reports — the poll would fetch an identical answer and the person is
+ * mid-way through copying a secret.
+ *
+ * The control is held still while the write runs. The page updates underneath it every few
+ * seconds and would otherwise hand back an enabled button labelled as though nothing had
+ * been clicked, for an action still in flight.
  */
 async function act(node, run, { refresh = false } = {}) {
   const previous = node.textContent;
   node.disabled = true;
   node.textContent = "…";
+  node.setAttribute("data-busy", "");
   try {
     await run();
-    if (refresh) restart();
-    else {
+    node.removeAttribute("data-busy");
+    if (refresh) {
+      // Left disabled and still saying "…". The refresh is what puts this control back, and
+      // between here and there the write has happened and the button means nothing.
+      restart();
+    } else {
       node.disabled = false;
       node.textContent = previous;
     }
   } catch (err) {
+    node.removeAttribute("data-busy");
     node.disabled = false;
     node.textContent = previous;
     // Shown against the control that failed rather than at the top of the page, because
     // by the time somebody has scrolled to a device the top is not where they are looking.
-    const message = el("span", { class: "error inline" }, ` ${reason(err)}`);
+    // Marked transient so that the next update leaves it alone — an error that vanished at
+    // the next poll would last about long enough to notice and not long enough to read.
+    const message = el("span", { class: "error inline", "data-transient": "" }, ` ${reason(err)}`);
     node.after(message);
     setTimeout(() => message.remove(), 8000);
   }
@@ -383,12 +543,23 @@ async function act(node, run, { refresh = false } = {}) {
 function revokeButton(device) {
   if (!may("network.devices.revoke") || device.state !== "active") return null;
 
-  const button = el("button", { class: "danger", type: "button" }, "Revoke");
+  const button = el(
+    "button",
+    // Which device this is, on the button rather than only in the closure below. The node
+    // outlives the render that made it, so what it was built beside is not what is on the
+    // screen by the time it is clicked.
+    { class: "danger", type: "button", "data-membership": device.membership_id },
+    "Revoke",
+  );
   button.addEventListener("click", () => {
+    const membershipID = button.dataset.membership;
+    const current = lastGood ? lastGood.devices : [];
+    const named = current.find((d) => d.membership_id === membershipID) || device;
     // Confirmed, because this is not undoable: the device has to enrol again with a fresh
     // token, and its addresses go back to the pool. A one-click version of that beside a
-    // device somebody is already worried about is a trap.
-    if (!window.confirm(`Revoke ${device.device_name}? It will lose access immediately and must enrol again.`)) {
+    // device somebody is already worried about is a trap. It names the device as it is
+    // called now — a confirmation naming the wrong one is worse than no confirmation.
+    if (!window.confirm(`Revoke ${named.device_name}? It will lose access immediately and must enrol again.`)) {
       return;
     }
     act(
@@ -396,7 +567,7 @@ function revokeButton(device) {
       () =>
         api(
           `/api/v1/networks/${encodeURIComponent(currentNetworkID())}` +
-            `/devices/${encodeURIComponent(device.membership_id)}`,
+            `/devices/${encodeURIComponent(membershipID)}`,
           { method: "DELETE" },
         ),
       { refresh: true },
@@ -424,22 +595,19 @@ function renderAddDevice() {
           body: JSON.stringify({ max_uses: 1, expires_in_seconds: 3600 }),
         },
       );
-      // Into module state, not into the DOM. This view is replaced wholesale by the next
-      // poll, and the control plane stores only a hash — so a token drawn straight into
-      // the page would be unrecoverable within a few seconds of existing.
+      // Into module state, not only into the DOM, so that every render from here draws it.
       mintedToken = body.token;
-      // Polling stops while it is on screen. Every poll replaces this view wholesale, which
-      // would wipe a half-made text selection — and the whole point of showing a secret once
-      // is that somebody selects it and copies it. A dashboard that refreshes out from under
-      // the one thing it asked you to copy is worse than one that pauses and says so.
-      stopPolling();
+      // Drawn now rather than at the next poll: this response is the only place the token
+      // exists. The page keeps polling underneath it — the selection somebody is making in
+      // order to copy it survives an update, which is the whole reason updates happen in
+      // place (see "keeping the page still").
       renderFromLastGood();
     });
   });
 
   return el(
     "div",
-    { class: "panel" },
+    { class: "panel", "data-key": "add-device" },
     el("h3", {}, "Add a device"),
     button,
     mintedToken ? renderMintedToken() : null,
@@ -451,8 +619,7 @@ function renderMintedToken() {
   const done = el("button", { class: "quiet", type: "button" }, "Done");
   done.addEventListener("click", () => {
     mintedToken = null;
-    // Which also starts the page updating again.
-    restart();
+    renderFromLastGood();
   });
 
   return el(
@@ -470,9 +637,6 @@ function renderMintedToken() {
       "On the device: ",
       el("span", { class: "mono" }, `meshp up --token ${mintedToken}`),
     ),
-    // Said rather than left to be noticed. The page's own rule is that it never lies about
-    // its freshness, and it is deliberately not updating right now.
-    el("p", { class: "note" }, "This page has paused while the token is shown."),
     done,
   );
 }
@@ -497,18 +661,20 @@ function renderOverview(data, networks, history) {
     return a.device_name.localeCompare(b.device_name);
   });
 
-  show(
+  // Keyed section by section, so that a panel which comes and goes — the one that mints a
+  // token exists only for somebody who may mint one — moves nothing else on the page.
+  update(
     renderNetworkBar(data, networks),
     renderVerdict(data, data.fault_count || 0),
-    el("h2", {}, "What is carried, and by what"),
+    el("h2", { "data-key": "carried-heading" }, "What is carried, and by what"),
     data.route_groups.length
-      ? el("div", {}, data.route_groups.map(renderGroup))
-      : el("div", { class: "panel note" }, "This network has no route groups."),
-    el("h2", {}, "Devices"),
+      ? el("div", { "data-key": "groups" }, data.route_groups.map(renderGroup))
+      : el("div", { class: "panel note", "data-key": "groups" }, "This network has no route groups."),
+    el("h2", { "data-key": "devices-heading" }, "Devices"),
     renderAddDevice(),
     el(
       "div",
-      { class: "panel" },
+      { class: "panel", "data-key": "devices" },
       renderDevices(devices),
       data.devices_truncated
         ? el(
@@ -518,7 +684,7 @@ function renderOverview(data, networks, history) {
           )
         : null,
     ),
-    el("h2", {}, "What has happened"),
+    el("h2", { "data-key": "history-heading" }, "What has happened"),
     renderHistory(history),
   );
 }
@@ -539,10 +705,14 @@ const ACTIONS = {
 /** The audit trail, newest first. */
 function renderHistory(history) {
   if (history === null) {
-    return el("div", { class: "panel note" }, "The history could not be read just now.");
+    return el("div", { class: "panel note", "data-key": "history" }, "The history could not be read just now.");
   }
   if (!history.length) {
-    return el("div", { class: "panel note" }, "Nothing has been recorded for this network yet.");
+    return el(
+      "div",
+      { class: "panel note", "data-key": "history" },
+      "Nothing has been recorded for this network yet.",
+    );
   }
 
   const rows = history.map((event) => {
@@ -555,7 +725,7 @@ function renderHistory(history) {
 
     return el(
       "li",
-      { class: "event" },
+      { class: "event", "data-key": event.id },
       el("span", { class: "when mono" }, new Date(event.at).toLocaleString()),
       el("span", { class: "who" }, event.actor_label || event.actor_kind),
       el("span", {}, ACTIONS[event.action] || event.action),
@@ -565,7 +735,7 @@ function renderHistory(history) {
 
   return el(
     "div",
-    { class: "panel" },
+    { class: "panel", "data-key": "history" },
     el("ul", { class: "events" }, rows),
     el(
       "p",
@@ -580,7 +750,7 @@ function renderNetworkBar(data, networks) {
   for (const network of networks) {
     const option = el(
       "option",
-      { value: network.id },
+      { value: network.id, "data-key": network.id },
       `${network.organization_slug} / ${network.slug}`,
     );
     if (network.id === data.network.id) option.selected = true;
@@ -592,7 +762,7 @@ function renderNetworkBar(data, networks) {
 
   return el(
     "div",
-    { class: "panel picker" },
+    { class: "panel picker", "data-key": "picker" },
     el("label", { for: "network" }, "Network"),
     select,
     el("span", { class: "note" }, `state version ${data.network.state_version}`),
