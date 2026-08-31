@@ -479,6 +479,11 @@ func adapterRoutes(luid winipcfg.LUID) ([]netip.Prefix, error) {
 		if !prefix.IsValid() {
 			continue
 		}
+		// Windows installs its own routes on an adapter the same way macOS does, and this
+		// reported them as ours. See kernelOwned.
+		if kernelOwned(prefix) {
+			continue
+		}
 		out = append(out, prefix.Masked())
 	}
 	return out, nil

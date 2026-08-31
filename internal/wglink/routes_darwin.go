@@ -25,9 +25,17 @@ import (
 // for a route added with meshp's protocol number, and is the same bargain: the agent removes
 // what it installed, and an interface it owns entirely is all of it.
 //
-// The kernel's own scope route for the interface is excluded. macOS installs one when an
-// address is added, and reporting it would have the planner try to withdraw a route it never
-// installed, on every pass, forever.
+// The routes the kernel installs by itself are excluded. macOS adds them when an address goes
+// on the interface — a host route for the address, and for IPv6 the link-local prefix and the
+// multicast prefixes — and reporting them would have the planner try to withdraw routes it
+// never installed, on every pass, forever.
+//
+// That "forever" is not hypothetical. It shipped: this function reported fe80::/64, ff00::/8,
+// ff01::/32 and ff02::/32 on any interface carrying an IPv6 address, the planner withdrew all
+// four, the kernel reinstalled them, and the route socket reported the change — which since
+// #184 wakes the reconciler, so the agent spun at two passes a second on a laptop until it was
+// killed. Every test passed throughout, because a single reconcile converges correctly and
+// nothing asked what a second one did.
 func interfaceRoutes(index int) ([]netip.Prefix, error) {
 	rib, err := route.FetchRIB(0, route.RIBTypeRoute, 0)
 	if err != nil {
@@ -51,6 +59,14 @@ func interfaceRoutes(index int) ([]netip.Prefix, error) {
 		// A host route to one of the interface's own addresses is the kernel's
 		// bookkeeping rather than a route meshp asked for.
 		if prefix.IsSingleIP() && isLocalRoute(m) {
+			continue
+		}
+		// Neither is anything link-local or multicast. meshp routes the addresses a network
+		// hands out, which are neither, so a prefix of either kind was put there by the
+		// kernel however it is flagged — and unlike the host route above there is no flag
+		// that distinguishes them, which is why this asks what the prefix is rather than
+		// what the routing message says about it.
+		if kernelOwned(prefix) {
 			continue
 		}
 		out = append(out, prefix)

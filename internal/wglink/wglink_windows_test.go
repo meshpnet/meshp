@@ -129,6 +129,60 @@ func TestApplyingTheSamePlanTwiceIsQuietOnWindows(t *testing.T) {
 	}
 }
 
+// A converged adapter plans to nothing.
+//
+// The counterpart of the macOS test of the same name, and it is here for the same reason: the
+// test above applies one *plan* twice, which never asks the planner anything, and no test on
+// this platform read the adapter back and asked what was left to do. Windows installs its own
+// routes on an adapter exactly as macOS does, and every route on a meshp adapter is treated as
+// meshp's — so they were withdrawn, restored, and withdrawn again, once per route change.
+//
+// The IPv6 address is the point. Without one the operating system has no reason to add the
+// link-local and multicast routes, and this passes while the agent spins in the field.
+func TestAConvergedAdapterPlansToNothing(t *testing.T) {
+	requireAdmin(t)
+
+	l, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	const name = "meshptest2"
+	t.Cleanup(func() { _ = l.Apply(name, wgplan.Op{Kind: wgplan.DestroyDevice}) })
+
+	want := wgplan.Interface{
+		Name:       name,
+		PrivateKey: genWindowsKey(t),
+		MTU:        1380,
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("100.90.79.1/32"),
+			netip.MustParsePrefix("fd7c:6d65:7368:91::1/128"),
+		},
+	}
+
+	first, err := wgplan.For(want, wgplan.Observed{})
+	if err != nil {
+		t.Fatalf("planning the first pass: %v", err)
+	}
+	if err := ApplyPlan(l, name, first); err != nil {
+		t.Fatalf("applying the first plan: %v", err)
+	}
+
+	observed, err := l.Observe(name)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	second, err := wgplan.For(want, observed)
+	if err != nil {
+		t.Fatalf("planning the second pass: %v", err)
+	}
+	if len(second.Ops) != 0 {
+		t.Errorf("a converged adapter still plans %d operations: %s\nobserved routes: %v",
+			len(second.Ops), second, observed.Routes)
+	}
+}
+
 // An adapter that was destroyed is reported absent, which is what the planner needs in order
 // to build it again.
 func TestDestroyingAnAdapterLeavesNothingBehind(t *testing.T) {
