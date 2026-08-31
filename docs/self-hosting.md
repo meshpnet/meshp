@@ -197,12 +197,20 @@ or have it obtain one from Let's Encrypt:
 
 ```
 MESHP_TLS_DOMAINS=control.example.com
-MESHP_TLS_CACHE_DIR=/var/lib/meshp/certs
 ```
 
-The automatic path needs port 80 reachable for the challenge and a cache directory that
-survives restarts — without one you will re-issue on every restart and meet a rate limit at
-the worst time.
+**Port 443 is enough.** The challenge is answered over TLS itself (`TLS-ALPN-01`), so a host
+that only accepts 443 can still obtain and renew a certificate — which is worth knowing,
+because some providers firewall port 80 by default and the failure would otherwise look like
+a DNS problem. Port 80 is used when it is reachable, both for the other challenge type and to
+redirect anyone who types `http://`.
+
+**The certificate has to be saved somewhere that survives a restart**, or every restart asks
+Let's Encrypt again and a crash loop exhausts a week's rate limit in an afternoon. The unit
+below handles this: `StateDirectory=meshp-control` gives the service `/var/lib/meshp-control`,
+which is where `MESHP_TLS_CACHE_DIR` points by default. Set it only if you want it elsewhere —
+and if you do, make sure the unit can write there, because `ProtectSystem=strict` leaves
+everything else read-only.
 
 Terminating TLS at a reverse proxy instead is a perfectly good choice. The systemd unit does
 not force either way; it just has `CAP_NET_BIND_SERVICE` so it can hold 443 without running
@@ -233,7 +241,7 @@ direct paths yet, so **a deployment with no relay has no data plane**.
 ```bash
 sudo install -m 0755 meshp-control /usr/local/bin/
 sudo useradd --system --no-create-home meshp
-sudo install -d -o meshp -g meshp /etc/meshp /var/lib/meshp
+sudo install -d -o meshp -g meshp /etc/meshp
 sudo install -m 0600 -o meshp -g meshp control.env /etc/meshp/control.env
 sudo install -m 0644 systemd/meshp-control.service /etc/systemd/system/
 sudo systemctl enable --now meshp-control
