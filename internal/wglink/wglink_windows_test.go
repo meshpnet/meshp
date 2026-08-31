@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	"github.com/meshpnet/meshp/internal/wgplan"
 )
@@ -129,6 +130,100 @@ func TestApplyingTheSamePlanTwiceIsQuietOnWindows(t *testing.T) {
 	}
 }
 
+// A converged adapter plans to nothing.
+//
+// The counterpart of the macOS test of the same name, and it is here for the same reason: the
+// test above applies one *plan* twice, which never asks the planner anything, and no test on
+// this platform read the adapter back and asked what was left to do. Windows installs its own
+// routes on an adapter exactly as macOS does, and every route on a meshp adapter is treated as
+// meshp's — so they were withdrawn, restored, and withdrawn again, once per route change.
+//
+// The IPv6 address is the point. Without one the operating system has no reason to add the
+// link-local and multicast routes, and this passes while the agent spins in the field.
+func TestAConvergedAdapterPlansToNothing(t *testing.T) {
+	requireAdmin(t)
+
+	l, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	const name = "meshptest2"
+	t.Cleanup(func() { _ = l.Apply(name, wgplan.Op{Kind: wgplan.DestroyDevice}) })
+
+	// A peer with an allowed IP, so the plan has a route of its own to get right. Without
+	// one this could pass by filtering everything: a reader that reported no routes at all
+	// would leave nothing to withdraw, and the agent would instead re-add its own route on
+	// every pass — the same loop wearing the other face.
+	want := wgplan.Interface{
+		Name:       name,
+		PrivateKey: genWindowsKey(t),
+		MTU:        1380,
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("100.90.79.1/32"),
+			netip.MustParsePrefix("fd7c:6d65:7368:91::1/128"),
+		},
+		Peers: []wgplan.Peer{{
+			PublicKey:  genWindowsPublicKey(t),
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("100.90.79.0/24")},
+		}},
+	}
+
+	first, err := wgplan.For(want, wgplan.Observed{})
+	if err != nil {
+		t.Fatalf("planning the first pass: %v", err)
+	}
+	if err := ApplyPlan(l, name, first); err != nil {
+		t.Fatalf("applying the first plan: %v", err)
+	}
+
+	observed, err := l.Observe(name)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	second, err := wgplan.For(want, observed)
+	if err != nil {
+		t.Fatalf("planning the second pass: %v", err)
+	}
+	if len(second.Ops) != 0 {
+		dumpAdapterRoutes(t, l, name)
+		t.Errorf("a converged adapter still plans %d operations: %s\nobserved routes: %v",
+			len(second.Ops), second, observed.Routes)
+	}
+}
+
+// dumpAdapterRoutes logs every route the stack holds for an adapter, with both fields that
+// claim to say where a route came from.
+//
+// Here because this was got wrong twice from a Mac. Which field separates the routes meshp
+// installed from the ones Windows adds by itself is a question only Windows can answer, and
+// a failure that prints the answer costs one CI run rather than one per guess.
+func dumpAdapterRoutes(t *testing.T, l Link, name string) {
+	t.Helper()
+	wl, ok := l.(*windowsLink)
+	if !ok {
+		return
+	}
+	wl.mu.Lock()
+	running, ok := wl.devices[name]
+	wl.mu.Unlock()
+	if !ok {
+		return
+	}
+	rows, err := winipcfg.GetIPForwardTable2(windowsUnspecified)
+	if err != nil {
+		t.Logf("reading the route table: %v", err)
+		return
+	}
+	for _, row := range rows {
+		if row.InterfaceLUID != running.luid {
+			continue
+		}
+		t.Logf("route %-28s protocol=%d origin=%d", row.DestinationPrefix.Prefix(), row.Protocol, row.Origin)
+	}
+}
+
 // An adapter that was destroyed is reported absent, which is what the planner needs in order
 // to build it again.
 func TestDestroyingAnAdapterLeavesNothingBehind(t *testing.T) {
@@ -237,6 +332,16 @@ func hasPrefix(all []netip.Prefix, want netip.Prefix) bool {
 		}
 	}
 	return false
+}
+
+// genWindowsPublicKey is somebody else's public half, for a peer.
+func genWindowsPublicKey(t *testing.T) wgplan.Key {
+	t.Helper()
+	k, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wgplan.Key(k.PublicKey().String())
 }
 
 func genWindowsKey(t *testing.T) wgplan.Key {

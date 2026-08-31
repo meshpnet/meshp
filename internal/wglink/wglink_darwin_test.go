@@ -262,6 +262,73 @@ func TestApplyingTheSamePlanTwiceIsQuiet(t *testing.T) {
 
 // Destroying an interface that is not there is success. The reconciler asks for it whenever
 // a membership goes away, including when it was never up.
+// A converged interface plans to nothing.
+//
+// The test that was missing, and the one that would have saved a laptop. The one above
+// applies the same *plan* twice, which is a different and much weaker question: applying
+// AddRoute twice is quiet whether or not the route was already there. What matters is what
+// the planner decides after reading the machine back — the loop the agent actually runs.
+//
+// It carries an IPv6 address because that is what made the bug appear and what every real
+// membership has. macOS installs fe80::/64, ff00::/8, ff01::/32 and ff02::/32 the moment one
+// goes on an interface; those were reported as routes on the interface, the planner withdrew
+// them, the kernel put them back, and the route socket woke the reconciler to do it again —
+// twice a second, indefinitely.
+func TestAConvergedInterfacePlansToNothing(t *testing.T) {
+	requireRoot(t)
+
+	l, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	const name = "meshptest2"
+	key := genDarwinKey(t)
+	t.Cleanup(func() { _ = l.Apply(name, wgplan.Op{Kind: wgplan.DestroyDevice}) })
+
+	// A peer with an allowed IP, so the plan has a route of its own to get right. Without
+	// one this could pass by filtering everything: a reader that reported no routes at all
+	// would leave nothing to withdraw, and the agent would instead re-add its own route on
+	// every pass — the same loop wearing the other face.
+	want := wgplan.Interface{
+		Name:       name,
+		PrivateKey: key,
+		MTU:        1380,
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("100.90.78.1/32"),
+			netip.MustParsePrefix("fd7c:6d65:7368:90::1/128"),
+		},
+		Peers: []wgplan.Peer{{
+			PublicKey:  genDarwinPublicKey(t),
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("100.90.78.0/24")},
+		}},
+	}
+
+	first, err := wgplan.For(want, wgplan.Observed{})
+	if err != nil {
+		t.Fatalf("planning the first pass: %v", err)
+	}
+	if err := ApplyPlan(l, name, first); err != nil {
+		t.Fatalf("applying the first plan: %v", err)
+	}
+
+	// Read the machine back and ask what is left to do. Nothing is the only right answer:
+	// anything else is an operation that will be planned again on the pass after this one.
+	observed, err := l.Observe(name)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	second, err := wgplan.For(want, observed)
+	if err != nil {
+		t.Fatalf("planning the second pass: %v", err)
+	}
+	if len(second.Ops) != 0 {
+		t.Errorf("a converged interface still plans %d operations: %s\n"+
+			"observed routes: %v", len(second.Ops), second, observed.Routes)
+	}
+}
+
 func TestDestroyingNothingIsFine(t *testing.T) {
 	requireRoot(t)
 
@@ -283,6 +350,17 @@ func genDarwinKey(t *testing.T) wgplan.Key {
 		t.Fatal(err)
 	}
 	return wgplan.Key(k.String())
+}
+
+// genDarwinPublicKey is somebody else's public half, for a peer. Distinct from
+// genDarwinKey, which makes a private key for the device itself.
+func genDarwinPublicKey(t *testing.T) wgplan.Key {
+	t.Helper()
+	k, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wgplan.Key(k.PublicKey().String())
 }
 
 func hasPrefix(all []netip.Prefix, want netip.Prefix) bool {
