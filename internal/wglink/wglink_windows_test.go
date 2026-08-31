@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	"github.com/meshpnet/meshp/internal/wgplan"
 )
@@ -186,8 +187,40 @@ func TestAConvergedAdapterPlansToNothing(t *testing.T) {
 		t.Fatalf("planning the second pass: %v", err)
 	}
 	if len(second.Ops) != 0 {
+		dumpAdapterRoutes(t, l, name)
 		t.Errorf("a converged adapter still plans %d operations: %s\nobserved routes: %v",
 			len(second.Ops), second, observed.Routes)
+	}
+}
+
+// dumpAdapterRoutes logs every route the stack holds for an adapter, with both fields that
+// claim to say where a route came from.
+//
+// Here because this was got wrong twice from a Mac. Which field separates the routes meshp
+// installed from the ones Windows adds by itself is a question only Windows can answer, and
+// a failure that prints the answer costs one CI run rather than one per guess.
+func dumpAdapterRoutes(t *testing.T, l Link, name string) {
+	t.Helper()
+	wl, ok := l.(*windowsLink)
+	if !ok {
+		return
+	}
+	wl.mu.Lock()
+	running, ok := wl.devices[name]
+	wl.mu.Unlock()
+	if !ok {
+		return
+	}
+	rows, err := winipcfg.GetIPForwardTable2(windowsUnspecified)
+	if err != nil {
+		t.Logf("reading the route table: %v", err)
+		return
+	}
+	for _, row := range rows {
+		if row.InterfaceLUID != running.luid {
+			continue
+		}
+		t.Logf("route %-28s protocol=%d origin=%d", row.DestinationPrefix.Prefix(), row.Protocol, row.Origin)
 	}
 }
 

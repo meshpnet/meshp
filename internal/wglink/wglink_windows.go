@@ -476,12 +476,16 @@ func adapterRoutes(luid winipcfg.LUID) ([]netip.Prefix, error) {
 			continue
 		}
 		// Only what somebody asked for. Windows adds routes of its own to every adapter —
-		// a host route for each of its addresses, the limited broadcast, the link-local
-		// prefix and the multicast prefixes — and reporting those as meshp's had the
-		// planner withdraw them, the stack restore them, and the change wake the
-		// reconciler, around and around. Origin is the platform's own answer to who put a
-		// route there, which is the same question Linux answers with a protocol number.
-		if row.Origin != winipcfg.RouteOriginManual {
+		// a host route for each of its addresses, one for the subnet's broadcast, the
+		// limited broadcast, the link-local prefix and the multicast prefixes — and
+		// reporting those as meshp's had the planner withdraw them, the stack restore them,
+		// and the change wake the reconciler, around and around.
+		//
+		// Protocol is the same fact Linux records as a route's protocol number: the
+		// mechanism that installed it. RouteOriginManual is not — measured on a real
+		// Windows host, the stack marks its own interface routes Manual too, so it
+		// separates nothing.
+		if row.Protocol != winipcfg.RouteProtocolNetMgmt {
 			continue
 		}
 		prefix := row.DestinationPrefix.Prefix()
