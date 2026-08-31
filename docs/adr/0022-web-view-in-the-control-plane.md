@@ -92,6 +92,35 @@ runs it before `go build` — not a `package.json` appearing in a pull request.
 
 The `.gitignore` entries stay. They cost nothing and they will be right.
 
+> *2026-08-31, #146.* The second half of that trigger came up and the answer was still no,
+> which is worth writing down because it will come up again.
+>
+> The page redrew itself by replacing the whole view on every poll. That is fine for a page
+> somebody only reads and wrong for one with controls on it: it wiped a text selection every
+> five seconds, dropped focus, and could swallow a click that straddled a poll. The fix is
+> the thing a framework does — keep the nodes and update them in place — so this looked like
+> the expiry condition arriving.
+>
+> It was not, because the trigger is about hand-written updates *failing*, and this page had
+> never written one. It replaced. Doing it properly turned out to be about seventy lines: one
+> keyed reconciler over the trees the renderers already build, no components, no lifecycle,
+> no state of its own. Set against a lockfile, a Dependabot ecosystem, a CI job and a release
+> ordering change, for one page, it was not close.
+>
+> Two things it did cost, and both are the honest reading of "hand-written":
+>
+> - A node now outlives the render that built it, so a listener must not close over the data
+>   it was built beside. That is a new way to be wrong that a framework would also have,
+>   and it caught the revoke button, which would have named a device by whatever it had been
+>   called when the row was first drawn.
+> - There is nothing in CI that runs any of this. The reconciler was verified in a browser
+>   against a canned control plane, by hand — `web/testdata/fixture.py` and the checks in
+>   [docs/testing/the-page.md](../testing/the-page.md), which is a person doing what a test
+>   would do. That gap is now the strongest argument for the toolchain, and it is an argument
+>   for *tests* rather than for a build step — a smaller decision than this section
+>   anticipated, and one that should be taken on its own rather than arriving attached to a
+>   feature.
+
 ### 4. The page polls, and the server sets the interval
 
 The page calls the overview endpoint on a timer. The response carries
@@ -150,10 +179,19 @@ about and what an operator otherwise reaches for `curl` to do. Publishing an acc
 and editing DNS records are not here — they are documents somebody composes rather than
 buttons, and a form that got them subtly wrong would be worse than the command it replaced.
 
-**A minted token pauses the page.** The control plane stores only a hash, so the moment
-after minting is the only moment that secret exists; the view is replaced wholesale on every
-poll, which would wipe a half-made text selection. So polling stops while it is on screen and
-the page says that it has, which is the same rule about freshness as everywhere else.
+**A minted token is shown once and the page keeps running.** The control plane stores only
+a hash, so the moment after minting is the only moment that secret exists. It is held in the
+page's own state rather than only in the node it was drawn into, so that every later render
+draws it again until it is dismissed.
+
+*Amended 2026-08-31 (#146).* This used to say that polling stopped while a token was on
+screen, because the view was replaced wholesale on every poll and that would wipe a
+half-made text selection — the whole point of showing a secret once being that somebody
+selects it and copies it. Pausing was honest and it said so on screen, but it was a
+workaround for the redraw rather than a property of showing a secret: it covered the one
+case where something was visibly lost and not the click or the focus, and every control
+added after it would have needed its own. The page now updates in place (Decision 3), the
+selection survives, and there is nothing left to pause for.
 
 The login endpoint still refuses to mint a cookie over plaintext to anything but loopback,
 which makes configuring TLS a requirement for any deployment somebody actually browses to.
@@ -220,6 +258,8 @@ discovering `MESHP_TLS_DOMAINS`. Either way it is a step that did not exist befo
 **No build step means no TypeScript, no npm, and hand-written DOM updates.** For one page
 that is a saving. It stops being one at a size this decision does not try to predict, and
 the expiry condition in Decision 3 exists because the cost of noticing late is a rewrite.
+It also means the one file that runs in a browser is the one file nothing in CI executes;
+what holds it up is Go tests asserting the page is served and a person opening it.
 
 **The overview response is public API from its first commit.** ADR-0009 makes the
 commercial layer its consumer, which means field names and shapes carry a compatibility
