@@ -2,8 +2,8 @@
 -- Written in the same transaction as the version bump it describes. A change recorded
 -- without its bump, or a bump without its change, would leave agents converging on a
 -- version whose contents nobody can reconstruct.
-INSERT INTO state_changes (network_id, version, kind, membership_id, peer_public_key)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO state_changes (network_id, version, kind, membership_id, peer_public_key, route_group_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id;
 
 -- name: ListStateChangesSince :many
@@ -12,7 +12,7 @@ RETURNING id;
 -- Ordered by version then id so that two changes at the same version are applied in the
 -- order they were recorded: a removal followed by an upsert of the same key means
 -- something different from the reverse.
-SELECT id, version, kind, membership_id, peer_public_key
+SELECT id, version, kind, membership_id, peer_public_key, route_group_id
 FROM state_changes
 WHERE network_id = $1
   AND version > sqlc.arg(from_version)

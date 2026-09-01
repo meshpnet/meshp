@@ -22,6 +22,13 @@ type Change struct {
 	// never told to remove a peer keeps a tunnel configured to a device that does not.
 	PeerPublicKey *string
 
+	// RouteGroupID names a route group that is gone. Required for removals, for the reason
+	// PeerPublicKey is: by the time a delta is built the row has been deleted, so a builder
+	// listing the groups that exist cannot find it — and a device that is never told to drop
+	// a group keeps carrying it, which on an egress group means routing everything through
+	// an exit node the control plane no longer knows about (#205).
+	RouteGroupID *uuid.UUID
+
 	// Policy marks a change to the network's ACL policy, which names no peer because it
 	// changes what every device may do.
 	Policy bool
@@ -57,6 +64,13 @@ func PeerRemoved(publicKey string) Change {
 // desired state for every device in the network, not only for the advertiser. Everyone
 // else has to be told where to send that traffic.
 func RoutesChanged() Change { return Change{Routes: true} }
+
+// RouteGroupRemoved records that a group is gone, naming it.
+//
+// Distinct from RoutesChanged, which says "recompute the assignments" and is answered by
+// listing the groups that exist. A deleted group is in no such list, so it needs to name
+// itself on the way out — the same reason peer removal carries a public key (#205).
+func RouteGroupRemoved(id uuid.UUID) Change { return Change{RouteGroupID: &id} }
 
 // PolicyChanged records that the network's ACL policy changed.
 //
@@ -112,6 +126,7 @@ func BumpVersion(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID, cha
 			Kind:          kind,
 			MembershipID:  change.MembershipID,
 			PeerPublicKey: change.PeerPublicKey,
+			RouteGroupID:  change.RouteGroupID,
 		}); err != nil {
 			return 0, fmt.Errorf("store: recording change %d: %w", i, err)
 		}
@@ -146,6 +161,9 @@ func (c Change) kind() (string, error) {
 	if c.PeerPublicKey != nil {
 		kinds = append(kinds, "peer_remove")
 	}
+	if c.RouteGroupID != nil {
+		kinds = append(kinds, "route_group_remove")
+	}
 
 	switch len(kinds) {
 	case 1:
@@ -175,6 +193,13 @@ func BumpRoutesEverywhere(ctx context.Context, q *dbgen.Queries, networkID uuid.
 	if _, err := BumpVersion(ctx, q, networkID, RoutesChanged()); err != nil {
 		return err
 	}
+	return bumpRoutesForSharedNetworks(ctx, q, networkID)
+}
+
+// bumpRoutesForSharedNetworks tells the other networks a shared device sits in that routes
+// moved. Split out because a deletion bumps this network with an extra change of its own and
+// still owes the others an ordinary routes bump.
+func bumpRoutesForSharedNetworks(ctx context.Context, q *dbgen.Queries, networkID uuid.UUID) error {
 	sharing, err := q.NetworksSharingADeviceWith(ctx, networkID)
 	if err != nil {
 		return fmt.Errorf("store: finding networks that share a device: %w", err)

@@ -129,7 +129,7 @@ func (q *Queries) ListNetworksWithPrunableChanges(ctx context.Context, olderThan
 }
 
 const listStateChangesSince = `-- name: ListStateChangesSince :many
-SELECT id, version, kind, membership_id, peer_public_key
+SELECT id, version, kind, membership_id, peer_public_key, route_group_id
 FROM state_changes
 WHERE network_id = $1
   AND version > $2
@@ -149,6 +149,7 @@ type ListStateChangesSinceRow struct {
 	Kind          string
 	MembershipID  *uuid.UUID
 	PeerPublicKey *string
+	RouteGroupID  *uuid.UUID
 }
 
 // The rows a delta is built from.
@@ -171,6 +172,7 @@ func (q *Queries) ListStateChangesSince(ctx context.Context, arg ListStateChange
 			&i.Kind,
 			&i.MembershipID,
 			&i.PeerPublicKey,
+			&i.RouteGroupID,
 		); err != nil {
 			return nil, err
 		}
@@ -244,8 +246,8 @@ func (q *Queries) RaiseDeltaFloor(ctx context.Context, arg RaiseDeltaFloorParams
 }
 
 const recordStateChange = `-- name: RecordStateChange :one
-INSERT INTO state_changes (network_id, version, kind, membership_id, peer_public_key)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO state_changes (network_id, version, kind, membership_id, peer_public_key, route_group_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id
 `
 
@@ -255,6 +257,7 @@ type RecordStateChangeParams struct {
 	Kind          string
 	MembershipID  *uuid.UUID
 	PeerPublicKey *string
+	RouteGroupID  *uuid.UUID
 }
 
 // Written in the same transaction as the version bump it describes. A change recorded
@@ -267,6 +270,7 @@ func (q *Queries) RecordStateChange(ctx context.Context, arg RecordStateChangePa
 		arg.Kind,
 		arg.MembershipID,
 		arg.PeerPublicKey,
+		arg.RouteGroupID,
 	)
 	var id int64
 	err := row.Scan(&id)

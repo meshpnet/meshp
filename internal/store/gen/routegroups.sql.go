@@ -240,8 +240,8 @@ func (q *Queries) DeleteRouteAdvertiser(ctx context.Context, arg DeleteRouteAdve
 	return result.RowsAffected(), nil
 }
 
-const deleteRouteGroup = `-- name: DeleteRouteGroup :execrows
-DELETE FROM route_groups WHERE network_id = $1 AND slug = $2
+const deleteRouteGroup = `-- name: DeleteRouteGroup :many
+DELETE FROM route_groups WHERE network_id = $1 AND slug = $2 RETURNING id
 `
 
 type DeleteRouteGroupParams struct {
@@ -249,12 +249,27 @@ type DeleteRouteGroupParams struct {
 	Slug      string
 }
 
-func (q *Queries) DeleteRouteGroup(ctx context.Context, arg DeleteRouteGroupParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteRouteGroup, arg.NetworkID, arg.Slug)
+// Returns the ids it removed, because a delta withdraws a group by naming it and by the time
+// one is built the row is gone (#205). :many rather than :one so that deleting nothing is an
+// empty result rather than an error the caller has to tell apart from a real failure.
+func (q *Queries) DeleteRouteGroup(ctx context.Context, arg DeleteRouteGroupParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, deleteRouteGroup, arg.NetworkID, arg.Slug)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getAdvertiserForReport = `-- name: GetAdvertiserForReport :one
