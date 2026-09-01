@@ -583,3 +583,31 @@ func withRestorePrivilege() (func(), error) {
 		_ = token.Close()
 	}, nil
 }
+
+// TunnelAddresses reports the addresses on every WireGuard adapter this agent has.
+//
+// Read from the adapters this process created, rather than from wgctrl as the other two
+// platforms do. wgctrl on Windows talks to the WireGuard service's named pipes, and meshp
+// serves its own adapters through its own UAPI (ADR-0028) — so it would not see them, and
+// asking it would return an empty list that looks like an answer.
+//
+// The cost is that a tunnel some other program is running is not recognised, where on macOS
+// and Linux it is. That is the narrower half of #207 and it is the half that matters: the
+// case this exists for is a device in two networks, which is two adapters in this process.
+func (l *windowsLink) TunnelAddresses() ([]netip.Prefix, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var out []netip.Prefix
+	for _, device := range l.devices {
+		addrs, err := adapterAddresses(device.luid)
+		if err != nil {
+			// One adapter that cannot be read costs that adapter. Refusing the whole list
+			// would take the carve-out with it, and a carve-out that cannot be built is a
+			// device that will not claim at all.
+			continue
+		}
+		out = append(out, addrs...)
+	}
+	return out, nil
+}

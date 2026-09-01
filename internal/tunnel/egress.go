@@ -25,6 +25,34 @@ import (
 // Nothing here is best effort. If the carve-out cannot be computed the group is unhonoured
 // and no lock is installed, because a device that locks itself away from its control plane
 // is off the network for a reason nobody watching can see.
+// tunnelAddresses is every address on this host that belongs to a tunnel, not only this
+// membership's.
+//
+// #207: a device in two networks has two interfaces (ADR-0004), and the carve-out was told
+// about the one it was claiming for. The other looked like an ordinary local network, so the
+// claim tried to pin its address to the LAN gateway — which the kernel refuses, because that
+// address belongs to a point-to-point link. The claim aborted, and with fail-closed enforced
+// the device was left refusing egress with nothing carrying it. So a device in two networks
+// could not claim a full tunnel in either.
+//
+// The #200 fix made the rule "not this tunnel". It has to be "not any tunnel".
+//
+// Falls back to this membership's own addresses when the platform cannot answer. That is what
+// this did before the list existed, so a failure here costs what was already being lost rather
+// than the whole claim — and on a device with one membership the two are the same.
+func (r *Reconciler) tunnelAddresses(own []netip.Prefix) []netip.Prefix {
+	all, err := r.link.TunnelAddresses()
+	if err != nil {
+		r.log.Warn("could not list this host's tunnels; the carve-out will only know about this one",
+			"error", logx.SafeError(err),
+			"consequence", "a device in more than one network may not claim a default route")
+		return own
+	}
+	// Its own as well, in case the platform's list misses it. A claim that carves out its own
+	// tunnel is the failure #200 was about, and this must not reintroduce it.
+	return append(append([]netip.Prefix{}, all...), own...)
+}
+
 func (r *Reconciler) applyEgress(ctx context.Context, iface string, own []netip.Prefix, want bool, failClosed, preventDNSLeaks bool, relays, excluded []string) []string {
 	if !want {
 		r.releaseEgress(ctx)
@@ -52,7 +80,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, own []netip.
 	carve, err := egress.Compute(ctx, egress.Inputs{
 		ControlURL:     r.membership.ControlURL,
 		RelayEndpoints: relays,
-		LocalPrefixes:  egress.LocalNetworks(own),
+		LocalPrefixes:  egress.LocalNetworks(r.tunnelAddresses(own)),
 		ExtraPrefixes:  excluded,
 	}, nil)
 	if err != nil {

@@ -447,3 +447,35 @@ func lookup(name string) (*net.Interface, bool, error) {
 // privileged reports whether this process can manage interfaces at all, used by tests to
 // skip rather than fail.
 func privileged() bool { return os.Geteuid() == 0 }
+
+// TunnelAddresses reports the addresses on every WireGuard interface this host has.
+//
+// wgctrl names the devices and netlink is asked for each one's addresses. The two halves
+// answer different questions — which interfaces are tunnels, and what is on them — and only
+// the first is WireGuard's to know.
+func (l *linux) TunnelAddresses() ([]netip.Prefix, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	devices, err := l.wg.Devices()
+	if err != nil {
+		return nil, fmt.Errorf("wglink: listing WireGuard devices: %w", err)
+	}
+
+	var out []netip.Prefix
+	for _, device := range devices {
+		iface, err := net.InterfaceByName(device.Name)
+		if err != nil {
+			// One interface that cannot be read costs that interface. Refusing the whole
+			// list would take the carve-out with it, and a carve-out that cannot be built
+			// is a device that will not claim at all.
+			continue
+		}
+		addrs, err := l.addresses(uint32(iface.Index))
+		if err != nil {
+			continue
+		}
+		out = append(out, addrs...)
+	}
+	return out, nil
+}
