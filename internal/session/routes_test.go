@@ -466,6 +466,13 @@ func TestADeletedRouteGroupIsWithdrawnByADelta(t *testing.T) {
 	f := newFixture(t)
 	alice := f.enrolDevice("alice")
 	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
 
 	group := f.subnetGroup("branch-lan", "10.0.0.0/24")
 	f.advertise("branch-lan", bob, 1)
@@ -506,6 +513,13 @@ func TestADeletedEgressGroupIsWithdrawnByADelta(t *testing.T) {
 	f := newFixture(t)
 	alice := f.enrolDevice("alice")
 	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
 
 	group, err := f.store.CreateRouteGroup(f.ctx, store.CreateRouteGroupRequest{
 		NetworkID: f.netID, Slug: "internet", Kind: store.KindEgress,
@@ -544,6 +558,13 @@ func TestDeletingOneGroupLeavesTheOthers(t *testing.T) {
 	f := newFixture(t)
 	alice := f.enrolDevice("alice")
 	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
 
 	going := f.subnetGroup("going", "10.0.0.0/24")
 	staying := f.subnetGroup("staying", "10.1.0.0/24")
