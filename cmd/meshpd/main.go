@@ -34,6 +34,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/netip"
@@ -72,17 +73,33 @@ func main() {
 		return
 	}
 
-	log := newLogger(*logLevel)
+	// Where the log goes is a platform's answer, not a preference: a Windows service has no
+	// console and would otherwise write to a discarded stderr. See logWriter.
+	out, closeLog, err := logWriter(*stateDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer closeLog()
+
+	log := newLogger(*logLevel, out)
 	log.Info("meshpd starting",
 		"version", version.Version(),
 		"state_dir", *stateDir,
 		"socket", *socketPath,
 		"reconcile_interval", *reconcileEvery)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// Cancellable by something other than a signal, because on Windows nothing sends one:
+	// the service control manager asks over a channel, and supervise needs a way to say so.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, *stateDir, *socketPath, *socketGroup, *reconcileEvery); err != nil {
+	err = supervise(ctx, cancel, log, func(ctx context.Context) error {
+		return run(ctx, log, *stateDir, *socketPath, *socketGroup, *reconcileEvery)
+	})
+	if err != nil {
 		log.Error("meshpd exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -161,12 +178,12 @@ func isNotEnrolled(err error) bool {
 	return errors.Is(err, agentstate.ErrNotEnrolled) || errors.Is(err, fs.ErrNotExist)
 }
 
-func newLogger(level string) *slog.Logger {
+func newLogger(level string, out io.Writer) *slog.Logger {
 	var l slog.Level
 	if err := l.UnmarshalText([]byte(level)); err != nil {
 		l = slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: l}))
 }
 
 // envDuration reads a Go duration from the environment, falling back rather than refusing

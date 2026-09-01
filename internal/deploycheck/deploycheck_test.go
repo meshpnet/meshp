@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/meshpnet/meshp/internal/agentapi"
 	"github.com/meshpnet/meshp/internal/tlsconf"
 )
 
@@ -93,6 +94,24 @@ func TestDoctorNamesTheLaunchdServiceThatExists(t *testing.T) {
 	}
 	if !strings.HasPrefix(program, "/") {
 		t.Errorf("the plist runs %q, which launchd cannot find: it has no PATH", program)
+	}
+}
+
+// Windows has no file to check against, so the name lives in Go and both binaries import it.
+// This asserts doctor actually uses that constant rather than a string that happens to match
+// today — which is the failure this whole package exists for, and the one #192 shipped.
+func TestDoctorStartsTheWindowsServiceByItsDeclaredName(t *testing.T) {
+	doctor := readFile(t, "../../cmd/meshp/doctor.go")
+
+	if !strings.Contains(doctor, "agentapi.WindowsServiceName") {
+		t.Errorf("doctor.go does not use agentapi.WindowsServiceName (%q); a literal here is "+
+			"two places to change and one of them will be missed",
+			agentapi.WindowsServiceName)
+	}
+	// And it has to be started by something that exists on a machine with no PowerShell,
+	// because this is printed into whatever shell somebody is already in.
+	if !strings.Contains(doctor, "sc.exe start ") {
+		t.Error("doctor.go names no sc.exe command to start the Windows service")
 	}
 }
 

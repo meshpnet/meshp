@@ -303,9 +303,16 @@ stop being on it when somebody logs out. Its log goes to `/var/log/meshpd.log`, 
 is no journal to inherit. `sudo launchctl kickstart -k system/net.meshp.meshpd` restarts it,
 and `sudo launchctl bootout system/net.meshp.meshpd` stops it for good.
 
-**Windows has no service definition yet** ([#195](https://github.com/meshpnet/meshp/issues/195)),
-so the agent runs there only while a terminal holds it. `meshp doctor` says so rather than
-naming a service that does not exist.
+```powershell
+# Windows, as Administrator. wintun.dll ships beside meshpd.exe (ADR-0028).
+sc.exe create meshpd binPath= "C:\Program Files\meshp\meshpd.exe" start= auto
+sc.exe start meshpd
+```
+
+The space after `binPath=` and `start=` is `sc.exe`'s own syntax and is not a typo; without it
+the command is rejected. The service logs to `meshpd.log` inside its state directory, because a
+Windows service has no console and anything written to stderr is discarded. `sc.exe stop meshpd`
+stops it and `sc.exe delete meshpd` removes it.
 
 The agent runs as root because it creates a WireGuard interface, writes routes and loads
 firewall rules. `meshp` does not: it is a thin client that asks the daemon over a local unix

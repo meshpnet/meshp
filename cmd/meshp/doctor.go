@@ -92,15 +92,14 @@ func (f findings) strandedEgress() bool { return (f.locked || f.claimed) && !f.d
 // screen ADR-0011 says has to carry commands that work, because whoever is reading it has no
 // network and cannot look anything up.
 //
-// Linux gets the unit under deploy/systemd and macOS the daemon under deploy/launchd.
-// Windows still has no service definition — #195 covers it — so it gets the binary, which is
-// what is true there today and what somebody debugging is doing anyway. Naming a service that
-// does not exist would put a command on the screen that fails, which is the one thing this
-// screen must not do.
+// Every platform that can supervise the agent now names the thing that supervises it: the
+// unit under deploy/systemd, the daemon under deploy/launchd, and the service registered with
+// the control manager. Anything else gets the binary, which is what is true there.
 //
-// Both names are load-bearing. `meshpd` is the systemd unit's filename and `net.meshp.meshpd`
-// is the plist's Label, and a command naming either wrongly is a command that fails for
-// somebody with no network. internal/deploycheck reads both files and holds these to them.
+// All three names are load-bearing, and a command naming one wrongly fails for somebody with
+// no network reading the one screen ADR-0011 says has to carry commands that work.
+// internal/deploycheck reads the unit, the plist and agentapi.WindowsServiceName and holds
+// these to them.
 func startMeshpdCommand() string {
 	switch runtime.GOOS {
 	case "linux":
@@ -110,6 +109,12 @@ func startMeshpdCommand() string {
 		// with "service already loaded" once it is, which is the state anybody reading this
 		// is most likely in. kickstart starts it either way.
 		return "sudo launchctl kickstart -k system/net.meshp.meshpd"
+	case "windows":
+		// sc.exe rather than Start-Service, because this is printed to whatever shell
+		// somebody is in and cmd.exe has no PowerShell cmdlets. The trailing space in
+		// `start= auto` is sc.exe's own syntax and is not a typo, which is why installing is
+		// documented rather than printed here.
+		return "sc.exe start " + agentapi.WindowsServiceName
 	default:
 		return "sudo meshpd"
 	}
