@@ -10,6 +10,7 @@ package wglink
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 
 	"github.com/meshpnet/meshp/internal/wgplan"
 )
@@ -58,6 +59,24 @@ type Link interface {
 
 	// Kind reports which implementation is behind an existing interface.
 	Kind(name string) (Kind, error)
+
+	// TunnelAddresses reports the addresses on every WireGuard interface this host has,
+	// meshp's or anybody's.
+	//
+	// The carve-out needs them, and cannot work them out for itself. Keeping traffic off a
+	// tunnel means routing an address through the local gateway, and a tunnel's own address
+	// is one the kernel will not route that way — it belongs to a point-to-point link. So
+	// every such address has to be recognised and left alone, or the claim fails on it and
+	// the device is left refusing egress with nothing carrying it.
+	//
+	// Asked of WireGuard rather than inferred from names or interface flags, because both
+	// have already been wrong on macOS: a name meshp uses is not one the kernel has, and a
+	// utun number is reissued to whatever asks next. A device that answers on its control
+	// socket is a tunnel that exists.
+	//
+	// Every WireGuard interface, not only meshp's. Somebody else's tunnel is as unroutable
+	// through a gateway as ours, and a claim that fails on it fails the same way (#207).
+	TunnelAddresses() ([]netip.Prefix, error)
 
 	// Close releases the netlink and control sockets.
 	Close() error

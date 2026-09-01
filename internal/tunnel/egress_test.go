@@ -3,6 +3,11 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -338,5 +343,119 @@ func TestAHostWithAFilterAndNoLockWillNotClaim(t *testing.T) {
 	}
 	if len(filter.dnsLocked) != 0 {
 		t.Error("something installed a lock through the filter, which is no longer its job")
+	}
+}
+
+// A second tunnel on the host is not a local network, and the carve-out has to say so.
+//
+// #207: a device in two networks has an interface per membership (ADR-0004). The carve-out was
+// told the addresses of the one being claimed for, so the other looked like an ordinary local
+// network — and keeping a local network off the tunnel means routing it through the LAN
+// gateway, which the kernel refuses for an address on a point-to-point link. The claim aborted
+// on it every pass, and with fail-closed enforced the device refused egress with nothing
+// carrying it.
+//
+// Asserted on what Claim is handed, and not on the helper that computes it. The helper being
+// right is not the property that was missing — it did not exist — and a test that calls it
+// directly passes with the call site reverted, which is how three of today's fixes were nearly
+// shipped without their wiring.
+func TestASecondTunnelOnTheHostIsNotCarvedOut(t *testing.T) {
+	// A real address on this host, called a tunnel's. LocalNetworks reads the machine's own
+	// interfaces — it is not injectable and should not be, since what it reports is a fact
+	// about the host — so the way to describe "another tunnel" to it is to name something
+	// that is really there.
+	addr, network := anAddressOnThisHost(t)
+
+	r, _, router, _ := withEgress(t)
+	r.link.(*fakeLink).tunnelAddresses = []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}
+
+	failed := r.applyEgress(context.Background(), "meshp0", nil, true, false, false, nil, nil)
+	if failed != nil {
+		t.Fatalf("the claim did not happen: %v", failed)
+	}
+	if slices.Contains(router.claimedPrefixes, network) {
+		t.Errorf("%s belongs to an interface named as a tunnel and was carved out anyway; "+
+			"keeping it off the tunnel means routing it through the LAN gateway, which the "+
+			"kernel refuses for a point-to-point address — the claim fails and the device is "+
+			"left refusing egress. got %v", network, router.claimedPrefixes)
+	}
+}
+
+// anAddressOnThisHost returns a routable address the machine really has, and the network the
+// carve-out would derive from it.
+func anAddressOnThisHost(t *testing.T) (netip.Addr, netip.Prefix) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot read this host's interfaces:", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			addr, ok := netip.AddrFromSlice(ipnet.IP)
+			if !ok {
+				continue
+			}
+			addr = addr.Unmap()
+			// Not link-local: fe80::/64 is on nearly every interface, so excluding one
+			// leaves the same network arriving from another and this would measure nothing.
+			if !addr.IsGlobalUnicast() || addr.IsLinkLocalUnicast() {
+				continue
+			}
+			ones, _ := ipnet.Mask.Size()
+			if p := netip.PrefixFrom(addr, ones); p.IsValid() {
+				return addr, p.Masked()
+			}
+		}
+	}
+	t.Skip("no interface on this host carries an address this can use")
+	return netip.Addr{}, netip.Prefix{}
+}
+
+// A platform that answers without mentioning this membership's own tunnel must not lose it.
+//
+// Defensive, and the defence is the one that matters: carving out the tunnel being claimed for
+// is #200, where the claim asked the kernel to route a device's own mesh address through the
+// LAN gateway and the whole claim failed. Widening the list to every tunnel must not open a
+// path back to that.
+func TestTheMembershipsOwnTunnelSurvivesAnIncompleteList(t *testing.T) {
+	mine := netip.MustParsePrefix("100.80.0.3/32")
+	other := netip.MustParsePrefix("100.90.0.7/32")
+
+	link := newFakeLink()
+	link.tunnelAddresses = []netip.Prefix{other} // answered, and does not mention mine
+
+	r := &Reconciler{link: link, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	got := r.tunnelAddresses([]netip.Prefix{mine})
+
+	if !slices.Contains(got, mine) {
+		t.Errorf("the platform listed %v and this membership's own tunnel %s was dropped; "+
+			"the claim would carve out its own address, which is #200", got, mine)
+	}
+}
+
+// A platform that cannot answer costs what it always cost, not the whole claim.
+func TestAHostThatCannotListItsTunnelsStillKnowsItsOwn(t *testing.T) {
+	mine := netip.MustParsePrefix("100.80.0.3/32")
+
+	link := newFakeLink()
+	link.tunnelAddressesErr = errors.New("no")
+
+	r := &Reconciler{link: link, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	got := r.tunnelAddresses([]netip.Prefix{mine})
+
+	if !slices.Contains(got, mine) {
+		t.Errorf("with the platform unable to list tunnels, this membership's own address "+
+			"was lost too: %v — which is the failure #200 was about", got)
 	}
 }

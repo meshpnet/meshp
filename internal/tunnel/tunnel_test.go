@@ -25,6 +25,10 @@ import (
 // translation — not the kernel. wglink's own tests use a real interface for the parts only
 // a kernel can answer.
 type fakeLink struct {
+	// tunnelAddresses is every tunnel on this host, as the platform would report it.
+	tunnelAddresses    []netip.Prefix
+	tunnelAddressesErr error
+
 	observed wgplan.Observed
 	applied  []wgplan.Op
 	kind     wglink.Kind
@@ -117,7 +121,13 @@ func without(prefixes []netip.Prefix, drop netip.Prefix) []netip.Prefix {
 }
 
 func (f *fakeLink) Kind(string) (wglink.Kind, error) { return f.kind, nil }
-func (f *fakeLink) Close() error                     { f.closed = true; return nil }
+
+// TunnelAddresses is what the host's other tunnels carry, which the carve-out has to know
+// about or it will try to route them through the LAN gateway (#207).
+func (f *fakeLink) TunnelAddresses() ([]netip.Prefix, error) {
+	return f.tunnelAddresses, f.tunnelAddressesErr
+}
+func (f *fakeLink) Close() error { f.closed = true; return nil }
 
 func (f *fakeLink) count(kind wgplan.OpKind) int {
 	var n int
@@ -902,9 +912,15 @@ type fakeEgress struct {
 	claimErr error
 	relErr   error
 	order    *[]string
+
+	// claimedPrefixes is the carve-out the last claim was given. Recorded because what a
+	// device is told to keep off the tunnel is the thing several bugs have been about, and
+	// a router that discards it lets a test assert only that a claim happened (#207).
+	claimedPrefixes []netip.Prefix
 }
 
-func (e *fakeEgress) Claim(iface string, _ []netip.AddrPort, _ []netip.Prefix) error {
+func (e *fakeEgress) Claim(iface string, _ []netip.AddrPort, excluded []netip.Prefix) error {
+	e.claimedPrefixes = excluded
 	if e.claimErr != nil {
 		return e.claimErr
 	}

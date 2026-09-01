@@ -548,3 +548,44 @@ func ipv4Netmask(bits int) string {
 	mask := net.CIDRMask(bits, 32)
 	return fmt.Sprintf("0x%02x%02x%02x%02x", mask[0], mask[1], mask[2], mask[3])
 }
+
+// TunnelAddresses reports the addresses on every WireGuard interface this host has.
+//
+// wgctrl names the devices, and the platform is asked for each one's addresses. The two
+// halves are separate because they answer different questions — which interfaces are tunnels,
+// and what is on them — and only the first is WireGuard's to know.
+func (l *darwinLink) TunnelAddresses() ([]netip.Prefix, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	devices, err := l.wg.Devices()
+	if err != nil {
+		return nil, fmt.Errorf("wglink: listing WireGuard devices: %w", err)
+	}
+
+	var out []netip.Prefix
+	for _, device := range devices {
+		addrs, err := func() ([]netip.Prefix, error) {
+			real, ok, err := l.resolve(device.Name)
+			if err != nil || !ok {
+				// Not one of ours, or its name file has gone. Read under the name
+				// WireGuard gave, which on a tunnel meshp did not create is the
+				// interface itself.
+				real = device.Name
+			}
+			iface, err := net.InterfaceByName(real)
+			if err != nil {
+				return nil, err
+			}
+			return interfaceAddresses(iface)
+		}()
+		if err != nil {
+			// One interface that cannot be read costs that interface. Refusing the whole
+			// list would take the carve-out with it, and a carve-out that cannot be built
+			// is a device that will not claim at all.
+			continue
+		}
+		out = append(out, addrs...)
+	}
+	return out, nil
+}
