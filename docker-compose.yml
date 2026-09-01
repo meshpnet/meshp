@@ -14,7 +14,13 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Loopback. The control plane reaches this over the compose network and does not need
+      # the published port at all; it is here because `make dev` is how CONTRIBUTING tells
+      # somebody to get a database for the integration tests, and those connect from the
+      # host. `"5432:5432"` binds every interface, which put a database holding enrolment
+      # tokens, policies and password hashes on the local network with the credentials three
+      # lines above — on café wifi, for anybody on the subnet.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U meshp -d meshp"]
       interval: 3s
@@ -59,7 +65,14 @@ services:
       MESHP_RELAYS: ${MESHP_RELAYS:-local=relay:3478}
       MESHP_RELAY_SIGNING_KEY: ${MESHP_RELAY_SIGNING_KEY:-OS4iBtA9dZDL4Y9nIT5NY8YejmveFfhJ/M4JpiT+GUk=}
     ports:
-      - "8080:8080"
+      # Loopback, because every URL in the quickstart is http://localhost:8080 and this
+      # stack is how somebody tries meshp rather than how they run it. Publishing on every
+      # interface would put an API that mints enrolment tokens on the network of whatever
+      # machine ran `docker compose up`, which on a VPS means the internet. A real
+      # deployment is docs/self-hosting.md, which serves TLS and does not use this file; if
+      # you want this one reachable from elsewhere anyway, change the address here and know
+      # that it is plaintext.
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
       interval: 5s
@@ -80,11 +93,18 @@ services:
       # the private half above is what must not be (ADR-0017).
       MESHP_RELAY_ISSUER_KEY: ${MESHP_RELAY_ISSUER_KEY:-wjmzw3Eo36tjSd+v8qd7RgGNWQaFvAkJs917vmhmtaY=}
       MESHP_RELAY_LISTEN: ${MESHP_RELAY_LISTEN:-:3478}
-      MESHP_RELAY_ADMIN_ADDR: ":9090"
       MESHP_LOG_LEVEL: ${MESHP_LOG_LEVEL:-info}
+
+      # MESHP_RELAY_ADMIN_ADDR is deliberately unset. The binary defaults it to
+      # 127.0.0.1:9090 and says why — the health and statistics endpoint is not
+      # authenticated — and this file used to override that to :9090 and publish it, which
+      # undid the decision without recording one. Read it with
+      # `docker compose exec relay wget -qO- http://127.0.0.1:9090/stats`.
     ports:
+      # The one port that has to be published, and the reason is the whole point of a
+      # relay: agents reach it from wherever they are, so loopback would make this stack
+      # unable to carry a packet for any device but the host's own (ADR-0016).
       - "3478:3478/udp"
-      - "9090:9090"
 
 volumes:
   postgres-data:
