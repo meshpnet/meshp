@@ -46,6 +46,9 @@ func interfaceRoutes(index int) ([]netip.Prefix, error) {
 		return nil, fmt.Errorf("wglink: parsing the routing table: %w", err)
 	}
 
+	// Read once rather than per route: it is a file, and this runs on every reconcile.
+	claim := recordedClaim()
+
 	var out []netip.Prefix
 	for _, msg := range msgs {
 		m, ok := msg.(*route.RouteMessage)
@@ -54,6 +57,11 @@ func interfaceRoutes(index int) ([]netip.Prefix, error) {
 		}
 		prefix, ok := prefixOf(m)
 		if !ok {
+			continue
+		}
+		// A route the kernel cloned from one of ours is the kernel's, however much it
+		// looks like a route to a destination somebody chose.
+		if wasCloned(m) {
 			continue
 		}
 		// A host route to one of the interface's own addresses is the kernel's
@@ -67,6 +75,11 @@ func interfaceRoutes(index int) ([]netip.Prefix, error) {
 		// that distinguishes them, which is why this asks what the prefix is rather than
 		// what the routing message says about it.
 		if kernelOwned(prefix) {
+			continue
+		}
+		// Nor anything the egress router installed. It is meshp's, and it is not this
+		// interface's plan to manage — see routeowner.go.
+		if egressOwned(claim, prefix) {
 			continue
 		}
 		out = append(out, prefix)
@@ -144,6 +157,31 @@ func maskBits(a route.Addr, want int) int {
 		return -1
 	}
 	return ones
+}
+
+// wasCloned reports whether the kernel generated this route from one of ours.
+//
+// macOS clones. A route carrying RTF_PRCLONING — which the halves a full tunnel installs do —
+// makes the kernel create a host route for every destination actually contacted through it. So
+// a laptop browsing the web through a claimed tunnel grows a /32 per site, dozens of them,
+// each one a route meshp did not install and the planner would withdraw. The kernel recreates
+// them with the next packet.
+//
+// Measured rather than reasoned about: with a full tunnel claimed and ordinary browsing,
+// interfaceRoutes reported 74 routes where `netstat -rn` showed 5. The other 69 were these —
+// `netstat -rna` shows them, flagged `UHWIig`, or in words:
+//
+//	<UP,HOST,DONE,WASCLONED,IFSCOPE,IFREF,GLOBAL>
+//
+// This is the third time the same rule has been wrong in the same place. "Every route on a
+// meshp interface is meshp's" held until the kernel added link-local and multicast routes
+// (#193), then until the egress router wrote to the same interface (#202), and now until
+// traffic flowed through it. What is different about this one is that it needs *use*: an
+// interface that is up and idle never grows a cloned route, so no test that brings an
+// interface up and looks at it can find this.
+func wasCloned(m *route.RouteMessage) bool {
+	const rtfWasCloned = 0x20000 // RTF_WASCLONED
+	return m.Flags&rtfWasCloned != 0
 }
 
 // isLocalRoute reports whether a route is the kernel's own entry for an interface address.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/net/route"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/meshpnet/meshp/internal/wgplan"
@@ -370,4 +371,36 @@ func hasPrefix(all []netip.Prefix, want netip.Prefix) bool {
 		}
 	}
 	return false
+}
+
+// A route the kernel cloned is the kernel's, not a stray for the planner to withdraw.
+//
+// macOS clones a host route per destination from any route carrying RTF_PRCLONING, which the
+// halves a full tunnel installs do. A laptop browsing through a claimed tunnel therefore grows
+// a /32 per site: measured at 74 routes reported where netstat -rn showed 5, all 69 extras
+// flagged WASCLONED, each one withdrawn every pass and recreated by the next packet (#202).
+func TestClonedRoutesAreTheKernelsNotOurs(t *testing.T) {
+	const (
+		rtfUp        = 0x1
+		rtfHost      = 0x4
+		rtfStatic    = 0x800
+		rtfWasCloned = 0x20000
+	)
+
+	cloned := &route.RouteMessage{Flags: rtfUp | rtfHost | rtfWasCloned}
+	if !wasCloned(cloned) {
+		t.Error("a WASCLONED route was not recognised as the kernel's; the planner will " +
+			"withdraw one per destination the device talks to")
+	}
+
+	// What meshp installs carries no such flag, and must stay the planner's — excluding
+	// these would leave peers unreachable and the interface unmanaged.
+	ours := &route.RouteMessage{Flags: rtfUp | rtfStatic}
+	if wasCloned(ours) {
+		t.Error("a route meshp installed was taken for a cloned one")
+	}
+	host := &route.RouteMessage{Flags: rtfUp | rtfHost | rtfStatic}
+	if wasCloned(host) {
+		t.Error("a host route meshp installed was taken for a cloned one")
+	}
 }
