@@ -44,5 +44,15 @@ MemoryDenyWriteExecute=yes
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
+# The one writable directory, and the reason this unit needs one: ProtectSystem=strict leaves
+# the whole filesystem read-only, and a control plane obtaining its own certificates has to
+# save them. Without this it starts, binds 443 because of the capability above, and then
+# fails on the first request with a read-only filesystem — or, worse, re-issues on every
+# restart until Let's Encrypt refuses.
+#
+# meshp-control rather than meshp: /var/lib/meshp belongs to the agent, and a host running
+# both would otherwise have systemd hand one service's directory to the other.
+StateDirectory=meshp-control
+
 [Install]
 WantedBy=multi-user.target

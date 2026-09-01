@@ -24,6 +24,17 @@ import (
 // DefaultSocketPath is where the daemon listens.
 const DefaultSocketPath = "/var/run/meshpd.sock"
 
+// WindowsServiceName is what the agent is registered as with the service control manager.
+//
+// Here rather than in either command because both need it and neither owns it: meshpd
+// answers to this name when the control manager starts it, and `meshp doctor` prints a
+// command naming it on the one screen ADR-0011 says must carry commands that work. Two
+// binaries agreeing by coincidence is how #192 happened.
+//
+// It matches the systemd unit's filename and the last component of the launchd label, so
+// that "the agent" is called the same thing on every platform that can supervise it.
+const WindowsServiceName = "meshpd"
+
 // Status is what the daemon reports about itself.
 type Status struct {
 	Version   string    `json:"version"`

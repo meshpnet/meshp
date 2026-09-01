@@ -3,6 +3,8 @@
 package wglink
 
 import (
+	"context"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -12,7 +14,9 @@ import (
 	"testing"
 
 	"golang.org/x/net/route"
+	"golang.zx2c4.com/wireguard/wgctrl"
 
+	"github.com/meshpnet/meshp/internal/egress"
 	"github.com/meshpnet/meshp/internal/wgplan"
 )
 
@@ -116,18 +120,14 @@ func TestClaimingAndReleasingTheDefaultRoute(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Apply(iface, opDestroy()) })
 
-	// Addressed, because a real claim is only ever made on a tunnel that has one — and
-	// because Claim now decides which address families to take from what the interface
-	// actually carries. A bare utun was not a realistic fixture and hid that.
-	if err := l.Apply(iface, wgplan.Op{
-		Kind: wgplan.AddAddress, Prefix: netip.MustParsePrefix("100.90.77.1/32"),
-	}); err != nil {
-		t.Fatalf("addressing the interface: %v", err)
-	}
-
-	real, ok, err := l.(*darwinLink).resolve(iface)
-	if err != nil || !ok {
-		t.Fatalf("resolving the interface: %v", err)
+	// Both families, because a real membership has both and the halves are taken per family.
+	// A v4-only fixture exercised half the claim.
+	for _, addr := range []string{"100.90.77.1/32", "fd7c:6d65:7368:77::1/128"} {
+		if err := l.Apply(iface, wgplan.Op{
+			Kind: wgplan.AddAddress, Prefix: netip.MustParsePrefix(addr),
+		}); err != nil {
+			t.Fatalf("addressing the interface with %s: %v", addr, err)
+		}
 	}
 
 	router := NewRouter()
@@ -135,8 +135,24 @@ func TestClaimingAndReleasingTheDefaultRoute(t *testing.T) {
 	t.Cleanup(func() { _ = router.Release() })
 
 	endpoint := netip.MustParseAddrPort("198.51.100.7:51820")
-	if err := router.Claim(real, []netip.AddrPort{endpoint}, nil); err != nil {
-		t.Fatalf("claiming: %v", err)
+
+	// Claimed with what the reconciler passes, and this is the whole point of the change
+	// that added it (#200). This test used to resolve the interface itself and hand Claim
+	// the kernel's name, and to pass nil exclusions — so it did the translation the
+	// production code was missing, and never offered the prefixes the production caller
+	// offers. Five bugs lived in that gap and every one of them was found on a laptop:
+	//
+	//   - the tunnel's own address arriving in the carve-out, because LocalNetworks skipped
+	//     by a name macOS does not have
+	//   - route(8) refusing 255.255.255.255/32, which the carve-out always contains
+	//   - halvesFor and `route -interface` given the label rather than the device
+	//
+	// A fixture that pre-processes its input the way the caller does not is a fixture that
+	// tests something nobody runs.
+	refuseIfAnotherTunnelIsUp(t, iface)
+	excluded := carveoutAsTheReconcilerBuildsIt(t, iface)
+	if err := router.Claim(iface, []netip.AddrPort{endpoint}, excluded); err != nil {
+		t.Fatalf("claiming with the label and a real carve-out: %v", err)
 	}
 
 	// Read from the kernel, not from the Router's own memory: what matters is what the
@@ -167,16 +183,134 @@ func TestClaimingAndReleasingTheDefaultRoute(t *testing.T) {
 			"meshp doctor would tell somebody their machine is fine")
 	}
 
+	// The v6 halves too, since the interface carries a v6 address.
+	for _, half := range egressHalves6 {
+		if present, err := routeExists(half); err != nil {
+			t.Fatal(err)
+		} else if !present {
+			t.Errorf("%s is not in the table after claiming an interface with a v6 address", half)
+		}
+	}
+
+	// And the interface is still converged. wgplan withdraws anything on the interface it
+	// did not plan, and the halves are on the interface — so before #202 this reconciled
+	// forever, withdrawing them while the router reinstalled them, twice a second.
+	observed, err := l.Observe(iface)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := wgplan.For(wgplan.Interface{
+		Name:       iface,
+		PrivateKey: genDarwinKey(t),
+		MTU:        1380,
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("100.90.77.1/32"),
+			netip.MustParsePrefix("fd7c:6d65:7368:77::1/128"),
+		},
+	}, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range plan.Ops {
+		if op.Kind == wgplan.RemoveRoute {
+			t.Errorf("with a full tunnel claimed, the interface plan would withdraw %s — "+
+				"which the egress router installed and will reinstall, forever", op.Prefix)
+		}
+	}
+
 	if err := router.Release(); err != nil {
 		t.Fatalf("releasing: %v", err)
 	}
-	for _, half := range append(append([]netip.Prefix{}, egressHalves...), pinned) {
+	gone := append([]netip.Prefix{}, egressHalves...)
+	gone = append(gone, egressHalves6...)
+	gone = append(gone, pinned)
+	for _, half := range gone {
 		if present, err := routeExists(half); err != nil {
 			t.Fatal(err)
 		} else if present {
 			t.Errorf("%s is still in the table after releasing", half)
 		}
 	}
+}
+
+// refuseIfAnotherTunnelIsUp skips when the host already has a meshp tunnel that is not this
+// test's.
+//
+// Not tidiness, and not a workaround: it is #207, which this test found. The carve-out knows
+// the addresses of the tunnel being claimed for and treats any other meshp tunnel as an
+// ordinary local network, so it pins that tunnel's address to the LAN gateway and the kernel
+// refuses. A developer with meshp running would see this test fail for a reason that is not
+// the code under test, and would reasonably conclude the test was flaky.
+//
+// It skips rather than working around it, because working around it — telling LocalNetworks
+// about the other tunnel here — would make the test pass while a device with two memberships
+// still could not claim. CI has no second membership, so this runs there.
+func refuseIfAnotherTunnelIsUp(t *testing.T, mine string) {
+	t.Helper()
+	entries, err := os.ReadDir(wireguardRunDir)
+	if err != nil {
+		return // no directory, no other tunnels
+	}
+	client, err := wgctrl.New()
+	if err != nil {
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	for _, entry := range entries {
+		name := strings.TrimSuffix(entry.Name(), ".name")
+		if name == entry.Name() || name == mine {
+			continue
+		}
+		// Asked of WireGuard rather than of the name file or the interface list, because
+		// neither answers the question. A name file outlives the process that wrote it, and
+		// the utun it names outlives it too — macOS hands the number back out, so a stale
+		// mapping can point at a live interface belonging to something else entirely. A
+		// device that answers wgctrl is a tunnel that is actually being served.
+		if _, err := client.Device(name); err != nil {
+			continue
+		}
+		t.Skipf("this host already has the meshp tunnel %q up, which the carve-out would "+
+			"pin to the LAN gateway (#207); stop meshpd and run this again", name)
+	}
+}
+
+// carveoutAsTheReconcilerBuildsIt is the prefix list a real claim is given.
+//
+// Built through egress.Compute rather than assembled by hand, so that what CI claims with is
+// what a device claims with — including alwaysExcluded, which carries the limited broadcast
+// that route(8) refuses, and LocalNetworks, which is where the tunnel's own address used to
+// arrive from.
+func carveoutAsTheReconcilerBuildsIt(t *testing.T, iface string) []netip.Prefix {
+	t.Helper()
+
+	device, err := realInterface(iface)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", iface, err)
+	}
+	addrs, err := interfaceAddressesOf(device)
+	if err != nil {
+		t.Fatalf("reading %s's addresses: %v", device, err)
+	}
+
+	carve, err := egress.Compute(context.Background(), egress.Inputs{
+		// Resolved from a literal, so the test needs no DNS and no control plane.
+		ControlURL:    "https://198.51.100.1",
+		LocalPrefixes: egress.LocalNetworks(addrs),
+	}, nil)
+	if err != nil {
+		t.Fatalf("computing the carve-out: %v", err)
+	}
+	return carve.Prefixes
+}
+
+// interfaceAddressesOf is the tunnel's own addresses, which identify it to LocalNetworks.
+func interfaceAddressesOf(device string) ([]netip.Prefix, error) {
+	iface, err := net.InterfaceByName(device)
+	if err != nil {
+		return nil, err
+	}
+	return interfaceAddresses(iface)
 }
 
 // A netmask is read correctly whatever its length.
@@ -491,4 +625,172 @@ func TestWhetherARouteAlreadyGoesWhereAsked(t *testing.T) {
 			t.Errorf("%s: goesTo = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+// The carve-out contains one prefix macOS will not route, and Claim must not abort on it.
+//
+// route(8) rejects 255.255.255.255/32 with "bad address", and Claim gives up on the first
+// prefix it cannot install — so a device in a network with an egress group never claimed the
+// default route at all, and with fail-closed enforced had no internet.
+//
+// Asked of directRoutes, which is the list Claim installs, rather than of the predicate.
+// The first version of this fix added the predicate and never called it: the behaviour was
+// unchanged on the machine that found the bug while this test passed, because it was asking
+// the wrong question. ADR-0018 is about mechanisms nothing reaches, and a test that calls the
+// mechanism directly cannot notice that nothing else does.
+func TestClaimDoesNotTryToRouteTheLimitedBroadcast(t *testing.T) {
+	carveOut := []netip.Prefix{
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("255.255.255.255/32"),
+		netip.MustParsePrefix("192.168.0.0/24"),
+		// A single host an operator asked to keep direct. Here because without a /32 that
+		// must be kept, "skip the broadcast" and "skip every host route" are the same
+		// answer, and a rule that dropped every /32 would pass.
+		netip.MustParsePrefix("10.7.7.7/32"),
+		netip.MustParsePrefix("fe80::/10"),
+	}
+	endpoints := []netip.AddrPort{netip.MustParseAddrPort("168.144.85.34:3478")}
+
+	got := directRoutes(endpoints, carveOut)
+
+	for _, p := range got {
+		if p == netip.MustParsePrefix("255.255.255.255/32") {
+			t.Error("Claim would try to route 255.255.255.255/32; route(8) refuses it and " +
+				"the whole claim fails, leaving the device refusing egress with nothing " +
+				"carrying it")
+		}
+	}
+
+	// Everything else that keeps the machine's own network working while a full tunnel is
+	// claimed still gets a route. Skipping any of these would be a hole in the thing the
+	// carve-out exists to protect.
+	for _, want := range []netip.Prefix{
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("192.168.0.0/24"),
+		netip.MustParsePrefix("10.7.7.7/32"),
+		netip.MustParsePrefix("168.144.85.34/32"),
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("%s must be kept off the tunnel and Claim would not route it", want)
+		}
+	}
+
+	// IPv6 is left alone here, which is a separate deliberate limitation of this platform's
+	// claim rather than something this change touches.
+	for _, p := range got {
+		if p.Addr().Is6() {
+			t.Errorf("an IPv6 prefix %s reached the v4 gateway loop", p)
+		}
+	}
+}
+
+// meshp's name for a tunnel is not the kernel's, and everything here talks to the kernel.
+//
+// The third instance of one root cause (#200): meshp0 is a real interface on Linux and a
+// label on macOS, where the kernel makes a utunN. LocalNetworks was fixed by identifying the
+// tunnel by address; halvesFor and the route commands genuinely need the device's name, so
+// Claim resolves it.
+func TestTheKernelsNameIsUsedNotMeshpsLabel(t *testing.T) {
+	// A name the kernel really has resolves to itself, which is both the Linux case and what
+	// lets this be checked without a tunnel.
+	ifaces, err := net.Interfaces()
+	if err != nil || len(ifaces) == 0 {
+		t.Skip("no interfaces to check against")
+	}
+	real := ifaces[0].Name
+	got, err := realInterface(real)
+	if err != nil {
+		t.Fatalf("realInterface(%q): %v", real, err)
+	}
+	if got != real {
+		t.Errorf("realInterface(%q) = %q, want it unchanged", real, got)
+	}
+
+	// A label with no interface and no name file is an error rather than a name passed
+	// through — passing it through is what produced "no such network interface" from three
+	// different callers.
+	if got, err := realInterface("meshp-nonexistent-" + t.Name()); err == nil {
+		t.Errorf("a label with no interface behind it resolved to %q instead of failing", got)
+	}
+}
+
+// The name file is what survives a restart, and is how a label is translated.
+func TestALabelResolvesThroughItsNameFile(t *testing.T) {
+	if _, err := os.Stat(wireguardRunDir); err != nil {
+		t.Skip("no", wireguardRunDir, "on this host")
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil || len(ifaces) == 0 {
+		t.Skip("no interfaces to point a name file at")
+	}
+	target := ifaces[0].Name
+
+	label := "meshptest-" + strings.ReplaceAll(t.Name(), "/", "-")
+	path := filepath.Join(wireguardRunDir, label+".name")
+	if err := os.WriteFile(path, []byte(target+"\n"), 0o600); err != nil {
+		t.Skip("cannot write a name file here:", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	got, err := realInterface(label)
+	if err != nil {
+		t.Fatalf("realInterface(%q): %v", label, err)
+	}
+	if got != target {
+		t.Errorf("realInterface(%q) = %q, want %q from the name file", label, got, target)
+	}
+}
+
+// The route reader consults the record, which is the half a unit test of the rule cannot see.
+//
+// #202 is only fixed if interfaceRoutes actually asks. An earlier fix in this file added a
+// predicate and never called it, the tests passed because they asked the predicate, and the
+// behaviour on the machine was unchanged — so this exercises the reader against a record on
+// disk rather than the rule in isolation.
+func TestTheRouteReaderExcludesWhatTheEgressRouterRecorded(t *testing.T) {
+	index, routes := anInterfaceWithRoutes(t)
+	victim := routes[0]
+
+	dir := t.TempDir()
+	previous := egressRecordPath
+	egressRecordPath = filepath.Join(dir, "egress-routes")
+	t.Cleanup(func() { egressRecordPath = previous })
+
+	recordClaim([]netip.Prefix{victim})
+
+	after, err := interfaceRoutes(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(after, victim) {
+		t.Errorf("%s is recorded as the egress router's and interfaceRoutes still reports it; "+
+			"the planner will withdraw it every pass", victim)
+	}
+
+	// And only that one. Excluding more would hide peer routes from the planner.
+	for _, keep := range routes[1:] {
+		if !slices.Contains(after, keep) {
+			t.Errorf("%s is the interface plan's and was excluded", keep)
+		}
+	}
+}
+
+// anInterfaceWithRoutes finds an interface this host has that carries more than one route,
+// so the test above can tell "excluded the recorded one" from "excluded everything".
+func anInterfaceWithRoutes(t *testing.T) (int, []netip.Prefix) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot read this host's interfaces:", err)
+	}
+	for _, iface := range ifaces {
+		routes, err := interfaceRoutes(iface.Index)
+		if err == nil && len(routes) > 1 {
+			return iface.Index, routes
+		}
+	}
+	t.Skip("no interface on this host carries more than one route")
+	return 0, nil
 }

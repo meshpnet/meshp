@@ -55,7 +55,7 @@ func main() {
 			"path to the TLS certificate's private key")
 		tlsDomains = flag.String("tls-domains", os.Getenv("MESHP_TLS_DOMAINS"),
 			"comma-separated names to obtain certificates for automatically (Let's Encrypt)")
-		tlsCacheDir = flag.String("tls-cache-dir", envOr("MESHP_TLS_CACHE_DIR", "/var/lib/meshp/certs"),
+		tlsCacheDir = flag.String("tls-cache-dir", envOr("MESHP_TLS_CACHE_DIR", tlsconf.DefaultCacheDir),
 			"where automatically obtained certificates are kept between restarts")
 		databaseURL = flag.String("database-url", os.Getenv("MESHP_DATABASE_URL"), "PostgreSQL connection string")
 		secretKey   = flag.String("secret-key", os.Getenv("MESHP_SECRET_KEY"), "master secret for enrolment challenges and sessions")

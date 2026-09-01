@@ -200,12 +200,16 @@ func TestRouteChangesMoveTheStateVersion(t *testing.T) {
 		}
 	}
 
-	// And the change names no peer, because it is about every device at once.
+	// And a routes change names no peer, because it is about every device at once.
+	//
+	// Read by kind rather than by "the most recent row": deleting a group records a routes
+	// change *and* a tombstone naming the group, at the same version, and which of the two
+	// comes last is an ordering this test has no business depending on (#205).
 	var kind string
 	var membershipID, peerKey *string
 	if err := h.store.Pool().QueryRow(h.ctx,
 		`SELECT kind, membership_id::text, peer_public_key FROM state_changes
-		 WHERE network_id = $1 ORDER BY version DESC LIMIT 1`, h.netID).
+		 WHERE network_id = $1 AND kind = 'routes' ORDER BY version DESC LIMIT 1`, h.netID).
 		Scan(&kind, &membershipID, &peerKey); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +218,19 @@ func TestRouteChangesMoveTheStateVersion(t *testing.T) {
 	}
 	if membershipID != nil || peerKey != nil {
 		t.Errorf("a route change named a peer: %v %v", membershipID, peerKey)
+	}
+
+	// The deletion also names the group it removed, which is what lets a delta withdraw it
+	// from a device that is already connected (#205).
+	var tombstones int
+	if err := h.store.Pool().QueryRow(h.ctx,
+		`SELECT count(*) FROM state_changes
+		 WHERE network_id = $1 AND kind = 'route_group_remove' AND route_group_id IS NOT NULL`,
+		h.netID).Scan(&tombstones); err != nil {
+		t.Fatal(err)
+	}
+	if tombstones != 1 {
+		t.Errorf("deleting a route group recorded %d removals naming the group, want 1", tombstones)
 	}
 }
 

@@ -787,6 +787,55 @@ jobs:
           go test ./internal/wglink/ ./internal/resolved/ ./internal/wfp/ ./internal/egresslock/ ./internal/netwatch/ ./internal/version/ -count=1 -v 2>&1 | Tee-Object windows.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The service is the whole of the Windows half of #195, and none of it can be reasoned
+      # about: a Go binary registered with `sc.exe` starts, is asked to report Running, never
+      # answers because it does not implement the control interface, and is killed. That
+      # failure looks like "the service will not start" and nothing else, so the only useful
+      # test installs it and starts it. This runner is elevated and disposable, which is the
+      # one place that is a reasonable thing to do.
+      - name: meshpd registers as a service, starts, and stops when asked
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "C:\meshp" | Out-Null
+          go build -o C:\meshp\meshpd.exe ./cmd/meshpd
+          # Beside the binary, which is where it ships and where Windows looks (ADR-0028).
+          Copy-Item wintun-extracted\wintun\bin\amd64\wintun.dll C:\meshp\wintun.dll
+
+          sc.exe create meshpd binPath= "C:\meshp\meshpd.exe --state-dir C:\meshp\state" start= demand
+          if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with $LASTEXITCODE" }
+
+          try {
+            sc.exe start meshpd
+            if ($LASTEXITCODE -ne 0) { throw "sc.exe start failed with $LASTEXITCODE" }
+
+            # Waited for rather than assumed: the control manager reports StartPending until
+            # the service answers, and a service that never answers is killed after 30s.
+            $service = Get-Service meshpd
+            $service.WaitForStatus("Running", "00:00:30")
+            "service reported: $((Get-Service meshpd).Status)"
+
+            # A service that cannot be stopped is as broken as one that cannot start, and it
+            # fails differently — the control manager hangs and then kills it, which on a real
+            # machine means an agent that never releases its interface, routes or filters.
+            Stop-Service meshpd
+            (Get-Service meshpd).WaitForStatus("Stopped", "00:00:30")
+            "service stopped cleanly"
+
+            # And it logged somewhere, which is the actual point of #195: a service has no
+            # console, so an agent that does not open a file of its own is one nobody can
+            # debug after the fact.
+            $log = "C:\meshp\state\meshpd.log"
+            if (-not (Test-Path $log)) { throw "the service left no log at $log" }
+            if (-not (Select-String -Path $log -Pattern 'meshpd starting' -Quiet)) {
+              throw "$log exists but does not contain meshpd's own startup line"
+            }
+            "log written to $log"
+            Get-Content $log -Tail 5
+          } finally {
+            sc.exe delete meshpd | Out-Null
+          }
+
       - name: report, and refuse a test that did not run
         if: always()
         shell: pwsh

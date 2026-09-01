@@ -25,7 +25,7 @@ import (
 // Nothing here is best effort. If the carve-out cannot be computed the group is unhonoured
 // and no lock is installed, because a device that locks itself away from its control plane
 // is off the network for a reason nobody watching can see.
-func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, failClosed, preventDNSLeaks bool, relays, excluded []string) []string {
+func (r *Reconciler) applyEgress(ctx context.Context, iface string, own []netip.Prefix, want bool, failClosed, preventDNSLeaks bool, relays, excluded []string) []string {
 	if !want {
 		r.releaseEgress(ctx)
 		return nil
@@ -52,7 +52,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, want bool, f
 	carve, err := egress.Compute(ctx, egress.Inputs{
 		ControlURL:     r.membership.ControlURL,
 		RelayEndpoints: relays,
-		LocalPrefixes:  egress.LocalNetworks(iface),
+		LocalPrefixes:  egress.LocalNetworks(own),
 		ExtraPrefixes:  excluded,
 	}, nil)
 	if err != nil {

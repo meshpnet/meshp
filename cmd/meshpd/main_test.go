@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -94,7 +95,7 @@ func TestAMalformedIntervalDoesNotKeepADeviceOffline(t *testing.T) {
 func TestAnUnreadableLogLevelStillLogs(t *testing.T) {
 	ctx := context.Background()
 
-	fallback := newLogger("verbose")
+	fallback := newLogger("verbose", io.Discard)
 	if !fallback.Enabled(ctx, slog.LevelInfo) {
 		t.Error("an unreadable log level left the daemon silent at info")
 	}
@@ -103,10 +104,10 @@ func TestAnUnreadableLogLevelStillLogs(t *testing.T) {
 	}
 
 	// And a readable one is honoured, or the fallback above would be the only behaviour.
-	if !newLogger("debug").Enabled(ctx, slog.LevelDebug) {
+	if !newLogger("debug", io.Discard).Enabled(ctx, slog.LevelDebug) {
 		t.Error("debug was asked for and not enabled")
 	}
-	if newLogger("error").Enabled(ctx, slog.LevelWarn) {
+	if newLogger("error", io.Discard).Enabled(ctx, slog.LevelWarn) {
 		t.Error("error was asked for and warnings were logged anyway")
 	}
 }

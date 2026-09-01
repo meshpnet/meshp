@@ -18,6 +18,20 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+// DefaultCacheDir is where automatically obtained certificates are kept.
+//
+// Deliberately not /var/lib/meshp, which is the *agent's* state directory: a host running
+// both — which is what a small self-hoster does, and what this project's own deployment
+// does — would have the control plane writing certificates into a directory the agent owns
+// and systemd hands to a different user. Two services, two directories.
+//
+// Exported because the systemd unit has to make it writable: the unit sets
+// ProtectSystem=strict, so nothing under /var is writable without a matching
+// StateDirectory=, and a certificate that cannot be saved is a deployment that asks Let's
+// Encrypt again on every restart until it is rate-limited. internal/deploycheck holds the
+// unit to this value rather than trusting the two to be edited together.
+const DefaultCacheDir = "/var/lib/meshp-control/certs"
+
 // Options are the ways to obtain a certificate. At most one may be set.
 type Options struct {
 	// CertFile and KeyFile are a certificate and its private key on disk.

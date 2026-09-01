@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The agent, on a Mac that joins a network.
+
+  Loaded into the *system* domain, not a user's: creating a utun goes through PF_SYSTEM and
+  needs root, and so does everything the agent does afterwards — routes, the pf anchor, the
+  resolver entry in the SystemConfiguration store. A LaunchAgent would start with the wrong
+  privileges and stop when somebody logged out, which is not what a device on a network
+  should do.
+
+      sudo install -m 0644 -o root -g wheel net.meshp.meshpd.plist /Library/LaunchDaemons/
+      sudo launchctl bootstrap system /Library/LaunchDaemons/net.meshp.meshpd.plist
+
+  The label is net.meshp.meshpd, and `meshp doctor` prints commands naming it — the one
+  screen ADR-0011 says has to carry commands that work, because whoever is reading it has no
+  network and cannot look anything up. internal/deploycheck holds the two together.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>net.meshp.meshpd</string>
+
+    <!--
+      No --state-dir or --socket. The binary already computes the right paths for this
+      platform, and naming them here would be a second place to be wrong. The systemd unit
+      passes them because Linux's defaults and its StateDirectory have to agree, which is a
+      constraint launchd does not impose.
+
+      --log-file is different, and it is here rather than left to StandardOutPath because a
+      file launchd is holding cannot be rotated from outside. newsyslog rotates by renaming,
+      and a rename does not move an open descriptor: measured on macOS 26, after renaming the
+      file a running job's next lines were in the renamed one and the original was never
+      recreated. So the process owns its log and rotates it (internal/logfile), and the
+      redirection below is left for what never reaches the logger at all.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/meshpd</string>
+      <string>--log-level</string>
+      <string>info</string>
+      <string>--log-file</string>
+      <string>/var/log/meshpd.log</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      Restarted whenever it stops, however it stopped — the same promise Restart=always makes
+      on Linux, and it matters more here. A device whose agent died has a tunnel nobody is
+      reconciling, and on macOS it may also have a pf anchor and routes left behind that only
+      a running agent will reclaim (ADR-0011).
+
+      Deliberately the boolean and not the SuccessfulExit dictionary. "Restart unless it
+      exited cleanly" sounds more careful and is wrong: a clean exit still leaves a device
+      that has stopped talking to its network, and stopping this on purpose is what
+      `launchctl bootout` is for.
+    -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!--
+      Ten seconds between restarts. launchd's default is one, and a daemon that cannot start
+      at all — a broken state directory, a missing binary — would otherwise be restarted
+      sixty times a minute, filling the log with one failure and draining the battery of the
+      laptop it is failing on.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!--
+      Somewhere for what the logger never sees. A panic, or a failure before the log file is
+      open, is written to stderr by the runtime and would otherwise be discarded — and the
+      crash nobody can explain is exactly the one worth keeping.
+
+      Deliberately not /var/log/meshpd.log: that file is rotated by the process, and launchd
+      holding a descriptor on it would keep appending to whichever copy it opened first. This
+      one stays small because almost nothing is ever written to it.
+    -->
+    <key>StandardErrorPath</key>
+    <string>/var/log/meshpd.err</string>
+  </dict>
+</plist>

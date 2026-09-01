@@ -238,13 +238,24 @@ func resolveHostPort(ctx context.Context, host, port string, resolve Resolver) (
 	return out, nil
 }
 
-// LocalNetworks reports the networks this host is directly attached to.
+// LocalNetworks reports the networks this host is directly attached to, other than the
+// tunnel's own.
 //
-// The tunnel is skipped by name: its own prefix is what the device is joining, and carving
-// it out would leave the mesh unreachable through the interface that serves it. Interfaces
-// that are down are skipped too, since a prefix on a link with no carrier is a hole in the
-// lock for a network that is not there.
-func LocalNetworks(skip string) []netip.Prefix {
+// The tunnel is identified by the addresses it carries rather than by its name, and that is
+// the whole of #200. It used to take the interface name, which is correct on Linux — where
+// the interface really is called meshp0 — and matches nothing on macOS, where meshp0 is a
+// label in a name file and the kernel knows a utunN. So the tunnel was not skipped, its own
+// address was collected as a network to keep off the tunnel, and the claim then asked the
+// kernel to route the device's own mesh address via the LAN gateway. It refuses, correctly,
+// and a laptop in a network with an egress group had no internet at all.
+//
+// An address is a fact about an interface that every platform agrees on. A name is not: this
+// project already carries a translation layer for exactly that reason (wglink's resolve), and
+// anything comparing names here would need to know about it.
+//
+// Interfaces that are down are skipped too, since a prefix on a link with no carrier is a
+// hole in the lock for a network that is not there.
+func LocalNetworks(own []netip.Prefix) []netip.Prefix {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -252,13 +263,14 @@ func LocalNetworks(skip string) []netip.Prefix {
 
 	var out []netip.Prefix
 	for _, iface := range ifaces {
-		if iface.Name == skip || iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 		addrs, err := iface.Addrs()
 		if err != nil {
 			continue
 		}
+		carried := make([]netip.Prefix, 0, len(addrs))
 		for _, a := range addrs {
 			ipnet, ok := a.(*net.IPNet)
 			if !ok {
@@ -269,11 +281,54 @@ func LocalNetworks(skip string) []netip.Prefix {
 				continue
 			}
 			ones, _ := ipnet.Mask.Size()
-			p := netip.PrefixFrom(addr.Unmap(), ones)
-			if p.IsValid() {
-				out = append(out, p.Masked())
+			if p := netip.PrefixFrom(addr.Unmap(), ones); p.IsValid() {
+				carried = append(carried, p)
 			}
 		}
+		out = append(out, contributes(carried, own)...)
 	}
 	return normalise(out)
+}
+
+// contributes returns the networks one interface adds to the carve-out.
+//
+// Separate from LocalNetworks so the decision can be tested without needing a machine whose
+// interfaces happen to be arranged the right way. That is not tidiness: a mutation that
+// excluded only the matching prefix instead of the whole interface passed every test here,
+// because the host it ran on carried exactly one global prefix per interface and the two
+// behaviours are identical in that case.
+//
+// carried holds the interface's addresses as unmasked prefixes, so each one still knows both
+// the address and the mask.
+//
+// An interface carrying one of the tunnel's addresses contributes nothing at all, not merely
+// the prefix that matched. A tunnel with several addresses — every device has at least a v4
+// and a v6 — would otherwise have the rest of them carved out and routed direct, which sends
+// part of the mesh out of the wrong door.
+func contributes(carried, own []netip.Prefix) []netip.Prefix {
+	for _, p := range carried {
+		if holds(own, p.Addr()) {
+			return nil
+		}
+	}
+	out := make([]netip.Prefix, 0, len(carried))
+	for _, p := range carried {
+		out = append(out, p.Masked())
+	}
+	return out
+}
+
+// holds reports whether one of the tunnel's own prefixes is this exact address.
+//
+// Compared as an address rather than by prefix containment, because containment would match
+// far too much: the tunnel's addresses come from the network's range (ADR-0005), and a
+// device whose LAN happened to overlap it would have its real network mistaken for the
+// tunnel and quietly dropped from the carve-out.
+func holds(own []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range own {
+		if p.Addr() == addr {
+			return true
+		}
+	}
+	return false
 }

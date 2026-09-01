@@ -159,4 +159,42 @@ run.
 
 | Date | Build | macOS | 1 Sleep | 2 Networks | 3 kill -9 | 4 Other VPN | 5 connected_since | Notes |
 |---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| 2026-08-31 | v0.1.0-57-geb4d461 | 26.0 (25A354), MacBookPro17,1 | pass | not run | not run | not run | **fail** | First run of this document. 2–4 need an egress route group that this deployment does not have. See below. |
+
+### 2026-08-31, v0.1.0-57-geb4d461
+
+Against `control.meshp.net` over the internet, relay-only paths, no route groups configured.
+
+**1 Sleep and wake — pass.** Lid shut at 13:23:44Z and opened around 13:33:30Z, so nearly ten
+minutes asleep. The agent re-established its control channel at 13:34:53Z with no help, well
+inside the one-minute reconcile interval, and traffic was flowing again by 13:35:15Z. The
+tunnel had kept carrying packets throughout, which is what WireGuard being stateless UDP buys
+and also what makes this check worth doing from both ends: the data plane working proves
+nothing about whether the device is still being configured.
+
+Worth knowing for whoever runs this next: for about ninety seconds after waking, `meshp status`
+still reported `connected since` the pre-sleep session, which by then the control plane had
+already dropped. It is not a lie so much as a thing not yet noticed, and it corrects itself
+within the interval — but somebody debugging in that window will be shown a session that no
+longer exists, and should look at the server rather than believing it.
+
+**5 `connected_since` after sleep — fail.** The bound is wrong, not the behaviour. The control
+plane went on reporting the laptop as connected for roughly **9m35s** after the lid closed,
+against a `readIdleTimeout` of **90 seconds** in `internal/session/server.go`. It did clear
+eventually, so nothing is stuck; what fails is this check's second clause, that the bound is
+what the code says it is.
+
+For those ten minutes the overview endpoint, the page, and anything built on that API would
+have shown a device in a closed bag as connected and healthy. That is the failure ADR-0022 §4
+is about — a monitoring view that lies about when it last heard anything — arriving through
+the server rather than through the page.
+
+The likely cause, which is a hypothesis and not a measurement: macOS keeps the socket alive
+through light sleep, so reads keep succeeding and the deadline never trips until the machine
+sleeps properly. If that is right, a read deadline is the wrong mechanism on a laptop and
+meshp needs liveness it drives itself. Somebody should establish which it is before choosing a
+fix — the number to beat is 90 seconds, and the observed one is six times that.
+
+**2, 3 and 4 — not run.** All three need a route group carrying `0.0.0.0/0` assigned to this
+device with `fail_closed` enforced, and the deployment this was run against has no route groups
+at all. They are not failures and they are not passes; nothing exercised them.

@@ -229,17 +229,29 @@ func (s *Store) Withdraw(ctx context.Context, networkID uuid.UUID, groupSlug str
 // DeleteRouteGroup removes a group and everything that advertised it.
 func (s *Store) DeleteRouteGroup(ctx context.Context, networkID uuid.UUID, slug string) error {
 	return s.InTx(ctx, func(q *dbgen.Queries) error {
-		rows, err := q.DeleteRouteGroup(ctx, dbgen.DeleteRouteGroupParams{
+		removed, err := q.DeleteRouteGroup(ctx, dbgen.DeleteRouteGroupParams{
 			NetworkID: networkID, Slug: slug,
 		})
 		if err != nil {
 			return fmt.Errorf("store: deleting the route group: %w", err)
 		}
-		if rows == 0 {
+		if len(removed) == 0 {
 			return ErrNoSuchRouteGroup
 		}
-		err = BumpRoutesEverywhere(ctx, q, networkID)
-		return err
+		// Named on the way out, and not left to the routes bump alone. A delta withdraws a
+		// group by naming it, and the builder finds which to name by listing the groups that
+		// still exist — so a deleted one is in neither the assignments nor the withdrawals,
+		// and every connected device goes on carrying it until it happens to reconnect
+		// (#205).
+		changes := []Change{RoutesChanged()}
+		for _, id := range removed {
+			changes = append(changes, RouteGroupRemoved(id))
+		}
+		if _, err := BumpVersion(ctx, q, networkID, changes...); err != nil {
+			return err
+		}
+		// The other networks a shared device sits in still only need to recompute.
+		return bumpRoutesForSharedNetworks(ctx, q, networkID)
 	})
 }
 
