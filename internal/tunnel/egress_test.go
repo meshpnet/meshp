@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/meshpnet/meshp/internal/egress"
 	"github.com/meshpnet/meshp/internal/peerset"
 	meshpv1 "github.com/meshpnet/meshp/proto/gen/meshp/v1"
 )
@@ -457,5 +459,67 @@ func TestAHostThatCannotListItsTunnelsStillKnowsItsOwn(t *testing.T) {
 	if !slices.Contains(got, mine) {
 		t.Errorf("with the platform unable to list tunnels, this membership's own address "+
 			"was lost too: %v — which is the failure #200 was about", got)
+	}
+}
+
+// A claim survives DNS going away, which is a state a claim itself produces.
+//
+// #204: the carve-out needs the control plane's address and refuses to be built without it —
+// a device that locked itself away from its control plane would be off the network for a
+// reason nobody watching could see. Right on its own, and with a full tunnel claimed it made
+// a cycle a device could not leave: the claim carries DNS, so disturbing the claim takes DNS
+// with it; the next pass cannot resolve, so it does not claim; the device still wants a claim,
+// so nothing is released; round again. Observed on a laptop with no network at all until
+// somebody typed `meshp down`.
+//
+// Asserted through applyEgress, because a resolver that remembers correctly and is never
+// reached is worth nothing — a mistake made twice in this area already.
+func TestAClaimSurvivesDNSGoingAway(t *testing.T) {
+	answering := true
+	upstream := func(context.Context, string) ([]netip.Addr, error) {
+		if !answering {
+			return nil, errors.New("no DNS while the tunnel is broken")
+		}
+		return []netip.Addr{netip.MustParseAddr("198.51.100.10")}, nil
+	}
+
+	r, _, router, _ := withEgress(t)
+	// A name, not an address. withEgress uses an IP literal, which needs no resolver at all —
+	// so this would pass without any of the behaviour under test.
+	r.membership.ControlURL = "https://control.example.test:8443"
+	r.resolve = egress.Remembering(upstream, filepath.Join(t.TempDir(), "resolved"))
+
+	if failed := r.applyEgress(context.Background(), "meshp0", nil, true, false, false, nil, nil); failed != nil {
+		t.Fatalf("the first claim, with DNS working, did not happen: %v", failed)
+	}
+	first := len(router.events)
+
+	// The claim is in place and now DNS is gone — a change of network, a resolver that has
+	// stopped answering. The device has to be able to claim again.
+	answering = false
+	if failed := r.applyEgress(context.Background(), "meshp0", nil, true, false, false, nil, nil); failed != nil {
+		t.Fatalf("with DNS gone the device could not claim again: %v — and it cannot release "+
+			"either, because it still wants a claim, so it stays with no network", failed)
+	}
+	if len(router.events) <= first {
+		t.Error("the second claim did not reach the router")
+	}
+}
+
+// A name never resolved is still a refusal. Inventing an address would pin a route to
+// something nobody chose, which is worse than not claiming.
+func TestAControlPlaneThatWasNeverResolvedIsStillRefused(t *testing.T) {
+	r, _, _, _ := withEgress(t)
+	r.membership.ControlURL = "https://control.example.test:8443"
+	r.resolve = egress.Remembering(
+		func(context.Context, string) ([]netip.Addr, error) {
+			return nil, errors.New("no DNS, ever")
+		},
+		filepath.Join(t.TempDir(), "resolved"),
+	)
+
+	if failed := r.applyEgress(context.Background(), "meshp0", nil, true, false, false, nil, nil); failed == nil {
+		t.Error("a control plane that has never resolved produced a claim; the carve-out " +
+			"would not know which address to keep off the tunnel")
 	}
 }

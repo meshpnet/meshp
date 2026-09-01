@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"net/netip"
+	"path/filepath"
 
 	"github.com/meshpnet/meshp/internal/egress"
 	"github.com/meshpnet/meshp/internal/logx"
@@ -25,6 +26,14 @@ import (
 // Nothing here is best effort. If the carve-out cannot be computed the group is unhonoured
 // and no lock is installed, because a device that locks itself away from its control plane
 // is off the network for a reason nobody watching can see.
+// resolvedAddressPath is where the names the carve-out depends on are remembered.
+//
+// Beside the claim record and under /var/run for the same reason: it has to survive a daemon
+// restart, because a restart with a claim still installed is exactly when DNS is unavailable
+// and the address is needed. It must not survive a reboot, because a reboot leaves no claim
+// in place, so the name resolves normally and a remembered address could only be stale.
+var resolvedAddressPath = filepath.Join("/var/run/meshp", "resolved-addresses")
+
 // tunnelAddresses is every address on this host that belongs to a tunnel, not only this
 // membership's.
 //
@@ -82,7 +91,7 @@ func (r *Reconciler) applyEgress(ctx context.Context, iface string, own []netip.
 		RelayEndpoints: relays,
 		LocalPrefixes:  egress.LocalNetworks(r.tunnelAddresses(own)),
 		ExtraPrefixes:  excluded,
-	}, nil)
+	}, r.resolve)
 	if err != nil {
 		// The branch that decides whether a mistake here costs a feature or a machine.
 		r.log.Error("not claiming a default route",
