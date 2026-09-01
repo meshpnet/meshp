@@ -92,18 +92,27 @@ func (f findings) strandedEgress() bool { return (f.locked || f.claimed) && !f.d
 // screen ADR-0011 says has to carry commands that work, because whoever is reading it has no
 // network and cannot look anything up.
 //
-// Linux gets the unit under deploy/systemd. Nothing else gets a service manager, because
-// meshp does not yet define one: there is no launchd plist and no Windows service in this
-// repository, so naming a label for either would put a command on the screen that fails.
-// Running the binary is what is true on those platforms today, and it is what somebody
-// debugging is doing anyway.
+// Linux gets the unit under deploy/systemd and macOS the daemon under deploy/launchd.
+// Windows still has no service definition — #195 covers it — so it gets the binary, which is
+// what is true there today and what somebody debugging is doing anyway. Naming a service that
+// does not exist would put a command on the screen that fails, which is the one thing this
+// screen must not do.
 //
-// When deploy/ grows a plist or a service definition, this is where the command for it goes.
+// Both names are load-bearing. `meshpd` is the systemd unit's filename and `net.meshp.meshpd`
+// is the plist's Label, and a command naming either wrongly is a command that fails for
+// somebody with no network. internal/deploycheck reads both files and holds these to them.
 func startMeshpdCommand() string {
-	if runtime.GOOS == "linux" {
+	switch runtime.GOOS {
+	case "linux":
 		return "sudo systemctl start meshpd"
+	case "darwin":
+		// kickstart rather than bootstrap: bootstrap is for a plist not yet loaded and fails
+		// with "service already loaded" once it is, which is the state anybody reading this
+		// is most likely in. kickstart starts it either way.
+		return "sudo launchctl kickstart -k system/net.meshp.meshpd"
+	default:
+		return "sudo meshpd"
 	}
-	return "sudo meshpd"
 }
 
 // startMeshpdHint is the same command in a sentence, for the branch that is prose rather

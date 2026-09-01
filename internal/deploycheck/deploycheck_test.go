@@ -64,13 +64,68 @@ func TestTheControlPlaneDoesNotWriteIntoTheAgentsStateDirectory(t *testing.T) {
 	}
 }
 
-func readUnit(t *testing.T, name string) string {
+// A command naming a launchd label is a command that fails if the label is not the one the
+// plist declares — and it fails for somebody with no network, reading the one screen ADR-0011
+// says has to carry commands that work. The two live in different files, in different
+// languages, and nothing else compares them.
+//
+// doctor.go is read as text rather than called, because it is package main and cannot be
+// imported, and because what it returns depends on the GOOS this test happens to run under.
+// The claim being checked is about the source, not about this machine.
+func TestDoctorNamesTheLaunchdServiceThatExists(t *testing.T) {
+	plist := readFile(t, "../../deploy/launchd/net.meshp.meshpd.plist")
+	doctor := readFile(t, "../../cmd/meshp/doctor.go")
+
+	label, ok := plistValue(plist, "Label")
+	if !ok {
+		t.Fatal("the plist declares no Label, so nothing can be started by name")
+	}
+	if !strings.Contains(doctor, "system/"+label) {
+		t.Errorf("the plist's Label is %q, and no command in doctor.go names system/%s — "+
+			"whatever it tells a Mac to start, it is not this", label, label)
+	}
+
+	// And the program has to be an absolute path: launchd has no PATH to search, so a bare
+	// name is a daemon that never starts and says so only in a log nobody is reading.
+	program, ok := plistValue(plist, "ProgramArguments")
+	if !ok {
+		t.Fatal("the plist names no program to run")
+	}
+	if !strings.HasPrefix(program, "/") {
+		t.Errorf("the plist runs %q, which launchd cannot find: it has no PATH", program)
+	}
+}
+
+// plistValue returns the first <string> following a <key>, which is enough for the two facts
+// checked here and stops well short of being a plist parser.
+func plistValue(plist, key string) (string, bool) {
+	_, rest, found := strings.Cut(plist, "<key>"+key+"</key>")
+	if !found {
+		return "", false
+	}
+	_, rest, found = strings.Cut(rest, "<string>")
+	if !found {
+		return "", false
+	}
+	value, _, found := strings.Cut(rest, "</string>")
+	if !found {
+		return "", false
+	}
+	return strings.TrimSpace(value), true
+}
+
+func readFile(t *testing.T, path string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(unitDir, name))
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading %s: %v", name, err)
+		t.Fatalf("reading %s: %v", path, err)
 	}
 	return string(raw)
+}
+
+func readUnit(t *testing.T, name string) string {
+	t.Helper()
+	return readFile(t, filepath.Join(unitDir, name))
 }
 
 // stateDirectories returns the absolute paths systemd will make writable.
