@@ -571,6 +571,13 @@ var knownFailures = []struct {
 	{store.ErrOrganizationExists, failure{http.StatusConflict, "organization_exists", "an organisation with that name already exists"}},
 	{store.ErrUserExists, failure{http.StatusConflict, "user_exists", "a user with that address already exists in this organisation"}},
 	{store.ErrNoSuchUser, failure{http.StatusNotFound, "no_such_user", "no such user in this organisation"}},
+	// A conflict, not a fault. Without these two, minting a token with a name already used
+	// answered 500 "the request could not be completed" and a caller had to read the
+	// server's log to find the sentence written for them — which is the failure
+	// TestARefusedRequestSaysWhy exists to prevent, arriving through a sentinel rather than
+	// through an unreviewed error.
+	{store.ErrTokenNameTaken, failure{http.StatusConflict, "token_name_taken", "you already have a live token with that name; revoke it or choose another"}},
+	{store.ErrNoSuchToken, failure{http.StatusNotFound, "no_such_token", "no such API token"}},
 	{store.ErrNoSuchRecord, failure{http.StatusNotFound, "no_such_record", "no such record in this network"}},
 	{enroll.ErrChallengeExpired, failure{http.StatusBadRequest, "challenge_expired", "the challenge has expired; request another"}},
 	{enroll.ErrProofFailed, failure{http.StatusUnauthorized, "proof_failed", "the signature over the challenge did not verify"}},
