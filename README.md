@@ -2,8 +2,9 @@
 
 <p align="center">
   Self-hostable private networking built on WireGuard.<br>
-  Connect Linux, Windows, macOS, Android and iOS into one private network — with
-  policy, private DNS, LAN gateways and automatic egress failover.
+  Connect Linux, Windows and macOS into one private network — with policy,
+  private DNS, LAN gateways and automatic egress failover.<br>
+  <sub>Android and iOS are committed to and not started (ADR-0015).</sub>
 </p>
 
 <p align="center">
@@ -15,10 +16,12 @@
 
 ## Status
 
-**Pre-alpha, and packets now cross.** On Linux, a device enrols, brings up a kernel
-WireGuard interface, attaches to a relay and carries traffic to its peers through it.
-Everything is relayed: nothing discovers direct paths yet, which is the design working
-as intended rather than a gap to apologise for (ADR-0002).
+**Pre-alpha, and packets now cross.** On Linux, macOS and Windows a device enrols,
+brings up a WireGuard interface, attaches to a relay and carries traffic to its peers
+through it. Everything is relayed: nothing discovers direct paths yet, which is the
+design working as intended rather than a gap to apologise for (ADR-0002) — though it is
+the gap that costs the most, since every packet between two machines in the same room
+still crosses a relay somebody pays for.
 
 What exists: enrolment end to end, a control channel carrying versioned desired state,
 kernel WireGuard interfaces reconciled against what the control plane asked for
@@ -37,7 +40,7 @@ ignoring it.
 The control plane serves TLS, from a certificate you supply or one it obtains from
 Let's Encrypt, and agents refuse a plaintext control URL to anything but loopback.
 
-Full-tunnel egress works on Linux, and fails closed (ADR-0011). A device sending
+Full-tunnel egress works on all three, and fails closed (ADR-0011). A device sending
 everything through the tunnel refuses traffic that would leave any other way, so a dropped
 tunnel cannot quietly put a real address back on the wire — and those rules are firewall
 state, so they survive the agent being killed. `meshp doctor` explains that to whoever
