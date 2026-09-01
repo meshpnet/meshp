@@ -470,6 +470,9 @@ func adapterRoutes(luid winipcfg.LUID) ([]netip.Prefix, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wglink: reading this host's routes: %w", err)
 	}
+	// Read once rather than per route: it is a file, and this runs on every reconcile.
+	claim := recordedClaim()
+
 	var out []netip.Prefix
 	for _, row := range rows {
 		if row.InterfaceLUID != luid {
@@ -490,6 +493,12 @@ func adapterRoutes(luid winipcfg.LUID) ([]netip.Prefix, error) {
 		}
 		prefix := row.DestinationPrefix.Prefix()
 		if !prefix.IsValid() {
+			continue
+		}
+		// The egress router adds its routes through the same API, so they carry the same
+		// protocol as the interface plan's and the filter above cannot tell them apart.
+		// See routeowner.go.
+		if egressOwned(claim, prefix.Masked()) {
 			continue
 		}
 		out = append(out, prefix.Masked())

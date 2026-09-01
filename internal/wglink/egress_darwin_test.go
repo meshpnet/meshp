@@ -609,3 +609,55 @@ func TestALabelResolvesThroughItsNameFile(t *testing.T) {
 		t.Errorf("realInterface(%q) = %q, want %q from the name file", label, got, target)
 	}
 }
+
+// The route reader consults the record, which is the half a unit test of the rule cannot see.
+//
+// #202 is only fixed if interfaceRoutes actually asks. An earlier fix in this file added a
+// predicate and never called it, the tests passed because they asked the predicate, and the
+// behaviour on the machine was unchanged — so this exercises the reader against a record on
+// disk rather than the rule in isolation.
+func TestTheRouteReaderExcludesWhatTheEgressRouterRecorded(t *testing.T) {
+	index, routes := anInterfaceWithRoutes(t)
+	victim := routes[0]
+
+	dir := t.TempDir()
+	previous := egressRecordPath
+	egressRecordPath = filepath.Join(dir, "egress-routes")
+	t.Cleanup(func() { egressRecordPath = previous })
+
+	recordClaim([]netip.Prefix{victim})
+
+	after, err := interfaceRoutes(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(after, victim) {
+		t.Errorf("%s is recorded as the egress router's and interfaceRoutes still reports it; "+
+			"the planner will withdraw it every pass", victim)
+	}
+
+	// And only that one. Excluding more would hide peer routes from the planner.
+	for _, keep := range routes[1:] {
+		if !slices.Contains(after, keep) {
+			t.Errorf("%s is the interface plan's and was excluded", keep)
+		}
+	}
+}
+
+// anInterfaceWithRoutes finds an interface this host has that carries more than one route,
+// so the test above can tell "excluded the recorded one" from "excluded everything".
+func anInterfaceWithRoutes(t *testing.T) (int, []netip.Prefix) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot read this host's interfaces:", err)
+	}
+	for _, iface := range ifaces {
+		routes, err := interfaceRoutes(iface.Index)
+		if err == nil && len(routes) > 1 {
+			return iface.Index, routes
+		}
+	}
+	t.Skip("no interface on this host carries more than one route")
+	return 0, nil
+}
