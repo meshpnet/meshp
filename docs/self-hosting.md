@@ -299,9 +299,16 @@ sudo meshp join <token> --control-url https://control.example.com
 
 The Mac daemon is loaded into the **system** domain rather than a user's, because creating a
 utun goes through `PF_SYSTEM` and needs root — and because a device on a network should not
-stop being on it when somebody logs out. Its log goes to `/var/log/meshpd.log`, since there
-is no journal to inherit. `sudo launchctl kickstart -k system/net.meshp.meshpd` restarts it,
-and `sudo launchctl bootout system/net.meshp.meshpd` stops it for good.
+stop being on it when somebody logs out. `sudo launchctl kickstart -k system/net.meshp.meshpd`
+restarts it, and `sudo launchctl bootout system/net.meshp.meshpd` stops it for good.
+
+Its log goes to `/var/log/meshpd.log`, written by the daemon rather than redirected by
+launchd, and rotated at 4MB keeping two previous files — so a device bounds what it spends on
+describing itself. That is not the obvious arrangement and the obvious one does not work:
+`newsyslog` rotates by renaming, a rename does not move an open file descriptor, and a file
+launchd is holding would go on receiving output under its new name while the path everybody
+reads stayed empty. `/var/log/meshpd.err` keeps whatever never reaches the log at all, such as
+a panic.
 
 ```powershell
 # Windows, as Administrator. wintun.dll ships beside meshpd.exe (ADR-0028).
@@ -311,7 +318,8 @@ sc.exe start meshpd
 
 The space after `binPath=` and `start=` is `sc.exe`'s own syntax and is not a typo; without it
 the command is rejected. The service logs to `meshpd.log` inside its state directory, because a
-Windows service has no console and anything written to stderr is discarded. `sc.exe stop meshpd`
+Windows service has no console and anything written to stderr is discarded; it is rotated the
+same way as on macOS. `--log-file` puts it somewhere else. `sc.exe stop meshpd`
 stops it and `sc.exe delete meshpd` removes it.
 
 The agent runs as root because it creates a WireGuard interface, writes routes and loads

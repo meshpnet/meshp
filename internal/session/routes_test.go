@@ -2,6 +2,7 @@ package session
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/meshpnet/meshp/internal/store"
@@ -450,5 +451,151 @@ func TestAnEgressAdvertiserCarriesBothDefaultRoutes(t *testing.T) {
 	}
 	if p := groups[0].GetPrefixes(); len(p) != 2 || p[0] != "0.0.0.0/0" || p[1] != "::/0" {
 		t.Errorf("prefixes = %v, want both default routes", p)
+	}
+}
+
+// A deleted route group is withdrawn by a delta, not only by the next snapshot.
+//
+// #205: withdrawals were worked out by listing the groups that still exist and seeing which
+// produced no assignment for a device. A deleted group is in no such list, so it appeared in
+// neither the assignments nor the withdrawals — and a connected device went on carrying it
+// indefinitely, because only a reconnect replaces the set wholesale. Observed on a laptop
+// still sending everything through an exit node ten minutes after the group was deleted;
+// version 36 as a delta left it claiming, version 36 as a snapshot released it.
+func TestADeletedRouteGroupIsWithdrawnByADelta(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
+
+	group := f.subnetGroup("branch-lan", "10.0.0.0/24")
+	f.advertise("branch-lan", bob, 1)
+
+	builder := NewStateBuilder(f.store)
+	before, err := builder.Snapshot(f.ctx, alice.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.GetRouteGroups()) != 1 {
+		t.Fatalf("alice was not assigned the group to begin with: %v", before.GetRouteGroups())
+	}
+
+	if err := f.store.DeleteRouteGroup(f.ctx, f.netID, "branch-lan"); err != nil {
+		t.Fatalf("DeleteRouteGroup: %v", err)
+	}
+
+	delta, err := builder.For(f.ctx, alice.membershipID, before.GetToVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.GetFromVersion() == 0 {
+		t.Fatal("deleting a group produced a snapshot; the delta path was not exercised, " +
+			"which is the only path where this was broken")
+	}
+	if !slices.Contains(delta.GetRemovedRouteGroupIds(), group.ID.String()) {
+		t.Errorf("the deleted group %s is not withdrawn: assigned=%v withdrawn=%v — a "+
+			"connected device keeps carrying it",
+			group.ID, delta.GetRouteGroups(), delta.GetRemovedRouteGroupIds())
+	}
+	if len(delta.GetRouteGroups()) != 0 {
+		t.Errorf("the deleted group is still assigned: %v", delta.GetRouteGroups())
+	}
+}
+
+// An egress group is the case that hurts, because the device claims a default route for it.
+func TestADeletedEgressGroupIsWithdrawnByADelta(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
+
+	group, err := f.store.CreateRouteGroup(f.ctx, store.CreateRouteGroupRequest{
+		NetworkID: f.netID, Slug: "internet", Kind: store.KindEgress,
+	})
+	if err != nil {
+		f.t.Fatalf("CreateRouteGroup: %v", err)
+	}
+	f.advertise("internet", bob, 1)
+
+	builder := NewStateBuilder(f.store)
+	before, err := builder.Snapshot(f.ctx, alice.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.GetRouteGroups()) != 1 {
+		t.Fatalf("alice was not assigned the egress group: %v", before.GetRouteGroups())
+	}
+
+	if err := f.store.DeleteRouteGroup(f.ctx, f.netID, "internet"); err != nil {
+		t.Fatalf("DeleteRouteGroup: %v", err)
+	}
+
+	delta, err := builder.For(f.ctx, alice.membershipID, before.GetToVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(delta.GetRemovedRouteGroupIds(), group.ID.String()) {
+		t.Errorf("a deleted egress group is not withdrawn, so the device goes on sending "+
+			"everything through an exit node the control plane has forgotten: %v",
+			delta.GetRemovedRouteGroupIds())
+	}
+}
+
+// Deleting one group must not withdraw another. The tombstone names an id for a reason.
+func TestDeletingOneGroupLeavesTheOthers(t *testing.T) {
+	f := newFixture(t)
+	alice := f.enrolDevice("alice")
+	bob := f.enrolDevice("bob")
+	// Four devices, so alice has three peers. The builder sends a snapshot when a delta
+	// would carry more entries than the peer list — "a delta with more entries than the
+	// snapshot it replaces is a worse answer" — and deleting a group writes two changes.
+	// With one peer that rule chooses a snapshot, which has no withdrawals because the set
+	// is complete, and this would pass without testing anything.
+	f.enrolDevice("carol")
+	f.enrolDevice("dave")
+
+	going := f.subnetGroup("going", "10.0.0.0/24")
+	staying := f.subnetGroup("staying", "10.1.0.0/24")
+	f.advertise("going", bob, 1)
+	f.advertise("staying", bob, 1)
+
+	builder := NewStateBuilder(f.store)
+	before, err := builder.Snapshot(f.ctx, alice.membershipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.store.DeleteRouteGroup(f.ctx, f.netID, "going"); err != nil {
+		t.Fatal(err)
+	}
+
+	delta, err := builder.For(f.ctx, alice.membershipID, before.GetToVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(delta.GetRemovedRouteGroupIds(), going.ID.String()) {
+		t.Errorf("the deleted group was not withdrawn: %v", delta.GetRemovedRouteGroupIds())
+	}
+	if slices.Contains(delta.GetRemovedRouteGroupIds(), staying.ID.String()) {
+		t.Errorf("a group that still exists was withdrawn: %v", delta.GetRemovedRouteGroupIds())
+	}
+	var assigned []string
+	for _, a := range delta.GetRouteGroups() {
+		assigned = append(assigned, a.GetRouteGroupId())
+	}
+	if !slices.Contains(assigned, staying.ID.String()) {
+		t.Errorf("the surviving group is no longer assigned: %v", assigned)
 	}
 }

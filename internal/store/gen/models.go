@@ -313,6 +313,7 @@ type StateChange struct {
 	MembershipID  *uuid.UUID
 	PeerPublicKey *string
 	CreatedAt     time.Time
+	RouteGroupID  *uuid.UUID
 }
 
 type User struct {

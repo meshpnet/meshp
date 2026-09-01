@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sort"
 
 	"github.com/google/uuid"
@@ -294,6 +295,9 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 	removes := make(map[string]struct{})
 	policyChanged := false
 	routesChanged := false
+	// Groups that no longer exist, so the builder below cannot find them by listing what
+	// does. Collected rather than counted: the delta withdraws a group by naming it.
+	deletedGroups := map[string]struct{}{}
 
 	for _, change := range changes {
 		switch change.Kind {
@@ -329,6 +333,16 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 				continue
 			}
 			removes[*change.PeerPublicKey] = struct{}{}
+
+		case "route_group_remove":
+			// Names the group, because it is gone: routeGroupsFor works out withdrawals by
+			// listing the groups that exist, and a deleted one is in no such list. Without
+			// this the device is told nothing and keeps carrying it (#205).
+			if change.RouteGroupID == nil {
+				continue
+			}
+			routesChanged = true
+			deletedGroups[change.RouteGroupID.String()] = struct{}{}
 		}
 	}
 
@@ -377,6 +391,20 @@ func (b *StateBuilder) delta(ctx context.Context, membership dbgen.GetMembership
 		delta.RouteGroups = assignments
 		delta.RemovedRouteGroupIds = withdrawn
 		delta.Advertised = advertised
+
+		// And the ones that no longer exist. Appended rather than merged into routeGroupsFor,
+		// because that function answers "what does this device get from the groups there are"
+		// and a deleted group is not one of them — asking it to also remember what used to
+		// exist would give it two jobs and one name.
+		for id := range deletedGroups {
+			if !slices.Contains(delta.RemovedRouteGroupIds, id) {
+				delta.RemovedRouteGroupIds = append(delta.RemovedRouteGroupIds, id)
+			}
+		}
+		// Ordered, so two deltas describing the same change are the same message. A map's
+		// iteration order is not, and a delta that differs only by ordering would make an
+		// agent's diff look like a change.
+		slices.Sort(delta.RemovedRouteGroupIds)
 	}
 
 	if policyChanged {

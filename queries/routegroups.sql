@@ -73,8 +73,11 @@ FROM route_group_prefixes
 WHERE route_group_id = ANY($1::uuid[])
 ORDER BY route_group_id, prefix;
 
--- name: DeleteRouteGroup :execrows
-DELETE FROM route_groups WHERE network_id = $1 AND slug = $2;
+-- name: DeleteRouteGroup :many
+-- Returns the ids it removed, because a delta withdraws a group by naming it and by the time
+-- one is built the row is gone (#205). :many rather than :one so that deleting nothing is an
+-- empty result rather than an error the caller has to tell apart from a real failure.
+DELETE FROM route_groups WHERE network_id = $1 AND slug = $2 RETURNING id;
 
 -- name: UpsertRouteAdvertiser :one
 -- A device offering to carry a group's prefixes.

@@ -479,7 +479,7 @@ func (r *Reconciler) Apply(ctx context.Context, state *peerset.Set) ([]string, e
 	// After the interface exists and before the filter, because claiming a default route
 	// installs its own lock and the two must not fight over the order they load in.
 	wantEgress, excluded := wantsEgress(state)
-	if failed := r.applyEgress(ctx, want.Name, wantEgress, failClosedFor(state.Tunnel()),
+	if failed := r.applyEgress(ctx, want.Name, want.Addresses, wantEgress, failClosedFor(state.Tunnel()),
 		state.DNS().GetPreventLeaks(), relayEndpointsOf(state.Relays()), excluded); failed != nil {
 		unapplied = append(unapplied, failed...)
 	}
