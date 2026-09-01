@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/meshpnet/meshp/internal/egress"
 	"github.com/meshpnet/meshp/internal/logx"
 	"github.com/meshpnet/meshp/internal/peerset"
 	"github.com/meshpnet/meshp/internal/routeprobe"
@@ -106,6 +107,15 @@ type Reconciler struct {
 	// lock refuses egress outside the tunnel, or is nil where this host cannot. Separate
 	// from filter because a platform can have one and not the other — see EgressLock.
 	lock EgressLock
+
+	// resolve turns the control plane's and the relays' names into addresses for the
+	// carve-out, remembering what it answered.
+	//
+	// A field rather than a call, so that what it does can be tested through applyEgress
+	// rather than asserted about in isolation. The distinction matters here: a resolver that
+	// remembers correctly and is not reached is worth nothing, and this file has already
+	// shipped a guard nothing called.
+	resolve egress.Resolver
 
 	// lastFilter is what was last successfully loaded, kept so an unchanged policy is not
 	// reloaded on every reconcile. Reloading is atomic and cheap, but it resets the drop
@@ -268,6 +278,7 @@ func New(link wglink.Link, m Membership, relay Relay, filter Filter, log *slog.L
 		link: link, membership: m, relay: relay, filter: filter,
 		log: log, kind: wglink.KindUnknown,
 		lastProbe: make(map[string]time.Time),
+		resolve:   egress.Remembering(nil, resolvedAddressPath),
 	}
 }
 
