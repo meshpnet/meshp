@@ -278,9 +278,34 @@ Keep the admin address on loopback. It is diagnostics, not an API anyone else sh
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/meshpnet/meshp/main/scripts/install.sh
 less install.sh && sudo sh install.sh
+```
+
+Then start it the way this machine starts services, and join:
+
+```bash
+# Linux
 sudo systemctl enable --now meshpd
+```
+
+```bash
+# macOS
+sudo install -m 0644 -o root -g wheel deploy/launchd/net.meshp.meshpd.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/net.meshp.meshpd.plist
+```
+
+```bash
 sudo meshp join <token> --control-url https://control.example.com
 ```
+
+The Mac daemon is loaded into the **system** domain rather than a user's, because creating a
+utun goes through `PF_SYSTEM` and needs root — and because a device on a network should not
+stop being on it when somebody logs out. Its log goes to `/var/log/meshpd.log`, since there
+is no journal to inherit. `sudo launchctl kickstart -k system/net.meshp.meshpd` restarts it,
+and `sudo launchctl bootout system/net.meshp.meshpd` stops it for good.
+
+**Windows has no service definition yet** ([#195](https://github.com/meshpnet/meshp/issues/195)),
+so the agent runs there only while a terminal holds it. `meshp doctor` says so rather than
+naming a service that does not exist.
 
 The agent runs as root because it creates a WireGuard interface, writes routes and loads
 firewall rules. `meshp` does not: it is a thin client that asks the daemon over a local unix
