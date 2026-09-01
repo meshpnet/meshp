@@ -255,6 +255,29 @@ func (q *Queries) CreateWireGuardKey(ctx context.Context, arg CreateWireGuardKey
 	return i, err
 }
 
+const deleteDevice = `-- name: DeleteDevice :execrows
+DELETE FROM devices WHERE id = $1 AND organization_id = $2
+`
+
+type DeleteDeviceParams struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+}
+
+// Erase a device. Memberships, keys, route advertisements, assignments and presence go
+// with it by cascade; `state_changes` rows naming its memberships go too (migration 0017),
+// while the peer removals bumped just before this keep the key they name.
+//
+// The audit trail does not reference devices and so survives intact: it holds labels rather
+// than foreign keys, which is what lets this be a real delete instead of a tombstone.
+func (q *Queries) DeleteDevice(ctx context.Context, arg DeleteDeviceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDevice, arg.ID, arg.OrganizationID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getDevice = `-- name: GetDevice :one
 SELECT id, organization_id, user_id, name, hostname, os, os_version, agent_version, identity_public_key, capabilities, created_at, updated_at, last_seen_at, revoked_at, revoked_reason FROM devices WHERE id = $1
 `
@@ -294,6 +317,44 @@ WHERE identity_public_key = $1
 
 func (q *Queries) GetDeviceByIdentityKey(ctx context.Context, identityPublicKey []byte) (Device, error) {
 	row := q.db.QueryRow(ctx, getDeviceByIdentityKey, identityPublicKey)
+	var i Device
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.UserID,
+		&i.Name,
+		&i.Hostname,
+		&i.Os,
+		&i.OsVersion,
+		&i.AgentVersion,
+		&i.IdentityPublicKey,
+		&i.Capabilities,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.LastSeenAt,
+		&i.RevokedAt,
+		&i.RevokedReason,
+	)
+	return i, err
+}
+
+const getDeviceInOrganization = `-- name: GetDeviceInOrganization :one
+SELECT id, organization_id, user_id, name, hostname, os, os_version, agent_version, identity_public_key, capabilities, created_at, updated_at, last_seen_at, revoked_at, revoked_reason FROM devices WHERE id = $1 AND organization_id = $2
+`
+
+type GetDeviceInOrganizationParams struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+}
+
+// One device, scoped to the organisation that is asking.
+//
+// Scoped, unlike GetDevice. That one is reached from a network the caller has already been
+// authorised for, so the id it holds came from a row it was allowed to read. Forgetting a
+// device is organisation-scoped and takes an id straight from the request, so this is the
+// check that stops an id from another tenant being erased by whoever can guess one.
+func (q *Queries) GetDeviceInOrganization(ctx context.Context, arg GetDeviceInOrganizationParams) (Device, error) {
+	row := q.db.QueryRow(ctx, getDeviceInOrganization, arg.ID, arg.OrganizationID)
 	var i Device
 	err := row.Scan(
 		&i.ID,
@@ -417,6 +478,67 @@ func (q *Queries) ListDeviceAddressPools(ctx context.Context, networkID uuid.UUI
 			&i.Family,
 			&i.Purpose,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMembershipsForForget = `-- name: ListMembershipsForForget :many
+SELECT
+    m.id         AS membership_id,
+    m.network_id,
+    k.public_key AS wireguard_public_key,
+    EXISTS (
+        SELECT 1 FROM route_advertisers a WHERE a.membership_id = m.id
+    ) AS advertises
+FROM device_network_memberships m
+LEFT JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
+WHERE m.device_id = $1
+ORDER BY m.joined_at
+`
+
+type ListMembershipsForForgetRow struct {
+	MembershipID       uuid.UUID
+	NetworkID          uuid.UUID
+	WireguardPublicKey *string
+	Advertises         bool
+}
+
+// Everything that has to be told before a device stops existing.
+//
+// Read before the delete, because the delete destroys all of it. Per membership: the
+// network to bump, the key every other agent must stop accepting, and whether this device
+// carried a prefix for anyone.
+//
+// `advertises` decides whether the routes in that network have to be recomputed. Removing
+// an advertiser changes where every *other* device sends traffic, and a delete that took a
+// gateway away without saying so would leave them routing into nothing — the failure #206
+// fixed for route groups, in a second place that could reach it.
+//
+// Revoked memberships are included. Their peer removal was already sent, and sending it
+// again is harmless — an agent dropping a key it does not have is a no-op — whereas
+// skipping one whose revocation never reached a partitioned agent would leave that agent
+// holding a peer forever.
+func (q *Queries) ListMembershipsForForget(ctx context.Context, deviceID uuid.UUID) ([]ListMembershipsForForgetRow, error) {
+	rows, err := q.db.Query(ctx, listMembershipsForForget, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMembershipsForForgetRow
+	for rows.Next() {
+		var i ListMembershipsForForgetRow
+		if err := rows.Scan(
+			&i.MembershipID,
+			&i.NetworkID,
+			&i.WireguardPublicKey,
+			&i.Advertises,
 		); err != nil {
 			return nil, err
 		}

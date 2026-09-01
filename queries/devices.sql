@@ -135,3 +135,49 @@ JOIN devices d ON d.id = m.device_id
 LEFT JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
 WHERE m.network_id = $1
 ORDER BY m.joined_at;
+
+-- name: GetDeviceInOrganization :one
+-- One device, scoped to the organisation that is asking.
+--
+-- Scoped, unlike GetDevice. That one is reached from a network the caller has already been
+-- authorised for, so the id it holds came from a row it was allowed to read. Forgetting a
+-- device is organisation-scoped and takes an id straight from the request, so this is the
+-- check that stops an id from another tenant being erased by whoever can guess one.
+SELECT * FROM devices WHERE id = $1 AND organization_id = $2;
+
+-- name: ListMembershipsForForget :many
+-- Everything that has to be told before a device stops existing.
+--
+-- Read before the delete, because the delete destroys all of it. Per membership: the
+-- network to bump, the key every other agent must stop accepting, and whether this device
+-- carried a prefix for anyone.
+--
+-- `advertises` decides whether the routes in that network have to be recomputed. Removing
+-- an advertiser changes where every *other* device sends traffic, and a delete that took a
+-- gateway away without saying so would leave them routing into nothing — the failure #206
+-- fixed for route groups, in a second place that could reach it.
+--
+-- Revoked memberships are included. Their peer removal was already sent, and sending it
+-- again is harmless — an agent dropping a key it does not have is a no-op — whereas
+-- skipping one whose revocation never reached a partitioned agent would leave that agent
+-- holding a peer forever.
+SELECT
+    m.id         AS membership_id,
+    m.network_id,
+    k.public_key AS wireguard_public_key,
+    EXISTS (
+        SELECT 1 FROM route_advertisers a WHERE a.membership_id = m.id
+    ) AS advertises
+FROM device_network_memberships m
+LEFT JOIN wireguard_keys k ON k.membership_id = m.id AND k.state = 'current'
+WHERE m.device_id = $1
+ORDER BY m.joined_at;
+
+-- name: DeleteDevice :execrows
+-- Erase a device. Memberships, keys, route advertisements, assignments and presence go
+-- with it by cascade; `state_changes` rows naming its memberships go too (migration 0017),
+-- while the peer removals bumped just before this keep the key they name.
+--
+-- The audit trail does not reference devices and so survives intact: it holds labels rather
+-- than foreign keys, which is what lets this be a real delete instead of a tombstone.
+DELETE FROM devices WHERE id = $1 AND organization_id = $2;

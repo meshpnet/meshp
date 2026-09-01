@@ -405,7 +405,7 @@ function renderGroup(group) {
   );
 }
 
-function renderDevices(devices) {
+function renderDevices(devices, organizationID) {
   const rows = devices.map((device) => {
     const faults = device.faults || [];
     const addresses = [device.address_v4, device.address_v6].filter(Boolean);
@@ -459,7 +459,7 @@ function renderDevices(devices) {
       // Empty for somebody who may not act, rather than absent: a column that appears and
       // disappears between people makes two screenshots of the same page look like two
       // different products.
-      el("td", { class: "actions" }, revokeButton(device)),
+      el("td", { class: "actions" }, revokeButton(device), forgetButton(device, organizationID)),
     );
   });
 
@@ -548,7 +548,12 @@ function revokeButton(device) {
     // Which device this is, on the button rather than only in the closure below. The node
     // outlives the render that made it, so what it was built beside is not what is on the
     // screen by the time it is clicked.
-    { class: "danger", type: "button", "data-membership": device.membership_id },
+    //
+    // Keyed, because the cell beside it can hold a Forget button instead. Two unkeyed
+    // <button class="danger"> elements are comparable(), so the reconciler matched them by
+    // position and reused this node — updating the label to "Forget" and keeping this
+    // click listener, which asked to revoke a device somebody had asked to erase.
+    { class: "danger", type: "button", "data-key": "revoke", "data-membership": device.membership_id },
     "Revoke",
   );
   button.addEventListener("click", () => {
@@ -568,6 +573,66 @@ function revokeButton(device) {
         api(
           `/api/v1/networks/${encodeURIComponent(currentNetworkID())}` +
             `/devices/${encodeURIComponent(membershipID)}`,
+          { method: "DELETE" },
+        ),
+      { refresh: true },
+    );
+  });
+  return button;
+}
+
+/**
+ * The organisation the network on screen belongs to.
+ *
+ * Read from the network list rather than from the overview, which does not carry it: the
+ * list is already fetched for the picker and every row has it, so this needs no new field
+ * on an endpoint polled every few seconds by every open page.
+ */
+function organizationOf(data, networks) {
+  const network = (networks || []).find((n) => n.id === data.network.id);
+  return network ? network.organization_id : null;
+}
+
+/**
+ * The button that erases a device rather than removing it from a network.
+ *
+ * Only once a device is revoked. The two are a sequence, not alternatives: this listing
+ * keeps revoked memberships precisely so somebody can confirm a device is out, and erasing
+ * it is the cleanup after that confirmation. Offering both at once beside a device still
+ * carrying traffic would make the more destructive one a mis-click.
+ *
+ * Organisation-scoped, unlike revoking, because a device can hold memberships in several
+ * networks and no one of them owns it (ADR-0004) — so this removes it from all of them at
+ * once, which is the thing the confirmation has to say out loud.
+ */
+function forgetButton(device, organizationID) {
+  if (!may("organization.devices.forget")) return null;
+  if (device.state === "active" || !organizationID) return null;
+
+  const button = el(
+    "button",
+    { class: "danger", type: "button", "data-key": "forget", "data-device": device.device_id },
+    "Forget",
+  );
+  button.addEventListener("click", () => {
+    const deviceID = button.dataset.device;
+    const current = lastGood ? lastGood.devices : [];
+    const named = current.find((d) => d.device_id === deviceID) || device;
+    if (
+      !window.confirm(
+        `Forget ${named.device_name}? This erases the device, its keys and its ` +
+          `memberships in every network. It cannot be undone, and the audit trail is all ` +
+          `that will be left of it.`,
+      )
+    ) {
+      return;
+    }
+    act(
+      button,
+      () =>
+        api(
+          `/api/v1/organizations/${encodeURIComponent(organizationID)}` +
+            `/devices/${encodeURIComponent(deviceID)}`,
           { method: "DELETE" },
         ),
       { refresh: true },
@@ -675,7 +740,7 @@ function renderOverview(data, networks, history) {
     el(
       "div",
       { class: "panel", "data-key": "devices" },
-      renderDevices(devices),
+      renderDevices(devices, organizationOf(data, networks)),
       data.devices_truncated
         ? el(
             "p",

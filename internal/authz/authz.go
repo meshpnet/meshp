@@ -88,6 +88,16 @@ const (
 	// from every other so that "can change the network" and "can change who may change the
 	// network" are different answers.
 	OrganizationRolesBind Permission = "organization.roles.bind"
+
+	// Erasing a device: its record, its memberships, and its keys, in every network at
+	// once. Organisation-scoped rather than network-scoped because a device is not a
+	// network's to destroy — one can hold memberships in several (ADR-0004), and a
+	// permission granted on one customer's network must not reach into another's.
+	//
+	// Separate from network.devices.revoke, which is the reversible half. Revoking cuts a
+	// device out and leaves it visible so an administrator can see that it is out; this
+	// leaves nothing behind but the audit trail.
+	OrganizationDevicesForget Permission = "organization.devices.forget"
 )
 
 // Entry is a permission and what it means.
@@ -129,6 +139,7 @@ var Catalogue = []Entry{
 	{OrganizationTokensRead, "List the API tokens in an organisation and whose they are"},
 	{OrganizationTokensWrite, "Revoke somebody else's API token"},
 	{OrganizationRolesBind, "Grant and remove roles"},
+	{OrganizationDevicesForget, "Erase a device and its keys from every network permanently"},
 }
 
 // Known reports whether a string names a permission this control plane recognises.
