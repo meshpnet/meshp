@@ -3,7 +3,9 @@ package egress
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -215,17 +217,42 @@ func TestTheCarveoutIsStable(t *testing.T) {
 // The tunnel's own interface must not be carved out: its prefix is the mesh the device is
 // joining, and excluding it would leave every peer unreachable through the interface that
 // serves them.
-func TestTheTunnelsOwnNetworkIsNotTreatedAsLocal(t *testing.T) {
-	all := LocalNetworks("")
-	withoutLo := LocalNetworks("lo")
-
-	// Loopback is skipped whatever is named, so naming it must change nothing. This is the
-	// cheap half of the property; the real one needs an interface named meshp0 to exist,
-	// which is the data-plane container's job rather than this test's.
-	if len(all) != len(withoutLo) {
-		t.Errorf("naming loopback changed the result: %v vs %v", all, withoutLo)
+//
+// This used to be a test that could not test the thing. LocalNetworks took an interface name,
+// so proving the tunnel was skipped needed an interface actually called meshp0 — which the
+// test said out loud was "the data-plane container's job rather than this test's", and which
+// meant the property went unchecked on the platform where it was broken. macOS calls the
+// interface utunN and never matched the name at all (#200).
+//
+// Identifying the tunnel by an address it carries makes it checkable anywhere: take an
+// address this machine really has, call it the tunnel's, and require that interface's
+// networks to disappear from the answer.
+func TestAnInterfaceCarryingTheTunnelsAddressIsNotTreatedAsLocal(t *testing.T) {
+	all := LocalNetworks(nil)
+	if len(all) == 0 {
+		t.Skip("this machine reports no local networks to exclude one from")
 	}
-	for _, p := range all {
+
+	// Any address that is genuinely on this host, standing in for the tunnel's.
+	pretendTunnel, networks := anInterfacesAddress(t)
+	got := LocalNetworks([]netip.Prefix{netip.PrefixFrom(pretendTunnel, pretendTunnel.BitLen())})
+
+	for _, p := range networks {
+		if slices.Contains(got, p) {
+			t.Errorf("%s belongs to the interface carrying %s, which was named as the "+
+				"tunnel's own, and it is still reported as a local network",
+				p, pretendTunnel)
+		}
+	}
+	if len(got) >= len(all) {
+		t.Errorf("naming a real address as the tunnel's excluded nothing: %d before, %d after",
+			len(all), len(got))
+	}
+}
+
+// Loopback and default routes are never local networks, whatever is passed.
+func TestLoopbackAndDefaultsAreNeverLocalNetworks(t *testing.T) {
+	for _, p := range LocalNetworks(nil) {
 		if p.Addr().IsLoopback() {
 			t.Errorf("loopback %s was reported as a local network", p)
 		}
@@ -233,6 +260,126 @@ func TestTheTunnelsOwnNetworkIsNotTreatedAsLocal(t *testing.T) {
 			t.Errorf("a default route was reported as a local network: %s", p)
 		}
 	}
+}
+
+// The tunnel is matched by address and not by containment, and the difference is not
+// academic: a device's addresses come from the network's own range (ADR-0005), so a
+// deployment whose LAN overlapped that range would have its real network mistaken for the
+// tunnel and silently dropped from the carve-out — which is a hole in a fail-closed lock.
+func TestTheTunnelIsMatchedByAddressAndNotByContainment(t *testing.T) {
+	own := []netip.Prefix{netip.MustParsePrefix("100.80.0.3/32")}
+
+	if !holds(own, netip.MustParseAddr("100.80.0.3")) {
+		t.Error("the tunnel's own address was not recognised")
+	}
+	if holds(own, netip.MustParseAddr("100.80.0.9")) {
+		t.Error("another address in the same range was taken for the tunnel's")
+	}
+
+	wide := []netip.Prefix{netip.MustParsePrefix("100.80.0.0/24")}
+	if holds(wide, netip.MustParseAddr("100.80.0.9")) {
+		t.Error("an address merely inside the tunnel's prefix was taken for the tunnel's; " +
+			"a LAN overlapping the mesh range would be dropped from the carve-out")
+	}
+}
+
+// An interface carrying the tunnel contributes nothing, not just the address that matched.
+//
+// Deterministic, because the property only shows on a tunnel with more than one address —
+// which every device has, a v4 and a v6, but which the host running the tests may not arrange
+// for any single interface. A mutation that excluded only the matching prefix passed the
+// machine-dependent test above.
+func TestATunnelWithSeveralAddressesContributesNoneOfThem(t *testing.T) {
+	// Only the addresses the control plane assigned are the tunnel's, as far as this knows.
+	tunnel := []netip.Prefix{netip.MustParsePrefix("100.80.0.3/32")}
+
+	// What the interface actually carries is more than that: the other assigned address, and
+	// the link-local one the kernel adds to every interface by itself. Recognising the
+	// interface by one address has to disqualify all of them — the fixture matters, because
+	// a list where every entry matched could not tell "skip the interface" from "skip each
+	// matching address".
+	carried := []netip.Prefix{
+		netip.MustParsePrefix("100.80.0.3/32"),
+		netip.MustParsePrefix("fd7c:6d65:7368:80::3/128"),
+		netip.MustParsePrefix("fe80::1c9d:8f2:1b3c:4d5e/64"),
+	}
+
+	if got := contributes(carried, tunnel); len(got) != 0 {
+		t.Errorf("the tunnel's own interface contributed %v; carving any of it out sends "+
+			"part of the mesh out of the wrong door", got)
+	}
+}
+
+// And an interface that is not the tunnel contributes everything it carries.
+func TestAnOrdinaryInterfaceContributesEveryNetworkItCarries(t *testing.T) {
+	tunnel := []netip.Prefix{netip.MustParsePrefix("100.80.0.3/32")}
+	carried := []netip.Prefix{
+		netip.MustParsePrefix("192.168.0.102/24"),
+		netip.MustParsePrefix("2001:db8::5/64"),
+	}
+
+	got := contributes(carried, tunnel)
+	want := []netip.Prefix{
+		netip.MustParsePrefix("192.168.0.0/24"),
+		netip.MustParsePrefix("2001:db8::/64"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("contributes = %v, want %v", got, want)
+	}
+}
+
+// anInterfacesAddress returns one address this host really has, and every network the
+// interface carrying it contributes.
+func anInterfacesAddress(t *testing.T) (netip.Addr, []netip.Prefix) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot read this host's interfaces:", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		var (
+			first     netip.Addr
+			prefixes  []netip.Prefix
+			haveFirst bool
+		)
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			addr, ok := netip.AddrFromSlice(ipnet.IP)
+			if !ok {
+				continue
+			}
+			addr = addr.Unmap()
+			// Not a link-local one. fe80::/64 is on nearly every interface, so excluding
+			// the one carrying it leaves the same prefix arriving from another and the
+			// test measures nothing. A tunnel's address is never link-local anyway — it
+			// comes out of the network's own range (ADR-0005).
+			if !addr.IsGlobalUnicast() || addr.IsLinkLocalUnicast() {
+				continue
+			}
+			if !haveFirst {
+				first, haveFirst = addr, true
+			}
+			ones, _ := ipnet.Mask.Size()
+			if p := netip.PrefixFrom(addr, ones); p.IsValid() {
+				prefixes = append(prefixes, p.Masked())
+			}
+		}
+		if haveFirst && len(prefixes) > 0 {
+			return first, prefixes
+		}
+	}
+	t.Skip("no interface on this host carries an address this can use")
+	return netip.Addr{}, nil
 }
 
 func TestAMissingControlURLIsRefused(t *testing.T) {

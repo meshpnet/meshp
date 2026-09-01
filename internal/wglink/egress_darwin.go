@@ -102,8 +102,54 @@ func (r *Router) Claim(iface string, endpoints []netip.AddrPort, excluded []neti
 		return fmt.Errorf("wglink: finding the current default gateway: %w", err)
 	}
 
-	// Everything that must stay off the tunnel, pinned to the gateway the machine is using
-	// now. Endpoints become host routes; excluded prefixes are already prefixes.
+	// The kernel's name for this tunnel, which is not the one meshp calls it. Resolved once
+	// here and used for everything below that names an interface — halvesFor reads the
+	// device's addresses and the route commands attach to a link, and both are talking to
+	// the kernel rather than to meshp.
+	device, err := realInterface(iface)
+	if err != nil {
+		return err
+	}
+
+	direct := directRoutes(endpoints, excluded)
+	for _, prefix := range direct {
+		if err := addRoute(prefix, "-gateway", gateway.String()); err != nil {
+			// Undo what has gone in, so a half-made claim does not leave the machine
+			// routing some of its traffic somewhere nobody asked for.
+			_ = r.releaseLocked()
+			return fmt.Errorf("wglink: keeping %s off the tunnel: %w", prefix, err)
+		}
+		r.viaLocal = append(r.viaLocal, prefix)
+	}
+
+	halves, err := halvesFor(device)
+	if err != nil {
+		_ = r.releaseLocked()
+		return err
+	}
+	for _, prefix := range halves {
+		if err := addRoute(prefix, "-interface", device); err != nil {
+			_ = r.releaseLocked()
+			return fmt.Errorf("wglink: claiming %s: %w", prefix, err)
+		}
+		r.claimed = append(r.claimed, prefix)
+	}
+
+	// Written last, so the record only ever describes a claim that is fully in place. A
+	// half-made claim has already been undone by the error paths above.
+	recordClaim(append(append([]netip.Prefix{}, r.viaLocal...), r.claimed...))
+	return nil
+}
+
+// directRoutes is everything that must stay off the tunnel, as prefixes this platform can
+// actually be told to route.
+//
+// Separate from Claim so the list can be checked without a utun, a gateway and root. That is
+// not tidiness: the first attempt at the fix below added the predicate and never called it,
+// and the test passed because it asked the predicate rather than asking what Claim would
+// install. A mechanism nothing reaches is what ADR-0018 is about, and a test shaped like that
+// cannot tell.
+func directRoutes(endpoints []netip.AddrPort, excluded []netip.Prefix) []netip.Prefix {
 	var direct []netip.Prefix
 	for _, endpoint := range endpoints {
 		addr := endpoint.Addr().Unmap()
@@ -116,38 +162,64 @@ func (r *Router) Claim(iface string, endpoints []netip.AddrPort, excluded []neti
 		direct = append(direct, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 	for _, prefix := range excluded {
-		if prefix.Addr().Is4() {
+		if prefix.Addr().Is4() && routableViaGateway(prefix) {
 			direct = append(direct, prefix)
 		}
 	}
+	return direct
+}
 
-	for _, prefix := range direct {
-		if err := addRoute(prefix, "-gateway", gateway.String()); err != nil {
-			// Undo what has gone in, so a half-made claim does not leave the machine
-			// routing some of its traffic somewhere nobody asked for.
-			_ = r.releaseLocked()
-			return fmt.Errorf("wglink: keeping %s off the tunnel: %w", prefix, err)
-		}
-		r.viaLocal = append(r.viaLocal, prefix)
+// routableViaGateway reports whether macOS will accept a route for a prefix at all.
+//
+// The limited broadcast is the one that does not. route(8) rejects it outright —
+// `route: bad address: 255.255.255.255/32`, exit status 68 — and the carve-out lists it for
+// good reason: DHCP is broadcast, and a device that pushed it into a tunnel would be one that
+// could not renew a lease.
+//
+// Skipping it costs nothing, which is the part worth being sure of rather than assuming.
+// 255.255.255.255 is link-scoped by definition: the kernel never consults a gateway for it,
+// so a host route pointing at one would not change where it went. And the carve-out has two
+// consumers, not one — the same prefixes go to the pf lock, which is what actually decides
+// whether a packet is permitted to leave. The route is the half with nothing to say about
+// this address; the half that does is untouched.
+//
+// Found by running it. Claim aborts on the first prefix it cannot install, so this was the
+// second bug standing behind #200 and invisible until the first was fixed.
+func routableViaGateway(prefix netip.Prefix) bool {
+	return prefix != limitedBroadcast
+}
+
+// limitedBroadcast is 255.255.255.255/32, named because a bare literal in the comparison
+// above would read as an arbitrary exclusion rather than as the one address this is about.
+var limitedBroadcast = netip.MustParsePrefix("255.255.255.255/32")
+
+// realInterface is the kernel's name for a tunnel that meshp calls something else.
+//
+// The third face of the same bug (#200). meshp names its interfaces meshp0, meshp1 and so on,
+// and on Linux those are the interfaces. On macOS they are labels: the kernel makes a utunN
+// and wglink records the mapping in a name file, which is the thing that survives a restart.
+// Everything in this file that names an interface is talking to the kernel — net.Interface,
+// route(8) — so all of it needs the real one.
+//
+// wglink's own resolve does this already, and is a method on the link rather than on the
+// egress router, so the router never had it. That is why the same mistake arrived three times
+// in one claim path: nothing made the translation hard to skip.
+//
+// Tries the name as given first, so a platform where the name is already real costs nothing
+// and a test can pass a genuine interface.
+func realInterface(name string) (string, error) {
+	if _, err := net.InterfaceByName(name); err == nil {
+		return name, nil
 	}
-
-	halves, err := halvesFor(iface)
+	raw, err := os.ReadFile(filepath.Join(wireguardRunDir, name+".name"))
 	if err != nil {
-		_ = r.releaseLocked()
-		return err
+		return "", fmt.Errorf("wglink: finding the interface behind %s: %w", name, err)
 	}
-	for _, prefix := range halves {
-		if err := addRoute(prefix, "-interface", iface); err != nil {
-			_ = r.releaseLocked()
-			return fmt.Errorf("wglink: claiming %s: %w", prefix, err)
-		}
-		r.claimed = append(r.claimed, prefix)
+	device := string(trimNewline(raw))
+	if device == "" {
+		return "", fmt.Errorf("wglink: the name file for %s is empty, so its interface is unknown", name)
 	}
-
-	// Written last, so the record only ever describes a claim that is fully in place. A
-	// half-made claim has already been undone by the error paths above.
-	recordClaim(append(append([]netip.Prefix{}, r.viaLocal...), r.claimed...))
-	return nil
+	return device, nil
 }
 
 // halvesFor is the halves to claim, for the address families this tunnel actually carries.
