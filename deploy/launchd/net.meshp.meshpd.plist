@@ -25,12 +25,21 @@
       platform, and naming them here would be a second place to be wrong. The systemd unit
       passes them because Linux's defaults and its StateDirectory have to agree, which is a
       constraint launchd does not impose.
+
+      --log-file is different, and it is here rather than left to StandardOutPath because a
+      file launchd is holding cannot be rotated from outside. newsyslog rotates by renaming,
+      and a rename does not move an open descriptor: measured on macOS 26, after renaming the
+      file a running job's next lines were in the renamed one and the original was never
+      recreated. So the process owns its log and rotates it (internal/logfile), and the
+      redirection below is left for what never reaches the logger at all.
     -->
     <key>ProgramArguments</key>
     <array>
       <string>/usr/local/bin/meshpd</string>
       <string>--log-level</string>
       <string>info</string>
+      <string>--log-file</string>
+      <string>/var/log/meshpd.log</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -60,14 +69,15 @@
     <integer>10</integer>
 
     <!--
-      Somewhere for the log to go. There is no journal here, so without this the output of a
-      service nobody is watching is discarded — and an agent whose log goes nowhere can only
-      be debugged by somebody already watching it, which is the gap this file exists to
-      close (#195).
+      Somewhere for what the logger never sees. A panic, or a failure before the log file is
+      open, is written to stderr by the runtime and would otherwise be discarded — and the
+      crash nobody can explain is exactly the one worth keeping.
+
+      Deliberately not /var/log/meshpd.log: that file is rotated by the process, and launchd
+      holding a descriptor on it would keep appending to whichever copy it opened first. This
+      one stays small because almost nothing is ever written to it.
     -->
-    <key>StandardOutPath</key>
-    <string>/var/log/meshpd.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/meshpd.log</string>
+    <string>/var/log/meshpd.err</string>
   </dict>
 </plist>
