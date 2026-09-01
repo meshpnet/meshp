@@ -44,7 +44,7 @@ Usage:
 
 Session:
   login                    Authenticate against a control plane
-  logout                   Discard local credentials
+  logout                   Forget the credential here, and offer to revoke it
   join <token>             Enrol this device into a network
   up                       Bring the tunnel up
   down                     Take the tunnel down
@@ -104,6 +104,12 @@ func main() {
 		return
 	case "doctor":
 		runOrDie(cmdDoctor, args[1:])
+		return
+	case "login":
+		runOrDie(cmdLogin, args[1:])
+		return
+	case "logout":
+		runOrDie(cmdLogout, args[1:])
 		return
 	case "up":
 		runOrDie(cmdUp, args[1:])

@@ -39,6 +39,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0028](0028-the-windows-data-plane-is-wintun.md) | The Windows data plane is WinTun, shipped beside the binary |
 | [0029](0029-windows-split-dns-is-nrpt-on-port-53.md) | Windows split DNS is NRPT, and the resolver moves to port 53 there |
 | [0030](0030-fail-closed-on-windows.md) | Fail-closed egress on Windows is meshp's own WFP layer |
+| [0031](0031-the-cli-signs-in-with-a-token-it-mints.md) | `meshp login` mints an API token and keeps it for one person |
 
 ## Format
 

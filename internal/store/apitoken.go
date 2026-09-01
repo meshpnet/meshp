@@ -46,7 +46,9 @@ var (
 	ErrNoSuchToken = errors.New("store: no such API token")
 
 	// ErrTokenNameTaken means this person already has a token by that name.
-	ErrTokenNameTaken = errors.New("store: you already have a token with that name")
+	// Live: a revoked token does not hold its name (migration 0016), because a name kept by
+	// something the owner cannot see or revoke again is a refusal they cannot act on.
+	ErrTokenNameTaken = errors.New("store: you already have a live token with that name")
 )
 
 // APIToken is a credential a machine presents.
