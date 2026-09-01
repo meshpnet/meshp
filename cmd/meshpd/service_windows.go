@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 
 	"github.com/meshpnet/meshp/internal/agentapi"
+	"github.com/meshpnet/meshp/internal/logfile"
 )
 
 // underServiceControl reports whether this process was started by the service control
@@ -31,24 +32,26 @@ var underServiceControl = sync.OnceValue(func() bool {
 // logWriter is where this process's log goes.
 //
 // A service has no console, so stderr is discarded and an agent whose log goes nowhere can
-// only be debugged by somebody already watching it — the gap #195 is about. macOS solves the
-// same problem in the plist with StandardOutPath; Windows has no equivalent, so the daemon
-// opens the file itself.
+// only be debugged by somebody already watching it — the gap #195 is about. Unlike launchd
+// and systemd there is nothing outside the process to capture it, so the daemon opens the
+// file itself and rotates it (internal/logfile).
 //
-// Beside the state directory rather than in a log directory of its own, because that is
-// already this device's private place and already has the mode this deserves: the log names
-// networks, peers and addresses.
-func logWriter(stateDir string) (io.Writer, func(), error) {
-	if !underServiceControl() {
-		return os.Stderr, func() {}, nil
+// --log-file wins where it is given. Where it is not, a service still gets a file rather than
+// nothing, beside the state directory: that is already this device's private place with the
+// mode this deserves, since the log names networks, peers and addresses.
+func logWriter(path, stateDir string) (io.Writer, func(), error) {
+	if path == "" {
+		if !underServiceControl() {
+			return os.Stderr, func() {}, nil
+		}
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			return nil, nil, fmt.Errorf("meshpd: preparing %s for the log: %w", stateDir, err)
+		}
+		path = filepath.Join(stateDir, "meshpd.log")
 	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("meshpd: preparing %s for the log: %w", stateDir, err)
-	}
-	path := filepath.Join(stateDir, "meshpd.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := logfile.Open(path, logMaxBytes, logKeepFiles)
 	if err != nil {
-		return nil, nil, fmt.Errorf("meshpd: opening %s: %w", path, err)
+		return nil, nil, err
 	}
 	return f, func() { _ = f.Close() }, nil
 }
