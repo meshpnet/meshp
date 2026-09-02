@@ -8,16 +8,13 @@
 // local socket. Nothing here generates or stores key material: that belongs to the
 // privileged process, not to whoever happens to run the CLI.
 //
-// Command grammar is noun then verb, without exception:
-//
-//	meshp device list
-//	meshp device revoke <id>
-//	meshp exit use germany
-//
-// Admin and end-user commands share one flat namespace. What a caller may do is
-// decided by the permissions on their token, not by which subcommand tree they
-// found: `meshp device list` shows your own devices as a user and the whole network
-// as an admin.
+// Today it does seven things, all of them about this device: signing in, enrolling,
+// bringing the tunnel up and down, and reporting. Everything an administrator does to a
+// network is on the HTTP API and reachable from the web interface, and not from here yet
+// — ADR-0032 makes closing that a commitment rather than an intention, and says the
+// grammar it will follow when it does: noun then verb, `meshp device list`, in one flat
+// namespace where what a caller may do is decided by the permissions on their token
+// rather than by which subcommand tree they found.
 package main
 
 import (
@@ -36,56 +33,65 @@ import (
 	"github.com/meshpnet/meshp/internal/version"
 )
 
-const usage = `meshp — private mesh networking
-
-Usage:
-  meshp <noun> <verb> [flags]
-  meshp <verb>
-
-Session:
-  login                    Authenticate against a control plane
-  logout                   Forget the credential here, and offer to revoke it
-  join <token>             Enrol this device into a network
-  up                       Bring the tunnel up
-  down                     Take the tunnel down
-  status                   Show connection, peers and active routes
-  doctor                   Collect a diagnostic bundle for a bug report
-
-Nouns:
-  device                   list, show, rename, revoke, approve
-  network                  list, create, show, use
-  user                     list, invite, suspend
-  group                    list, create, add, remove
-  acl                      show, edit, test, apply
-  dns                      list, add, remove
-  route-group              list, create, show, drain, undrain
-  exit                     list, use, clear, status
-  relay                    list, ping
-  token                    create, list, revoke
-
-Run 'meshp <noun> --help' for the verbs a noun supports.
-
-Flags:
-  --version                Print build information
-  --help                   Show this help
-`
-
-// nouns is the authoritative list. Keeping it here means `meshp --help`, completions
-// and the docs generator cannot drift apart.
-var nouns = []string{
-	"device", "network", "user", "group", "acl",
-	"dns", "route-group", "exit", "relay", "token",
+// command is one thing this binary does.
+type command struct {
+	name string
+	// args summarises the positional arguments, shown after the name in the help.
+	args string
+	help string
+	run  func(context.Context, []string) error
 }
 
-// bareVerbs stand alone, without a noun.
-var bareVerbs = []string{
-	"login", "logout", "join", "up", "down", "status", "doctor",
+// commands is every command meshp has. It is the only list of them: main dispatches from
+// it and the help is generated from it, so the two cannot disagree.
+//
+// That is the point. This help used to advertise ten nouns and about thirty-seven verbs —
+// `device list`, `acl edit`, `token revoke` — none of which existed, each answering "not
+// implemented yet" when anybody took it up. A help text is a promise, and one that lists
+// what somebody intends to build makes the gap invisible by describing it as closed
+// (ADR-0032 §4). What is coming is in the decision records and in issues, which is where a
+// roadmap belongs.
+var commands = []command{
+	{name: "login", help: "Authenticate against a control plane", run: cmdLogin},
+	{name: "logout", help: "Forget the credential here, and offer to revoke it", run: cmdLogout},
+	{name: "join", args: "<token>", help: "Enrol this device into a network", run: cmdJoin},
+	{name: "up", help: "Bring the tunnel up", run: cmdUp},
+	{name: "down", help: "Take the tunnel down", run: cmdDown},
+	{name: "status", help: "Show connection, peers and active routes", run: cmdStatus},
+	{name: "doctor", help: "Collect a diagnostic bundle for a bug report", run: cmdDoctor},
+}
+
+// lookup finds a command by name.
+func lookup(name string) (command, bool) {
+	for _, c := range commands {
+		if c.name == name {
+			return c, true
+		}
+	}
+	return command{}, false
+}
+
+// usageText renders the help from the commands that exist.
+func usageText() string {
+	var b strings.Builder
+	b.WriteString("meshp — private mesh networking\n\nUsage:\n  meshp <command> [flags]\n\nCommands:\n")
+	for _, c := range commands {
+		invocation := c.name
+		if c.args != "" {
+			invocation += " " + c.args
+		}
+		fmt.Fprintf(&b, "  %-24s %s\n", invocation, c.help)
+	}
+	b.WriteString("\nFlags:\n")
+	fmt.Fprintf(&b, "  %-24s %s\n", "--version", "Print build information")
+	fmt.Fprintf(&b, "  %-24s %s\n", "--help", "Show this help")
+	return b.String()
 }
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
-		fmt.Print(usage)
+		fmt.Print(usageText())
 		os.Exit(2)
 	}
 
@@ -94,42 +100,15 @@ func main() {
 		fmt.Println(version.String("meshp"))
 		return
 	case "--help", "-h", "help":
-		fmt.Print(usage)
-		return
-	case "join":
-		runOrDie(cmdJoin, args[1:])
-		return
-	case "status":
-		runOrDie(cmdStatus, args[1:])
-		return
-	case "doctor":
-		runOrDie(cmdDoctor, args[1:])
-		return
-	case "login":
-		runOrDie(cmdLogin, args[1:])
-		return
-	case "logout":
-		runOrDie(cmdLogout, args[1:])
-		return
-	case "up":
-		runOrDie(cmdUp, args[1:])
-		return
-	case "down":
-		runOrDie(cmdDown, args[1:])
+		fmt.Print(usageText())
 		return
 	}
 
-	if contains(bareVerbs, args[0]) {
-		fail("%q is not implemented yet — see docs/adr for the design it will follow", args[0])
+	cmd, ok := lookup(args[0])
+	if !ok {
+		fail("unknown command %q\n\n%s", args[0], usageText())
 	}
-	if contains(nouns, args[0]) {
-		if len(args) < 2 {
-			fail("%q needs a verb, e.g. 'meshp %s list'", args[0], args[0])
-		}
-		fail("%q is not implemented yet", strings.Join(args[:2], " "))
-	}
-
-	fail("unknown command %q\n\n%s", args[0], usage)
+	runOrDie(cmd.run, args[1:])
 }
 
 // parseFlags parses flags that may appear before, after or among the positional
@@ -387,15 +366,6 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-func contains(hay []string, needle string) bool {
-	for _, s := range hay {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func envOr(key, fallback string) string {
