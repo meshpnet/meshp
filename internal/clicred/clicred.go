@@ -38,6 +38,13 @@ type Credential struct {
 	TokenID string `json:"token_id,omitempty"`
 	// Email is who this is, for the CLI to say so without asking the control plane.
 	Email string `json:"email,omitempty"`
+	// Network is what `meshp network use` chose, so a command about a network does not
+	// need --network every time.
+	//
+	// Stored as whatever was typed — a slug, an org/slug, or an id — rather than resolved
+	// to an id. It is what a person will recognise if they read this file, and a slug that
+	// stops resolving is a clearer failure than a UUID that names nothing.
+	Network string `json:"network,omitempty"`
 }
 
 // Path is where the credential lives.

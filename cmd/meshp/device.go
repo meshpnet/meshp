@@ -36,6 +36,10 @@ type network struct {
 	ActiveDeviceCount int    `json:"active_device_count"`
 }
 
+// qualified is how a network is named to a person: organisation and slug, because a slug
+// alone is only unique within one and an MSP's whole point is holding several.
+func (n network) qualified() string { return n.OrganizationSlug + "/" + n.Slug }
+
 // membership is one row of GET /api/v1/networks/{id}/devices.
 type membership struct {
 	MembershipID string     `json:"membership_id"`
@@ -63,10 +67,15 @@ func signedIn() (*cliapi.Client, clicred.Credential, error) {
 
 // chooseNetwork resolves which network a command is about.
 //
-// Named where a person named one, and otherwise inferred only when there is nothing to
-// infer between. Guessing among several would put the blast radius of `device revoke` on
-// whichever network happened to sort first.
-func chooseNetwork(ctx context.Context, client *cliapi.Client, want string) (network, error) {
+// Three sources, in this order: what the command said, what `meshp network use` chose, and
+// — only when there is exactly one — inference. Guessing among several would put the blast
+// radius of `device revoke` on whichever network happened to sort first.
+//
+// A remembered choice that no longer resolves is an error rather than a fallback to
+// inference. It names a network somebody deliberately selected, and quietly acting on a
+// different one because that selection went stale is the failure this ordering exists to
+// prevent.
+func chooseNetwork(ctx context.Context, client *cliapi.Client, want, remembered string) (network, error) {
 	var body struct {
 		Networks []network `json:"networks"`
 	}
@@ -78,6 +87,9 @@ func chooseNetwork(ctx context.Context, client *cliapi.Client, want string) (net
 	}
 
 	if want == "" {
+		want = remembered
+	}
+	if want == "" {
 		if len(body.Networks) == 1 {
 			return body.Networks[0], nil
 		}
@@ -87,14 +99,19 @@ func chooseNetwork(ctx context.Context, client *cliapi.Client, want string) (net
 		}
 		sort.Strings(names)
 		return network{}, fmt.Errorf(
-			"this account can see %d networks, so --network is needed: %s",
+			"this account can see %d networks, so --network or 'meshp network use' is needed: %s",
 			len(body.Networks), strings.Join(names, ", "))
 	}
 
 	for _, n := range body.Networks {
-		if n.ID == want || n.Slug == want || n.OrganizationSlug+"/"+n.Slug == want {
+		if n.ID == want || n.Slug == want || n.qualified() == want {
 			return n, nil
 		}
+	}
+	if want == remembered {
+		return network{}, fmt.Errorf(
+			"'meshp network use' chose %q and there is no such network now; "+
+				"pick another with 'meshp network use', or 'meshp network use --clear'", want)
 	}
 	return network{}, fmt.Errorf("no network called %q", want)
 }
@@ -158,11 +175,11 @@ func cmdDeviceList(ctx context.Context, args []string) error {
 		return err
 	}
 
-	client, _, err := signedIn()
+	client, cred, err := signedIn()
 	if err != nil {
 		return err
 	}
-	net, err := chooseNetwork(ctx, client, *wantNetwork)
+	net, err := chooseNetwork(ctx, client, *wantNetwork, cred.Network)
 	if err != nil {
 		return err
 	}
@@ -207,11 +224,11 @@ func cmdDeviceRevoke(ctx context.Context, args []string) error {
 		return errors.New("usage: meshp device revoke <name|id> [--network n] [--reason why]")
 	}
 
-	client, _, err := signedIn()
+	client, cred, err := signedIn()
 	if err != nil {
 		return err
 	}
-	net, err := chooseNetwork(ctx, client, *wantNetwork)
+	net, err := chooseNetwork(ctx, client, *wantNetwork, cred.Network)
 	if err != nil {
 		return err
 	}
@@ -258,11 +275,11 @@ func cmdDeviceForget(ctx context.Context, args []string) error {
 		return errors.New("usage: meshp device forget <name|id> [--network n]")
 	}
 
-	client, _, err := signedIn()
+	client, cred, err := signedIn()
 	if err != nil {
 		return err
 	}
-	net, err := chooseNetwork(ctx, client, *wantNetwork)
+	net, err := chooseNetwork(ctx, client, *wantNetwork, cred.Network)
 	if err != nil {
 		return err
 	}

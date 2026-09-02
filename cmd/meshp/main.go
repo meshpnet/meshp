@@ -64,6 +64,11 @@ var commands = []command{
 		help: "List the devices in a network, take one out, or erase it",
 		run:  cmdDevice,
 	},
+	{
+		name: "network", args: "<list|show|use|create>",
+		help: "See the networks this account reaches, and choose which one commands act on",
+		run:  cmdNetwork,
+	},
 }
 
 // lookup finds a command by name.
