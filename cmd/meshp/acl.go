@@ -251,6 +251,11 @@ func publishPolicy(ctx context.Context, client *cliapi.Client, net network, prop
 	// Parsed here as well as by the control plane, which will reject it anyway. Locally is
 	// where the author is: a malformed document should cost a message, not a round trip and
 	// a 400 whose body somebody has to go and read.
+	if len(proposed) > maxPolicyBytes {
+		return fmt.Errorf(
+			"that policy is %d bytes and this control plane accepts %d; nothing was sent",
+			len(proposed), maxPolicyBytes)
+	}
 	doc, err := acl.Parse(proposed)
 	if err != nil {
 		return fmt.Errorf("that document is not a policy: %w", err)
@@ -343,39 +348,88 @@ func editInEditor(ctx context.Context, current []byte, label string) ([]byte, er
 	return os.ReadFile(path)
 }
 
+// maxPolicyBytes is what the control plane accepts (internal/api/policy.go), refused here
+// as well. Locally is where the author is: a document too large to publish should cost a
+// message rather than a round trip and a 413.
+const maxPolicyBytes = 1 << 20
+
+// maxDiffLines bounds the part of a document compared line by line.
+//
+// The subsequence below is O(n*m) in time and memory, and its input is a file somebody
+// named on the command line. Trimming the common prefix and suffix first means a policy
+// edit — a rule changed, a rule added — compares only the handful of lines around the
+// change however long the document is, so this cap is reached only by two documents that
+// genuinely differ almost everywhere. Then a summary is more use than ten thousand marked
+// lines nobody will read.
+const maxDiffLines = 2000
+
 // diff renders a line diff, marking what goes and what arrives.
 //
 // Its own rather than shelling out to diff(1): this runs on Windows too, and a policy is
 // small enough that the simplest thing that shows the change is enough.
 func diff(before, after string) string {
-	// Split after trimming the trailing newline. A document ends with one, and splitting on
-	// it otherwise yields a final empty element that renders as a context line made of two
-	// spaces — a line the document does not have.
 	old, next := lines(before), lines(after)
-	common := longestCommon(old, next)
+
+	// The shared ends, which for an edited policy is nearly all of it. Done first so the
+	// expensive part below sees only what actually differs.
+	var head, tail []string
+	for len(old) > 0 && len(next) > 0 && old[0] == next[0] {
+		head = append(head, old[0])
+		old, next = old[1:], next[1:]
+	}
+	for len(old) > 0 && len(next) > 0 && old[len(old)-1] == next[len(next)-1] {
+		tail = append([]string{old[len(old)-1]}, tail...)
+		old, next = old[:len(old)-1], next[:len(next)-1]
+	}
 
 	var b strings.Builder
+	for _, line := range head {
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+
+	if len(old) > maxDiffLines || len(next) > maxDiffLines {
+		// Bounded rather than attempted. Two documents differing over this many lines are
+		// not being reviewed line by line by anybody.
+		fmt.Fprintf(&b, "… %d lines replaced by %d, which is too much to show as a diff\n",
+			len(old), len(next))
+	} else {
+		for _, line := range middle(old, next) {
+			b.WriteString(line)
+		}
+	}
+
+	for _, line := range tail {
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+	return b.String()
+}
+
+// middle renders the part that differs, matching what it can by subsequence.
+func middle(old, next []string) []string {
+	common := longestCommon(old, next)
+
+	var out []string
 	i, j := 0, 0
 	for _, line := range common {
 		for i < len(old) && old[i] != line {
-			fmt.Fprintf(&b, "- %s\n", old[i])
+			out = append(out, fmt.Sprintf("- %s\n", old[i]))
 			i++
 		}
 		for j < len(next) && next[j] != line {
-			fmt.Fprintf(&b, "+ %s\n", next[j])
+			out = append(out, fmt.Sprintf("+ %s\n", next[j]))
 			j++
 		}
-		fmt.Fprintf(&b, "  %s\n", line)
+		out = append(out, fmt.Sprintf("  %s\n", line))
 		i++
 		j++
 	}
 	for ; i < len(old); i++ {
-		fmt.Fprintf(&b, "- %s\n", old[i])
+		out = append(out, fmt.Sprintf("- %s\n", old[i]))
 	}
 	for ; j < len(next); j++ {
-		fmt.Fprintf(&b, "+ %s\n", next[j])
+		out = append(out, fmt.Sprintf("+ %s\n", next[j]))
 	}
-	return b.String()
+	return out
 }
 
 // lines splits a document, without inventing a final empty one.
@@ -387,10 +441,13 @@ func lines(s string) []string {
 }
 
 // longestCommon is the longest common subsequence of two line lists.
+//
+// Callers bound the input; see maxDiffLines. int32 rather than int because the table is the
+// product of two lengths and the counts it holds cannot exceed either of them.
 func longestCommon(a, b []string) []string {
-	table := make([][]int, len(a)+1)
+	table := make([][]int32, len(a)+1)
 	for i := range table {
-		table[i] = make([]int, len(b)+1)
+		table[i] = make([]int32, len(b)+1)
 	}
 	for i := len(a) - 1; i >= 0; i-- {
 		for j := len(b) - 1; j >= 0; j-- {

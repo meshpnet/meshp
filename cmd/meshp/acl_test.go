@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -163,5 +164,49 @@ func TestARealChangeStillShows(t *testing.T) {
 	}
 	if !strings.Contains(d, "tag:web") {
 		t.Errorf("the new value is not in the diff:\n%s", d)
+	}
+}
+
+// The subsequence is O(n*m) in time and memory over a file somebody named on the command
+// line. Trimming the shared ends means an ordinary edit never reaches it, and the cap means
+// two wholly different documents cannot make the CLI allocate without bound — which is what
+// CodeQL objected to, and it was right to.
+func TestAnEditOnlyComparesWhatChanged(t *testing.T) {
+	// Far more lines than the cap, differing in exactly one of them.
+	var before, after strings.Builder
+	for i := 0; i < maxDiffLines*3; i++ {
+		fmt.Fprintf(&before, "line %d\n", i)
+		if i == maxDiffLines {
+			after.WriteString("CHANGED\n")
+			continue
+		}
+		fmt.Fprintf(&after, "line %d\n", i)
+	}
+
+	got := diff(before.String(), after.String())
+	if strings.Contains(got, "too much to show as a diff") {
+		t.Fatal("a one-line change was treated as a wholesale replacement")
+	}
+	removed, added, _ := countDiff(got)
+	if removed != 1 || added != 1 {
+		t.Errorf("removed=%d added=%d, want 1/1", removed, added)
+	}
+}
+
+func TestTwoWhollyDifferentDocumentsAreSummarisedRatherThanCompared(t *testing.T) {
+	var before, after strings.Builder
+	for i := 0; i < maxDiffLines+10; i++ {
+		fmt.Fprintf(&before, "old %d\n", i)
+		fmt.Fprintf(&after, "new %d\n", i)
+	}
+
+	got := diff(before.String(), after.String())
+	if !strings.Contains(got, "too much to show as a diff") {
+		t.Errorf("an unbounded comparison was attempted:\n%s", got[:200])
+	}
+	// And it says how big the two sides were, so the summary is an answer rather than a
+	// refusal.
+	if !strings.Contains(got, fmt.Sprintf("%d lines replaced by %d", maxDiffLines+10, maxDiffLines+10)) {
+		t.Errorf("the summary does not say how much changed:\n%s", got)
 	}
 }
