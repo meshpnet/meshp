@@ -59,6 +59,11 @@ var commands = []command{
 	{name: "down", help: "Take the tunnel down", run: cmdDown},
 	{name: "status", help: "Show connection, peers and active routes", run: cmdStatus},
 	{name: "doctor", help: "Collect a diagnostic bundle for a bug report", run: cmdDoctor},
+	{
+		name: "device", args: "<list|revoke|forget>",
+		help: "List the devices in a network, take one out, or erase it",
+		run:  cmdDevice,
+	},
 }
 
 // lookup finds a command by name.
@@ -75,16 +80,28 @@ func lookup(name string) (command, bool) {
 func usageText() string {
 	var b strings.Builder
 	b.WriteString("meshp — private mesh networking\n\nUsage:\n  meshp <command> [flags]\n\nCommands:\n")
+	// Width from the widest thing being shown rather than a number chosen once. A command
+	// whose arguments push it past a fixed column does not misalign the rest of the list.
+	rows := make([][2]string, 0, len(commands)+2)
 	for _, c := range commands {
 		invocation := c.name
 		if c.args != "" {
 			invocation += " " + c.args
 		}
-		fmt.Fprintf(&b, "  %-24s %s\n", invocation, c.help)
+		rows = append(rows, [2]string{invocation, c.help})
+	}
+	width := 0
+	for _, r := range rows {
+		if len(r[0]) > width {
+			width = len(r[0])
+		}
+	}
+	for _, r := range rows {
+		fmt.Fprintf(&b, "  %-*s  %s\n", width, r[0], r[1])
 	}
 	b.WriteString("\nFlags:\n")
-	fmt.Fprintf(&b, "  %-24s %s\n", "--version", "Print build information")
-	fmt.Fprintf(&b, "  %-24s %s\n", "--help", "Show this help")
+	fmt.Fprintf(&b, "  %-*s  %s\n", width, "--version", "Print build information")
+	fmt.Fprintf(&b, "  %-*s  %s\n", width, "--help", "Show this help")
 	return b.String()
 }
 
