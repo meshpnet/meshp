@@ -63,13 +63,11 @@ Each one is a thing the page got wrong before #146, so each one is worth repeati
    them and check the dropdown follows, in both directions, including via the browser's back
    button.
 
-8. **A button that changes identity changes handler.** With every device active, `POST
-   /fixture` with `{"revoked":["bravo"]}` and watch bravo's row: *Revoke* becomes *Forget*
-   without the row blinking. Now click it. The confirmation must say **Forget bravo**, not
-   *Revoke bravo*. *Two `<button class="danger">` elements are `comparable()`, so before both
-   were keyed the reconciler matched them by position and reused the node — relabelling it
-   while keeping the old click listener. The page offered to erase a device and revoked it
-   instead, which is the more alarming direction for that mistake to go in.*
+8. ~~**A button that changes identity changes handler.**~~ *Automated.* `web/render.test.js`
+   builds the row for an active device, morphs in the row for the same device revoked, and
+   requires the button to be a different node — which is what stops the old click listener
+   coming with it. Running it by hand is still the way to see it, but nothing depends on
+   somebody remembering to.
 
 ## What a machine checks now, and what it does not
 
@@ -80,16 +78,15 @@ control with a write in flight is left alone, a node a click left behind survive
 and the picker reads its value before its children are reconciled. Every one of those was
 mutation-tested — the code was broken deliberately and the test was required to fail.
 
-What it cannot reach is everything below. jsdom has no layout, no focus ring and no text
-selection, and it does not run `app.js` at all, so the checks here still cover:
+`web/render.test.js` covers the wiring: that the buttons this page actually builds carry
+those keys, are addressed by the right id — a membership for revoking, a device for
+forgetting — and are drawn only for somebody holding the permission. It reaches them because
+`app.js` no longer starts the page when it is imported; `main.js` does that, and is what
+`index.html` loads.
 
-- **the browser behaviours** — checks 1, 2 and 5, which are about what survives a redraw on a
-  real screen rather than about what the reconciler does to a tree;
-- **the wiring** — that the buttons the page actually builds carry the keys the reconciler
-  needs. The unit test proves keys work; check 8 proves this page uses them.
-
-That second gap is the one to close next, and it needs `app.js` split further before a test
-can reach a renderer.
+What jsdom cannot reach is layout, the focus ring and text selection. So the checks here
+still cover the **browser behaviours** — 1, 2 and 5, which are about what survives a redraw
+on a real screen rather than about what a reconciler does to a tree.
 
 ## Note on running this
 
