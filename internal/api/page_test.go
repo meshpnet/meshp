@@ -55,8 +55,52 @@ func TestThePageIsServedWithoutACredential(t *testing.T) {
 	if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type = %q, want text/html", ct)
 	}
-	if !strings.Contains(body, "/app.js") {
-		t.Error("the page does not load app.js, so nothing would render")
+	if !strings.Contains(body, "/main.js") {
+		t.Error("the page does not load main.js, so nothing would render")
+	}
+}
+
+// Everything index.html asks for is served.
+//
+// Derived from the page rather than listed, because a list is the thing that went wrong.
+// The embed directive names its files on purpose — so nothing lands in web/ and gets served
+// by accident — and the cost is that a new module is not served until somebody adds it, with
+// nothing failing at build time when they do not. web/testdata/fixture.py serves that
+// directory from disk, so the page works perfectly against the fixture and 404s in the real
+// binary. That has now happened twice, with dom.js and again with main.js.
+func TestEverythingThePageAsksForIsServed(t *testing.T) {
+	ts := pageServerFor(t)
+
+	_, _, page := get(t, ts.URL+"/")
+
+	var refs []string
+	for _, attr := range []string{`src="`, `href="`} {
+		rest := page
+		for {
+			i := strings.Index(rest, attr)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(attr):]
+			end := strings.IndexByte(rest, '"')
+			if end < 0 {
+				break
+			}
+			// Local paths only: a link to the repository is not this server's to answer.
+			if ref := rest[:end]; strings.HasPrefix(ref, "/") {
+				refs = append(refs, ref)
+			}
+			rest = rest[end:]
+		}
+	}
+
+	if len(refs) == 0 {
+		t.Fatal("the page references nothing local, which cannot be right")
+	}
+	for _, ref := range refs {
+		if status, _, _ := get(t, ts.URL+ref); status != http.StatusOK {
+			t.Errorf("the page asks for %s and it answers %d — is it in web/embed.go?", ref, status)
+		}
 	}
 }
 
@@ -64,7 +108,9 @@ func TestTheAssetsAreServed(t *testing.T) {
 	ts := pageServerFor(t)
 
 	for _, tc := range []struct{ path, wantType, wantBody string }{
+		{"/main.js", "javascript", "bootstrap"},
 		{"/app.js", "javascript", "poll_after_seconds"},
+		{"/dom.js", "javascript", "morphChildren"},
 		{"/app.css", "text/css", "--bg"},
 	} {
 		status, header, body := get(t, ts.URL+tc.path)

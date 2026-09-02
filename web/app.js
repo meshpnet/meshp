@@ -985,25 +985,42 @@ function restart() {
   start();
 }
 
-signoutEl.addEventListener("click", async () => {
-  stopPolling();
-  try {
-    await api("/api/v1/ui/session", { method: "DELETE" });
-  } catch {
-    // Logging out of a session the server has already forgotten is still logging out.
-  }
-  lastGood = null;
-  lastGoodAt = null;
-  // Forgotten explicitly. A page that kept the last person's permissions in memory would
-  // render their controls for whoever signs in next, for as long as it took the next fetch
-  // to come back.
-  permissions = new Set();
-  unlimited = false;
-  mintedToken = null;
-  shownFor = null;
-  renderFreshness(null);
-  renderSignIn("Signed out.");
-});
+/**
+ * Wires the page up and starts it. Called by main.js, which is what index.html loads.
+ *
+ * Separated so that importing this file does nothing. It used to attach a listener and
+ * start polling at import, which meant no test could reach a renderer without a document
+ * that already had the page's elements in it and a control plane to answer the first poll
+ * — and so the only thing checking that these renderers build what the reconciler needs
+ * was a person following docs/testing/the-page.md.
+ */
+export function bootstrap() {
+  signoutEl.addEventListener("click", async () => {
+    stopPolling();
+    try {
+      await api("/api/v1/ui/session", { method: "DELETE" });
+    } catch {
+      // Logging out of a session the server has already forgotten is still logging out.
+    }
+    lastGood = null;
+    lastGoodAt = null;
+    // Forgotten explicitly. A page that kept the last person's permissions in memory would
+    // render their controls for whoever signs in next, for as long as it took the next
+    // fetch to come back.
+    permissions = new Set();
+    unlimited = false;
+    mintedToken = null;
+    shownFor = null;
+    renderFreshness(null);
+    renderSignIn("Signed out.");
+  });
 
-window.addEventListener("hashchange", start);
-start();
+  window.addEventListener("hashchange", start);
+  start();
+}
+
+// Reached only by web/dom.test.js and web/render.test.js. Exported rather than made public
+// in spirit: these are the renderers whose output the reconciler depends on, and the keys
+// they carry are the difference between a button that means what it says and one that
+// inherited somebody else's click handler (#218).
+export { renderDevices, revokeButton, forgetButton, organizationOf, may, fetchPermissions };

@@ -19,7 +19,9 @@ import "embed"
 // That safety has a cost worth knowing about: a new file is not served until it is added
 // here, and nothing fails at build time when it is missing. web/testdata/fixture.py serves
 // this directory from disk, so a page split across a new module works perfectly against the
-// fixture and 404s in the real binary. dom.js was added in exactly that way.
+// fixture and 404s in the real binary. dom.js was added in exactly that way, and main.js
+// after it — which is now the file index.html actually loads, so forgetting it here would
+// leave a blank page rather than a degraded one.
 //
-//go:embed index.html app.css app.js dom.js
+//go:embed index.html app.css main.js app.js dom.js
 var FS embed.FS
