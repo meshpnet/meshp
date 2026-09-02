@@ -121,6 +121,14 @@ The `.gitignore` entries stay. They cost nothing and they will be right.
 >   anticipated, and one that should be taken on its own rather than arriving attached to a
 >   feature.
 
+> *2026-09-02, ADR-0032.* The expiry condition in this section is superseded. Both halves of
+> it have since been touched — the page is growing many views that share state, and the
+> node-outlives-render bug class has now appeared twice — and the answer is still not a build
+> step, for reasons this section did not have: a framework migration with no tests is
+> unverifiable, and a toolchain that must run before `go build` changes what a clean checkout
+> produces. ADR-0032 §6 takes the smaller decision the paragraph above predicted — a Node
+> toolchain in CI for tests only — and replaces the trigger with a sharper one.
+
 ### 4. The page polls, and the server sets the interval
 
 The page calls the overview endpoint on a timer. The response carries
@@ -178,6 +186,15 @@ revoking a device: the two halves of a device's life, which is what this page is
 about and what an operator otherwise reaches for `curl` to do. Publishing an access policy
 and editing DNS records are not here — they are documents somebody composes rather than
 buttons, and a form that got them subtly wrong would be worse than the command it replaced.
+
+*Superseded 2026-09-02 by ADR-0032 §3.* The limit is lifted; the argument behind it is kept.
+This paragraph is the failure mode described at the end of this section — a claim stated as
+an enumeration — one paragraph after that lesson was applied to the credential, and it went
+stale the first time a third write was needed. What survives is that a document does not get
+a form: an access policy is edited as text, parsed before it can be saved, shown as a diff
+against what is live, and dry-run through `acl.Compile` so the filter a named device would
+enforce is visible before publishing. That is a higher bar than the `curl` it replaces, which
+is what this paragraph was really asking for.
 
 **A minted token is shown once and the page keeps running.** The control plane stores only
 a hash, so the moment after minting is the only moment that secret exists. It is held in the
