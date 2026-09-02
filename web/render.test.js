@@ -133,3 +133,34 @@ test("the organisation is read from the network the page is showing", () => {
   assert.equal(organizationOf({ network: { id: "missing" } }, networks), null);
   assert.equal(organizationOf(data, undefined), null);
 });
+
+// --- the policy dry-run -------------------------------------------------------------------
+
+const { renderPolicyTest } = await import("./app.js");
+
+test("the dry-run panel is absent for somebody who may not publish a policy", async () => {
+  await granting("network.devices.revoke");
+  assert.equal(renderPolicyTest([device()]), null);
+});
+
+test("the dry-run offers only devices a policy could apply to", async () => {
+  await granting("network.acl.write");
+
+  // A revoked device is not among the devices a policy resolves against, so offering it
+  // would be offering a question the control plane answers with a refusal.
+  assert.equal(renderPolicyTest([device({ state: "revoked" })]), null);
+
+  const panel = renderPolicyTest([
+    device({ state: "active", device_name: "alpha" }),
+    device({ state: "revoked", device_name: "bravo", membership_id: "m-2" }),
+  ]);
+  const options = [...panel.querySelectorAll("option")].map((o) => o.textContent);
+  assert.deepEqual(options, ["alpha"]);
+});
+
+test("the dry-run addresses a device by its membership, which is what the route takes", async () => {
+  await granting("network.acl.write");
+  const d = device();
+  const panel = renderPolicyTest([d]);
+  assert.equal(panel.querySelector("option").value, d.membership_id);
+});

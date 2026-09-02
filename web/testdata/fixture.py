@@ -30,7 +30,7 @@ IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("a" * 8, i) for i, n in enumerate
 DEVICE_IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("d" * 8, i) for i, n in enumerate(NAMES)}
 
 state = {"fault": None, "rename": {}, "revoked": [], "forgotten": [], "tick": 0,
-         "fail_mint": False, "slow_mint": 0}
+         "fail_mint": False, "slow_mint": 0, "acl_fault": False}
 lock = threading.Lock()
 
 
@@ -134,6 +134,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        path = urlparse(self.path).path
+
+        # A compiled filter, as POST /networks/{id}/acl/test answers one. Canned rather than
+        # computed: the page's job is to render what the control plane worked out, and a
+        # fixture that compiled a policy itself would be testing the wrong half.
+        if path.endswith("/acl/test"):
+            body = json.loads(raw or b"{}")
+            with lock:
+                if state["acl_fault"]:
+                    return self.send_json({"error": "invalid_policy",
+                                           "message": "rule 0: names ports with protocol \"icmp\""}, 400)
+                name = next((n for n, i in IDS.items() if i == body.get("device")), body.get("device"))
+            return self.send_json({
+                "device": name,
+                "default_deny": True,
+                "filter": {
+                    "inbound": [{"src_prefixes": ["100.80.0.3/32"], "dst_prefixes": ["100.80.0.2/32"],
+                                 "protocol": "tcp", "ports": ["5432"], "allow": True}],
+                    "outbound": [],
+                },
+            })
+
         if self.path == "/fixture":
             with lock:
                 state.update(json.loads(raw or b"{}"))

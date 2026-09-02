@@ -259,6 +259,11 @@ func (s *Server) routes() []route {
 			handler: s.handleGetPolicy, kind: guardNetwork, perm: authz.NetworkACLRead},
 		{pattern: "PUT /api/v1/networks/{networkID}/acl",
 			handler: s.handlePublishPolicy, kind: guardNetwork, perm: authz.NetworkACLWrite},
+		// A dry-run: what would this device enforce, given this document. Behind acl.write
+		// because it is a step in publishing — see handleTestPolicy.
+		{pattern: "POST /api/v1/networks/{networkID}/acl/test",
+			handler: s.handleTestPolicy, kind: guardNetwork, perm: authz.NetworkACLWrite},
+
 		{pattern: "GET /api/v1/networks/{networkID}/acl/versions",
 			handler: s.handleListPolicyVersions, kind: guardNetwork, perm: authz.NetworkACLRead},
 

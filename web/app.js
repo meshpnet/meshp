@@ -50,6 +50,15 @@ let mintedToken = null;
 /** Which network that token was minted for, so moving away clears it. */
 let shownFor = null;
 
+/**
+ * The last policy dry-run, held here rather than only in the node it was drawn into.
+ *
+ * Same reason as a minted token: every render describes the whole page, so an answer that
+ * lived only in the DOM would vanish the first time a poll redrew the panel — which happens
+ * every few seconds, and is exactly when somebody is reading it.
+ */
+let policyTest = null;
+
 /** Last successful overview, kept so a failed poll can keep showing it — marked stale. */
 let lastGood = null;
 /** What was rendered beside it, so the page can redraw itself without polling again. */
@@ -482,6 +491,113 @@ function forgetButton(device, organizationID) {
   return button;
 }
 
+/**
+ * What a device would enforce, asked of the control plane rather than worked out here.
+ *
+ * A policy is written in selectors and what reaches a device is a packet filter in
+ * prefixes, and the step between them is where a rule that does not do what its author
+ * meant goes unnoticed until somebody cannot reach something. The compile belongs to the
+ * control plane — it resolves against the devices a policy applies to, excluding the
+ * revoked and the addressless, and this page has no business holding a second opinion of
+ * that (ADR-0023).
+ */
+function renderPolicyTest(devices) {
+  if (!may("network.acl.write")) return null;
+
+  const eligible = devices.filter((d) => d.state === "active");
+  if (eligible.length === 0) return null;
+
+  const picker = el(
+    "select",
+    { id: "acl-test-device" },
+    eligible.map((d) =>
+      el("option", { value: d.membership_id, "data-key": d.membership_id }, d.device_name),
+    ),
+  );
+  if (policyTest && eligible.some((d) => d.membership_id === policyTest.membershipID)) {
+    picker.value = policyTest.membershipID;
+  }
+
+  const button = el("button", { type: "button" }, "What does it enforce?");
+  button.addEventListener("click", () => {
+    // Read at the moment of the click. The node outlives the render that built it, so the
+    // device chosen is whatever the picker says now.
+    const membershipID = picker.value;
+    policyTest = null;
+    act(button, async () => {
+      const body = await api(
+        `/api/v1/networks/${encodeURIComponent(currentNetworkID())}/acl/test`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ device: membershipID }),
+        },
+      );
+      policyTest = {
+        membershipID,
+        device: body.device,
+        defaultDeny: body.default_deny,
+        inbound: (body.filter && body.filter.inbound) || [],
+        outbound: (body.filter && body.filter.outbound) || [],
+      };
+      renderFromLastGood();
+    });
+  });
+
+  return el(
+    "div",
+    { class: "panel", "data-key": "acl-test" },
+    el("h3", {}, "Access policy"),
+    el("p", { class: "note" },
+      "What the control plane would send this device, compiled from the policy in force."),
+    picker,
+    " ",
+    button,
+    policyTest ? renderPolicyResult() : null,
+  );
+}
+
+/** The compiled filter, in the prefixes a device enforces rather than the tags somebody wrote. */
+function renderPolicyResult() {
+  const direction = (label, rules) =>
+    el(
+      "div",
+      { "data-key": label },
+      el("div", { class: "note" }, label),
+      rules.length === 0
+        ? el("div", { class: "addr" }, "nothing")
+        : el(
+            "ul",
+            { class: "faults" },
+            rules.map((r, i) =>
+              el(
+                "li",
+                { "data-key": `${label}-${i}` },
+                `${r.allow ? "allow" : "deny"} ${r.protocol || "any"} ` +
+                  `${(r.src_prefixes || []).join(",") || "anywhere"} \u2192 ` +
+                  `${(r.dst_prefixes || []).join(",") || "anywhere"}` +
+                  ((r.ports || []).length ? ` ports ${r.ports.join(",")}` : ""),
+              ),
+            ),
+          ),
+    );
+
+  return el(
+    "div",
+    { class: "result", "data-key": "acl-result" },
+    el("div", {}, el("strong", {}, policyTest.device)),
+    el(
+      "div",
+      { class: "note" },
+      policyTest.defaultDeny
+        ? "Everything not listed is refused."
+        : "Everything is permitted; these rules add nothing.",
+    ),
+    direction("inbound", policyTest.inbound),
+    direction("outbound", policyTest.outbound),
+  );
+}
+
 /** The panel that mints an enrolment token, and shows it exactly once. */
 function renderAddDevice() {
   if (!may("network.enrollment_tokens.write")) return null;
@@ -578,6 +694,7 @@ function renderOverview(data, networks, history) {
       : el("div", { class: "panel note", "data-key": "groups" }, "This network has no route groups."),
     el("h2", { "data-key": "devices-heading" }, "Devices"),
     renderAddDevice(),
+    renderPolicyTest(devices),
     el(
       "div",
       { class: "panel", "data-key": "devices" },
@@ -1011,6 +1128,7 @@ export function bootstrap() {
     unlimited = false;
     mintedToken = null;
     shownFor = null;
+    policyTest = null;
     renderFreshness(null);
     renderSignIn("Signed out.");
   });
@@ -1023,4 +1141,12 @@ export function bootstrap() {
 // in spirit: these are the renderers whose output the reconciler depends on, and the keys
 // they carry are the difference between a button that means what it says and one that
 // inherited somebody else's click handler (#218).
-export { renderDevices, revokeButton, forgetButton, organizationOf, may, fetchPermissions };
+export {
+  renderDevices,
+  revokeButton,
+  forgetButton,
+  organizationOf,
+  may,
+  fetchPermissions,
+  renderPolicyTest,
+};
