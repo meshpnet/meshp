@@ -112,6 +112,39 @@ jobs:
           path: cover.out
           retention-days: 7
 
+  page:
+    name: the page
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - name: the reconciler behaves
+        working-directory: web
+        run: npm test
+
+      # Node is here for tests and for nothing else (ADR-0032 §6). web/ is embedded exactly
+      # as written (ADR-0022 §3), so nothing this job installs is compiled into
+      # meshp-control, and `go build` on a clean checkout still produces a working binary.
+      # If a bundler ever appears in this job, that decision has been reversed by accident.
+      - name: no build step arrived by the back door
+        working-directory: web
+        run: |
+          set -euo pipefail
+          if grep -qE '"(build|bundle)"[[:space:]]*:' package.json; then
+            echo "package.json has a build script; ADR-0032 §6 says tests only" >&2
+            exit 1
+          fi
+          for d in dist .vite build .next out; do
+            test ! -e "$d" || { echo "the test run produced $d; that is a build step" >&2; exit 1; }
+          done
+
   cross:
     name: cross compile
     runs-on: ubuntu-latest
