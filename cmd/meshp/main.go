@@ -70,7 +70,7 @@ var commands = []command{
 		run:  cmdNetwork,
 	},
 	{
-		name: "acl", args: "<show|edit|apply|versions>",
+		name: "acl", args: "<show|edit|test|apply|versions>",
 		help: "Read and publish a network's access policy",
 		run:  cmdACL,
 	},

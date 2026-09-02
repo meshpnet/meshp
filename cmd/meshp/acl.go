@@ -25,13 +25,12 @@ import (
 // sent, and shown as a diff against what is live — three things `curl` does not do, which
 // is the bar §3 set for replacing it.
 //
-// `acl test` is deliberately not here. A faithful dry-run has to compile the document the
-// way the control plane will, and that means store.PolicyDevices — which decides who a
-// policy resolves against, excluding the revoked, the suspended and the addressless. The
-// CLI cannot reproduce that without becoming a second implementation of a rule that must
-// not drift (ADR-0023), and the tags selectors match on are not on the devices endpoint at
-// all. It wants a dry-run route that both this and the page call, which is a capability
-// landing in every client at once (ADR-0032 §5) rather than a verb bolted on here.
+// `acl test` asks the control plane rather than compiling here. A faithful dry-run has to
+// resolve the policy against store.PolicyDevices — which decides who a policy applies to,
+// excluding the revoked, the suspended and the addressless — and the tags selectors match
+// on are not on the devices endpoint at all. Compiling locally would be a second
+// implementation of a rule that must not drift (ADR-0023) answering with confidence it has
+// not earned.
 
 // policyDoc is what GET /networks/{id}/acl answers.
 type policyDoc struct {
@@ -42,7 +41,7 @@ type policyDoc struct {
 
 func cmdACL(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: meshp acl <show|edit|apply|versions>")
+		return errors.New("usage: meshp acl <show|edit|test|apply|versions>")
 	}
 	switch args[0] {
 	case "show":
@@ -53,8 +52,10 @@ func cmdACL(ctx context.Context, args []string) error {
 		return cmdACLApply(ctx, args[1:])
 	case "versions":
 		return cmdACLVersions(ctx, args[1:])
+	case "test":
+		return cmdACLTest(ctx, args[1:])
 	default:
-		return fmt.Errorf("unknown verb %q; meshp acl takes show, edit, apply or versions", args[0])
+		return fmt.Errorf("unknown verb %q; meshp acl takes show, edit, test, apply or versions", args[0])
 	}
 }
 
@@ -474,4 +475,108 @@ func longestCommon(a, b []string) []string {
 		}
 	}
 	return out
+}
+
+// cmdACLTest asks what a device would enforce.
+func cmdACLTest(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("meshp acl test", flag.ContinueOnError)
+	wantNetwork := fs.String("network", "", "Which network, by slug or id")
+	file := fs.String("file", "", "Test this document instead of the one in force")
+	rest, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return errors.New("usage: meshp acl test <device> [--file p.json] [--network n]")
+	}
+
+	client, cred, err := signedIn()
+	if err != nil {
+		return err
+	}
+	net, err := chooseNetwork(ctx, client, *wantNetwork, cred.Network)
+	if err != nil {
+		return err
+	}
+
+	body := map[string]any{"device": rest[0]}
+	if *file != "" {
+		proposed, err := os.ReadFile(*file)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", *file, err)
+		}
+		// Parsed here first, for the reason publishing gives: the author is here, and a
+		// malformed document should cost a message rather than a round trip.
+		if _, err := acl.Parse(proposed); err != nil {
+			return fmt.Errorf("that document is not a policy: %w", err)
+		}
+		body["document"] = json.RawMessage(proposed)
+	}
+
+	var out struct {
+		Device      string `json:"device"`
+		DefaultDeny bool   `json:"default_deny"`
+		Filter      struct {
+			Inbound  []filterRule `json:"inbound"`
+			Outbound []filterRule `json:"outbound"`
+		} `json:"filter"`
+	}
+	if err := client.Do(ctx, "POST", "/api/v1/networks/"+net.ID+"/acl/test", body, &out); err != nil {
+		return err
+	}
+
+	source := "the policy in force"
+	if *file != "" {
+		source = *file
+	}
+	fmt.Printf("%s in %s, under %s:\n", out.Device, net.qualified(), source)
+	if out.DefaultDeny {
+		fmt.Println("  everything not listed below is refused")
+	} else {
+		fmt.Println("  everything is permitted; the rules below add nothing")
+	}
+	printRules("inbound", out.Filter.Inbound)
+	printRules("outbound", out.Filter.Outbound)
+	return nil
+}
+
+// filterRule is one rule of a compiled packet filter.
+type filterRule struct {
+	Src      []string `json:"src_prefixes"`
+	Dst      []string `json:"dst_prefixes"`
+	Protocol string   `json:"protocol"`
+	Ports    []string `json:"ports"`
+	Allow    bool     `json:"allow"`
+}
+
+// printRules renders one direction of a filter, in prefixes rather than in selectors.
+//
+// Prefixes because that is what the device enforces. A dry-run that echoed the tags back
+// would be showing the document again, and the whole question is what the document turned
+// into.
+func printRules(direction string, rules []filterRule) {
+	if len(rules) == 0 {
+		fmt.Printf("  %s: nothing\n", direction)
+		return
+	}
+	fmt.Printf("  %s:\n", direction)
+	for _, r := range rules {
+		verb := "allow"
+		if !r.Allow {
+			verb = "deny"
+		}
+		ports := ""
+		if len(r.Ports) > 0 {
+			ports = " ports " + strings.Join(r.Ports, ",")
+		}
+		fmt.Printf("    %-5s %-8s %s -> %s%s\n",
+			verb, r.Protocol, orAny(r.Src), orAny(r.Dst), ports)
+	}
+}
+
+func orAny(prefixes []string) string {
+	if len(prefixes) == 0 {
+		return "anywhere"
+	}
+	return strings.Join(prefixes, ",")
 }

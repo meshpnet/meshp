@@ -80,13 +80,22 @@ mutation-tested — the code was broken deliberately and the test was required t
 
 `web/render.test.js` covers the wiring: that the buttons this page actually builds carry
 those keys, are addressed by the right id — a membership for revoking, a device for
-forgetting — and are drawn only for somebody holding the permission. It reaches them because
+forgetting, a membership again for a policy dry-run — and are drawn only for somebody
+holding the permission. It reaches them because
 `app.js` no longer starts the page when it is imported; `main.js` does that, and is what
 `index.html` loads.
 
 What jsdom cannot reach is layout, the focus ring and text selection. So the checks here
 still cover the **browser behaviours** — 1, 2 and 5, which are about what survives a redraw
 on a real screen rather than about what a reconciler does to a tree.
+
+9. **An answer survives the page it is drawn on.** With a policy published, pick a device
+   in *Access policy* and ask what it enforces. Leave it there for a quarter of a minute,
+   then `POST /fixture` a fault onto another device so the table reorders under it. The
+   compiled filter is still on screen and still names the device you asked about. *It lives
+   in the page's own state rather than in the node it was drawn into, for the same reason a
+   minted token does: every render describes the whole page, so an answer held only in the
+   DOM goes at the next poll — which is a second or two after somebody starts reading it.*
 
 ## Note on running this
 
