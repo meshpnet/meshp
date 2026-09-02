@@ -13,8 +13,13 @@ package web
 
 import "embed"
 
-// FS holds the page. Only the three files are embedded, so this source file and anything
+// FS holds the page. Only the named files are embedded, so this source file and anything
 // else that lands in this directory is not served by accident.
 //
-//go:embed index.html app.css app.js
+// That safety has a cost worth knowing about: a new file is not served until it is added
+// here, and nothing fails at build time when it is missing. web/testdata/fixture.py serves
+// this directory from disk, so a page split across a new module works perfectly against the
+// fixture and 404s in the real binary. dom.js was added in exactly that way.
+//
+//go:embed index.html app.css app.js dom.js
 var FS embed.FS
