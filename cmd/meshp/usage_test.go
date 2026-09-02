@@ -60,7 +60,7 @@ func TestTheNounsThatWereNeverBuiltAreNotCommands(t *testing.T) {
 	// `device` and `network` have left this list, which is what closing the gap looks like
 	// from here. The rest are still advertised nowhere and answer unknown command.
 	for _, name := range []string{
-		"user", "group", "acl",
+		"user", "group",
 		"dns", "route-group", "exit", "relay", "token",
 	} {
 		if _, found := lookup(name); found {
