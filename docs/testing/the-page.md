@@ -71,6 +71,26 @@ Each one is a thing the page got wrong before #146, so each one is worth repeati
    while keeping the old click listener. The page offered to erase a device and revoked it
    instead, which is the more alarming direction for that mistake to go in.*
 
+## What a machine checks now, and what it does not
+
+`web/dom.test.js` runs in CI (`the page` job) against `web/dom.js` under jsdom. It pins the
+reconciler's properties directly: a differently keyed child gets a new node rather than
+inheriting one and its listener, a keyed row that moves is moved rather than rewritten, a
+control with a write in flight is left alone, a node a click left behind survives a render,
+and the picker reads its value before its children are reconciled. Every one of those was
+mutation-tested — the code was broken deliberately and the test was required to fail.
+
+What it cannot reach is everything below. jsdom has no layout, no focus ring and no text
+selection, and it does not run `app.js` at all, so the checks here still cover:
+
+- **the browser behaviours** — checks 1, 2 and 5, which are about what survives a redraw on a
+  real screen rather than about what the reconciler does to a tree;
+- **the wiring** — that the buttons the page actually builds carry the keys the reconciler
+  needs. The unit test proves keys work; check 8 proves this page uses them.
+
+That second gap is the one to close next, and it needs `app.js` split further before a test
+can reach a renderer.
+
 ## Note on running this
 
 The fixture sends `cache-control: no-store`, so an edit to `app.js` is picked up by a reload.

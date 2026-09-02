@@ -1,0 +1,12 @@
+{
+  "name": "meshp-web",
+  "private": true,
+  "type": "module",
+  "description": "Tests for the page. Not a build step: web/ is embedded as written (ADR-0022 §3, ADR-0032 §6), and nothing here is compiled into meshp-control.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}

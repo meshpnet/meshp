@@ -44,6 +44,17 @@ updates:
       golang-x:
         patterns: ["golang.org/x/*"]
 
+  # The page's test tooling. Nothing here is compiled into a binary — web/ is embedded as
+  # written — so this watches a dev dependency rather than the artefact, which is a smaller
+  # promise than the other three ecosystems make.
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "deps"
+
   - package-ecosystem: docker
     directory: "/deploy/docker"
     schedule:
