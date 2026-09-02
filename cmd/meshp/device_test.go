@@ -95,7 +95,7 @@ func networksServing(t *testing.T, rows ...network) *cliapi.Client {
 
 func TestChooseNetworkInfersTheOnlyOne(t *testing.T) {
 	client := networksServing(t, network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"})
-	got, err := chooseNetwork(context.Background(), client, "")
+	got, err := chooseNetwork(context.Background(), client, "", "")
 	if err != nil {
 		t.Fatalf("chooseNetwork: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestChooseNetworkRefusesToGuessAmongSeveral(t *testing.T) {
 		network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"},
 		network{ID: "n-2", Slug: "branch", OrganizationSlug: "acme"})
 
-	_, err := chooseNetwork(context.Background(), client, "")
+	_, err := chooseNetwork(context.Background(), client, "", "")
 	if err == nil {
 		t.Fatal("it picked one")
 	}
@@ -129,7 +129,7 @@ func TestChooseNetworkTakesASlugOrAQualifiedName(t *testing.T) {
 		network{ID: "n-2", Slug: "branch", OrganizationSlug: "acme"})
 
 	for _, want := range []string{"branch", "acme/branch", "n-2"} {
-		got, err := chooseNetwork(context.Background(), client, want)
+		got, err := chooseNetwork(context.Background(), client, want, "")
 		if err != nil {
 			t.Fatalf("chooseNetwork(%q): %v", want, err)
 		}
@@ -141,14 +141,69 @@ func TestChooseNetworkTakesASlugOrAQualifiedName(t *testing.T) {
 
 func TestChooseNetworkSaysWhenThereIsNoSuchNetwork(t *testing.T) {
 	client := networksServing(t, network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"})
-	if _, err := chooseNetwork(context.Background(), client, "nope"); err == nil {
+	if _, err := chooseNetwork(context.Background(), client, "nope", ""); err == nil {
 		t.Fatal("an unknown network resolved")
 	}
 }
 
 func TestChooseNetworkSaysWhenThereAreNone(t *testing.T) {
 	client := networksServing(t)
-	if _, err := chooseNetwork(context.Background(), client, ""); err == nil {
+	if _, err := chooseNetwork(context.Background(), client, "", ""); err == nil {
 		t.Fatal("no networks resolved to something")
+	}
+}
+
+// --- what `meshp network use` changes -----------------------------------------------------
+
+func TestARememberedNetworkIsUsedWhenNothingWasNamed(t *testing.T) {
+	client := networksServing(t,
+		network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"},
+		network{ID: "n-2", Slug: "branch", OrganizationSlug: "acme"})
+
+	got, err := chooseNetwork(context.Background(), client, "", "branch")
+	if err != nil {
+		t.Fatalf("chooseNetwork: %v", err)
+	}
+	if got.ID != "n-2" {
+		t.Errorf("got %s, want the remembered one", got.ID)
+	}
+}
+
+// The flag is what somebody typed for this command, so it wins over a choice they made once.
+func TestAnExplicitNetworkBeatsARememberedOne(t *testing.T) {
+	client := networksServing(t,
+		network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"},
+		network{ID: "n-2", Slug: "branch", OrganizationSlug: "acme"})
+
+	got, err := chooseNetwork(context.Background(), client, "hq", "branch")
+	if err != nil {
+		t.Fatalf("chooseNetwork: %v", err)
+	}
+	if got.ID != "n-1" {
+		t.Errorf("got %s, want the one named on the command", got.ID)
+	}
+}
+
+// A selection that has gone stale is an error, not a fallback. Quietly acting on a different
+// network because the chosen one was deleted is the failure the ordering exists to prevent.
+func TestARememberedNetworkThatIsGoneIsRefused(t *testing.T) {
+	client := networksServing(t,
+		network{ID: "n-1", Slug: "hq", OrganizationSlug: "acme"})
+
+	_, err := chooseNetwork(context.Background(), client, "", "branch")
+	if err == nil {
+		t.Fatal("a stale choice fell back to the only network")
+	}
+	// It has to say how to get out of the state, since the file that holds it is not
+	// somewhere a person would think to look.
+	if !strings.Contains(err.Error(), "network use") {
+		t.Errorf("the error does not say how to fix it: %v", err)
+	}
+}
+
+func TestQualifiedNamesAreOrganisationThenSlug(t *testing.T) {
+	n := network{Slug: "hq", OrganizationSlug: "acme"}
+	if n.qualified() != "acme/hq" {
+		t.Errorf("qualified() = %q, want acme/hq", n.qualified())
 	}
 }

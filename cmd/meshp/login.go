@@ -186,8 +186,15 @@ func signInWithToken(ctx context.Context, controlURL, token string) error {
 	if err != nil {
 		return err
 	}
+	// Both names, because this endpoint answers with different ones depending on what is
+	// asking: a session is a person and carries `email`, a token is a person acting through
+	// a machine and carries `owner` (internal/api/usersession.go). Reading only `email` is
+	// not an error when a token is used — it is an empty string, which is how `meshp login
+	// --token` came to report "Signed in to … as " with nobody named. The same trap the
+	// token id fell into in ADR-0031's implementation.
 	var me struct {
 		Email string `json:"email"`
+		Owner string `json:"owner"`
 	}
 	if err := client.Do(ctx, http.MethodGet, "/api/v1/me", nil, &me); err != nil {
 		// A refusal and an unanswered call are different things, and only one of them is
@@ -199,12 +206,16 @@ func signInWithToken(ctx context.Context, controlURL, token string) error {
 		}
 		return err
 	}
+	who := me.Email
+	if who == "" {
+		who = me.Owner
+	}
 	if err := clicred.Save(clicred.Credential{
-		ControlURL: controlURL, Token: token, Email: me.Email,
+		ControlURL: controlURL, Token: token, Email: who,
 	}); err != nil {
 		return err
 	}
-	fmt.Printf("Signed in to %s as %s with the token given.\n", controlURL, me.Email)
+	fmt.Printf("Signed in to %s as %s with the token given.\n", controlURL, who)
 	return nil
 }
 
