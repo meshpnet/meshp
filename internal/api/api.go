@@ -289,6 +289,11 @@ func (s *Server) routes() []route {
 			handler: s.handleSetUserSuspended, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
 		{pattern: "PUT /api/v1/organizations/{organizationID}/users/{userID}/password",
 			handler: s.handleSetUserPassword, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
+		// Erasing a device, as opposed to revoking a membership. Organisation-scoped
+		// because a device can be in several networks and none of them owns it.
+		{pattern: "DELETE /api/v1/organizations/{organizationID}/devices/{deviceID}",
+			handler: s.handleForgetDevice, kind: guardOrganization, perm: authz.OrganizationDevicesForget},
+
 		{pattern: "DELETE /api/v1/organizations/{organizationID}/users/{userID}",
 			handler: s.handleDeleteUser, kind: guardOrganization, perm: authz.OrganizationUsersWrite},
 

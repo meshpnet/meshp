@@ -63,6 +63,20 @@ Each one is a thing the page got wrong before #146, so each one is worth repeati
    them and check the dropdown follows, in both directions, including via the browser's back
    button.
 
+8. **A button that changes identity changes handler.** With every device active, `POST
+   /fixture` with `{"revoked":["bravo"]}` and watch bravo's row: *Revoke* becomes *Forget*
+   without the row blinking. Now click it. The confirmation must say **Forget bravo**, not
+   *Revoke bravo*. *Two `<button class="danger">` elements are `comparable()`, so before both
+   were keyed the reconciler matched them by position and reused the node — relabelling it
+   while keeping the old click listener. The page offered to erase a device and revoked it
+   instead, which is the more alarming direction for that mistake to go in.*
+
+## Note on running this
+
+The fixture sends `cache-control: no-store`, so an edit to `app.js` is picked up by a reload.
+It did not always, and an ES module is cached per URL beyond an ordinary refresh — if a
+change seems to have no effect, open a new tab before suspecting the change.
+
 ## What this cannot tell you
 
 That the page is right about a real network. The fixture answers whatever it is asked and

@@ -24,7 +24,13 @@ NET = "11111111-2222-3333-4444-555555555555"
 NAMES = ["alpha", "bravo", "charlie", "delta"]
 IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("a" * 8, i) for i, n in enumerate(NAMES)}
 
-state = {"fault": None, "rename": {}, "revoked": [], "tick": 0, "fail_mint": False, "slow_mint": 0}
+# Distinct from IDS on purpose. A membership id and a device id are different things —
+# revoking takes one and forgetting takes the other — and a fixture that used the same value
+# for both would pass whichever the page sent.
+DEVICE_IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("d" * 8, i) for i, n in enumerate(NAMES)}
+
+state = {"fault": None, "rename": {}, "revoked": [], "forgotten": [], "tick": 0,
+         "fail_mint": False, "slow_mint": 0}
 lock = threading.Lock()
 
 
@@ -35,6 +41,7 @@ def device(name):
         faults = [{"code": "unapplied", "message": "has not applied its configuration"}]
     return {
         "membership_id": mid,
+        "device_id": DEVICE_IDS[name],
         "device_name": state["rename"].get(name, name),
         "state": "revoked" if name in state["revoked"] else "active",
         "connected": True,
@@ -47,7 +54,7 @@ def device(name):
 
 
 def overview():
-    devices = [device(n) for n in NAMES]
+    devices = [device(n) for n in NAMES if n not in state["forgotten"]]
     return {
         "as_of": "2026-08-31T12:00:0%dZ" % (state["tick"] % 10),
         "network": {"id": NET, "slug": "hq", "name": "hq", "state_version": 12},
@@ -77,7 +84,10 @@ AUDIT = {"events": [
      "actor_label": "aswin", "action": "policy.published", "metadata": {}},
 ]}
 
+ORG = "cccccccc-0000-0000-0000-000000000001"
+
 NETWORKS = {"networks": [{"id": NET, "slug": "hq", "organization_slug": "acme",
+                          "organization_id": ORG,
                           "active_device_count": len(NAMES)}]}
 
 
@@ -114,6 +124,10 @@ class Handler(BaseHTTPRequestHandler):
         kind = {"js": "text/javascript", "css": "text/css"}.get(name.rsplit(".", 1)[-1], "text/html")
         self.send_response(200)
         self.send_header("content-type", kind + "; charset=utf-8")
+        # Without this the browser heuristically caches app.js, and every edit is tested
+        # against the copy from the first page load — which looks exactly like a change
+        # that did not work, and costs an hour before anybody suspects the fixture.
+        self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -136,10 +150,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, 404)
 
     def do_DELETE(self):
+        path = urlparse(self.path).path
         with lock:
-            mid = self.path.rsplit("/", 1)[-1]
+            last = path.rsplit("/", 1)[-1]
+            # Two different deletes on two different ids. Revoking names a membership under
+            # a network; forgetting names a device under an organisation.
+            if "/organizations/" in path:
+                for name, known in DEVICE_IDS.items():
+                    if known == last:
+                        state["forgotten"].append(name)
+                        return self.send_json({"device_id": last, "name": name})
+                return self.send_json({"error": "not_found"}, 404)
             for name, known in IDS.items():
-                if known == mid:
+                if known == last:
                     state["revoked"].append(name)
         self.send_json({"ok": True})
 

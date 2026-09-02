@@ -70,6 +70,7 @@ func Builtins() []Builtin {
 		NetworkEgressWrite,
 		NetworkRoutesWrite,
 		OrganizationNetworksCreate,
+		OrganizationDevicesForget,
 	)
 
 	// Everything, taken from the catalogue rather than listed: an owner who did not
