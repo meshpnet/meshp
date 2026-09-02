@@ -69,6 +69,11 @@ var commands = []command{
 		help: "See the networks this account reaches, and choose which one commands act on",
 		run:  cmdNetwork,
 	},
+	{
+		name: "acl", args: "<show|edit|apply|versions>",
+		help: "Read and publish a network's access policy",
+		run:  cmdACL,
+	},
 }
 
 // lookup finds a command by name.
