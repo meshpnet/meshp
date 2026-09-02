@@ -57,8 +57,10 @@ func TestEveryCommandThatExistsIsOffered(t *testing.T) {
 // such command — which is true — rather than an apology for an offer that should not have
 // been made.
 func TestTheNounsThatWereNeverBuiltAreNotCommands(t *testing.T) {
+	// `device` has left this list, which is what closing the gap looks like from here
+	// (#226). The rest are still advertised nowhere and answer unknown command.
 	for _, name := range []string{
-		"device", "network", "user", "group", "acl",
+		"network", "user", "group", "acl",
 		"dns", "route-group", "exit", "relay", "token",
 	} {
 		if _, found := lookup(name); found {
