@@ -368,15 +368,6 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func contains(hay []string, needle string) bool {
-	for _, s := range hay {
-		if s == needle {
-			return true
-		}
-	}
-	return false
-}
-
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
