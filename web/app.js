@@ -504,6 +504,214 @@ function forgetButton(device, organizationID) {
 }
 
 /**
+ * The network as a picture.
+ *
+ * Everything relays (ADR-0002), so this is a hub and not a mesh. Drawing device-to-device
+ * links would show paths that do not exist — the one thing a diagram of a network must not
+ * do — and the hub is worth seeing for itself: it is why throughput is what it is, and it
+ * is what a direct path would eventually remove.
+ *
+ * What the picture is for is the question this page exists to answer: is anything
+ * unreachable, and what is carrying for it. So a device that is faulted or that carries a
+ * prefix is drawn and named, and the rest are dots. At five hundred devices a ring of five
+ * hundred labels is decoration; a ring of five hundred dots with the interesting ones
+ * called out is a diagram.
+ *
+ * Nothing here says which advertiser is *chosen*. The server owns the order and the agent
+ * owns the choice (ADR-0003), so no such fact exists to draw.
+ */
+function renderTopology(data, devices) {
+  const carriers = new Map();
+  for (const group of data.route_groups || []) {
+    for (const advertiser of group.advertisers || []) {
+      const carried = carriers.get(advertiser.membership_id) || [];
+      carried.push(group.slug);
+      carriers.set(advertiser.membership_id, carried);
+    }
+  }
+
+  const nodes = devices.map((device) => {
+    const faults = (device.faults || []).length;
+    const carrying = carriers.get(device.membership_id) || [];
+    return {
+      id: device.membership_id,
+      name: device.device_name,
+      faults,
+      carrying,
+      // Named when it is worth naming. Everything else is a dot, which is what lets this
+      // stay legible at the five hundred devices one overview carries.
+      notable: faults > 0 || carrying.length > 0,
+      state: device.state !== "active" ? "unknown" : deviceHealth(device),
+    };
+  });
+
+  if (nodes.length === 0) {
+    return el("div", { class: "panel note", "data-key": "topology" },
+      "No devices have joined this network yet.");
+  }
+
+  // Notable first, so the labelled ones sit together at the top of the ring rather than
+  // being scattered by whatever order the list arrived in.
+  nodes.sort((a, b) => (b.notable ? 1 : 0) - (a.notable ? 1 : 0));
+
+  // Past a couple of dozen, everything gets its own dot and none of them can be read: at
+  // the five hundred devices one overview carries they are three pixels apart. So the ones
+  // worth seeing are drawn and the rest are counted, which is what the picture was for —
+  // is anything unreachable, and what is carrying for it. A ring of five hundred identical
+  // dots answers neither.
+  const drawn = [];
+  let summarised = 0;
+  for (const node of nodes) {
+    if (nodes.length <= 24 || node.notable) drawn.push(node);
+    else summarised++;
+  }
+  if (summarised > 0) {
+    drawn.push({
+      id: "others",
+      name: `${summarised} more, all well`,
+      faults: 0,
+      carrying: [],
+      notable: true,
+      state: "ok",
+      many: true,
+    });
+  }
+
+  // Enough room for the labels to sit outside the ring without crowding, and no more. A
+  // ring wide enough for forty devices drawn around four is mostly empty panel.
+  const radius = Math.max(105, Math.min(240, 60 + drawn.length * 9));
+
+  const placed = drawn.map((node, i) => {
+    // From the top, clockwise. Starting at twelve o'clock puts the first notable device
+    // where somebody looks first.
+    const angle = (i / drawn.length) * 2 * Math.PI - Math.PI / 2;
+    return { ...node, x: radius * Math.cos(angle), y: radius * Math.sin(angle), angle };
+  });
+
+  // The viewBox is the content, measured, rather than a fixed canvas the content sits
+  // somewhere inside. Labels are the widest thing here and they are what decides it.
+  let minX = -40;
+  let maxX = 40;
+  let minY = -40;
+  let maxY = 40;
+  for (const node of placed) {
+    const right = Math.cos(node.angle) >= 0;
+    // Estimated rather than measured: nothing is in the document yet, and a label's width
+    // only has to be close enough that it is not clipped.
+    const width = node.notable ? labelWidth(node) : 0;
+    minX = Math.min(minX, node.x - 10 - (right ? 0 : width));
+    maxX = Math.max(maxX, node.x + 10 + (right ? width : 0));
+    minY = Math.min(minY, node.y - 12);
+    maxY = Math.max(maxY, node.y + 12);
+  }
+  const pad = 12;
+  const boxW = maxX - minX + pad * 2;
+  const boxH = maxY - minY + pad * 2;
+  const svg = elNS("svg", {
+    viewBox: `${minX - pad} ${minY - pad} ${boxW} ${boxH}`,
+    // Its natural size in pixels as well, so a user unit is a pixel and the labels render
+    // at the size they are set in. With only a viewBox the browser scales to the container,
+    // which made a four-device diagram twice life size and a forty-device one half.
+    width: Math.round(boxW),
+    height: Math.round(boxH),
+    role: "img",
+    "aria-label":
+      `${nodes.length} device${nodes.length === 1 ? "" : "s"}, each reaching the others ` +
+      `through a relay. ${nodes.filter((n) => n.faults).length} with something wrong.`,
+  });
+
+  const centre = 0;
+  const cy = 0;
+
+  // Spokes first, so nodes draw over them.
+  for (const node of placed) {
+    svg.append(elNS("line", {
+      x1: centre, y1: cy, x2: node.x, y2: node.y,
+      class: `spoke ${node.state}`,
+      "data-key": `spoke-${node.id}`,
+    }));
+  }
+
+  svg.append(
+    elNS("circle", { cx: centre, cy, r: 22, class: "hub", "data-key": "hub" }),
+    elNS("text", { x: centre, y: cy + 4, class: "hub-label", "data-key": "hub-label" }, "relay"),
+  );
+
+  for (const node of placed) {
+    const right = Math.cos(node.angle) >= 0;
+    svg.append(
+      elNS("circle", {
+        cx: node.x, cy: node.y, r: node.many ? 11 : node.notable ? 7 : 4,
+        class: `node ${node.state}${node.many ? " many" : ""}`,
+        "data-key": `node-${node.id}`,
+      }),
+    );
+    // A fault is marked as well as coloured, because colour is never the only signal.
+    if (node.faults > 0) {
+      svg.append(elNS("text", {
+        x: node.x, y: node.y + 4, class: "node-mark", "data-key": `mark-${node.id}`,
+      }, "!"));
+    }
+    if (node.notable) {
+      const label = node.carrying.length
+        ? `${node.name} · ${node.carrying.join(", ")}`
+        : node.name;
+      svg.append(elNS("text", {
+        x: node.x + (right ? 13 : -13),
+        y: node.y + 4,
+        class: `node-label ${right ? "" : "end"}`,
+        "data-key": `label-${node.id}`,
+      }, label));
+    }
+  }
+
+  return el(
+    "div",
+    { class: "panel topology", "data-key": "topology" },
+    svg,
+    el("p", { class: "note" },
+      "Every device reaches every other through a relay; nothing discovers a direct path " +
+      "yet (ADR-0002). " +
+      (summarised > 0
+        ? "Devices carrying a prefix or reporting a fault are drawn; the rest are counted."
+        : "Named devices are the ones carrying a prefix or reporting a fault.")),
+  );
+}
+
+/** Roughly how wide a label will be, for deciding the viewBox before anything is drawn. */
+function labelWidth(node) {
+  const text = node.carrying.length ? `${node.name} · ${node.carrying.join(", ")}` : node.name;
+  return text.length * 6 + 8;
+}
+
+/** How a device reads, in one word, for the diagram. */
+function deviceHealth(device) {
+  if ((device.faults || []).length > 0) return "bad";
+  if (!device.connected) return "warn";
+  return "ok";
+}
+
+/**
+ * el() for SVG, which needs its own namespace.
+ *
+ * Separate rather than a flag on el(): every caller of el() builds HTML, and a boolean that
+ * changes which document tree a node belongs to is the kind of argument somebody gets wrong
+ * once and then cannot find.
+ */
+function elNS(tag, attrs = {}, ...children) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === null || value === undefined || value === false) continue;
+    node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+/**
  * The policy, edited as a document (ADR-0032 §3).
  *
  * Text rather than a form. An access policy is something somebody composes, and a form that
@@ -930,6 +1138,7 @@ function renderOverview(data, networks, history) {
   update(
     renderNetworkBar(data, networks),
     renderVerdict(data, data.fault_count || 0),
+    renderTopology(data, devices),
 
     el("h2", { "data-key": "devices-heading" }, "Devices"),
     el(
@@ -1439,4 +1648,5 @@ export {
   renderPolicyTest,
   renderPolicyEditor,
   diffLines,
+  renderTopology,
 };

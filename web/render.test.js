@@ -235,3 +235,95 @@ test("two wholly different documents are summarised rather than compared", () =>
   const rows = diffLines(before, after);
   assert.ok(rows.some((r) => r.text.includes("lines replaced by")), "it tried the full compare");
 });
+
+// --- the network, as a picture ------------------------------------------------------------
+
+const { renderTopology } = await import("./app.js");
+
+/** A network of n devices, with the given indexes faulted and carrying. */
+function network(n, { faults = [], carrying = [] } = {}) {
+  const devices = Array.from({ length: n }, (_, i) => ({
+    membership_id: `m${i}`,
+    device_id: `d${i}`,
+    device_name: `dev${i}`,
+    state: "active",
+    connected: true,
+    faults: faults.includes(i) ? [{ message: "has not applied its configuration" }] : [],
+  }));
+  const data = {
+    route_groups: carrying.length
+      ? [{ slug: "office", advertisers: carrying.map((i) => ({ membership_id: `m${i}` })) }]
+      : [],
+  };
+  return { data, devices };
+}
+
+const drawOf = (n, opts) => {
+  const { data, devices } = network(n, opts);
+  return renderTopology(data, devices).querySelector("svg");
+};
+
+// The property that matters most. Everything relays (ADR-0002), so a line between two
+// devices would be a path that does not exist — the one thing a diagram of a network must
+// not draw. Every line here starts at the hub.
+test("no line joins two devices, because no such path exists", () => {
+  const svg = drawOf(8, { faults: [1], carrying: [0, 2] });
+  const hub = svg.querySelector("circle.hub");
+  const cx = Number(hub.getAttribute("cx"));
+  const cy = Number(hub.getAttribute("cy"));
+
+  const lines = [...svg.querySelectorAll("line")];
+  assert.ok(lines.length > 0, "nothing was drawn");
+  for (const line of lines) {
+    assert.equal(Number(line.getAttribute("x1")), cx, "a line does not start at the relay");
+    assert.equal(Number(line.getAttribute("y1")), cy, "a line does not start at the relay");
+  }
+});
+
+test("a small network draws every device", () => {
+  assert.equal(drawOf(6).querySelectorAll("circle.node").length, 6);
+});
+
+test("only devices worth naming are named", () => {
+  const svg = drawOf(6, { faults: [1], carrying: [0] });
+  const labels = [...svg.querySelectorAll(".node-label")].map((t) => t.textContent);
+  assert.equal(labels.length, 2, `labelled ${labels.join(", ")}`);
+  assert.ok(labels.some((l) => l.startsWith("dev1")), "the faulted device is not named");
+  assert.ok(labels.some((l) => l.includes("office")), "the carrier does not say what it carries");
+});
+
+// At the five hundred devices one overview carries, a ring of five hundred dots is three
+// pixels apart and answers nothing.
+test("a large network draws what matters and counts the rest", () => {
+  const svg = drawOf(500, { faults: [1], carrying: [0, 2] });
+  assert.equal(svg.querySelectorAll("circle.node.many").length, 1);
+  // Three notable devices and the one standing for everyone else.
+  assert.equal(svg.querySelectorAll("circle.node").length, 4);
+  const summary = [...svg.querySelectorAll(".node-label")].find((t) => t.textContent.includes("more"));
+  assert.ok(summary, "the devices not drawn are not accounted for");
+  assert.ok(summary.textContent.startsWith("497"), `said ${summary.textContent}`);
+});
+
+// Colour is never the only signal — a stated rule of this stylesheet, and a fault is the
+// one thing on the page somebody must not miss.
+test("a fault carries a mark as well as a colour", () => {
+  const svg = drawOf(6, { faults: [1] });
+  assert.equal(svg.querySelectorAll(".node-mark").length, 1);
+  assert.equal(svg.querySelector(".node-mark").textContent, "!");
+});
+
+test("the diagram is sized to what it drew, so its labels are never clipped", () => {
+  const svg = drawOf(6, { carrying: [0] });
+  const [x, y, w, h] = svg.getAttribute("viewBox").split(" ").map(Number);
+  assert.ok(w > 0 && h > 0);
+  // The width and height attributes carry the same size, so a user unit is a pixel and the
+  // text renders at the size it is set in rather than scaled to the container.
+  assert.equal(Number(svg.getAttribute("width")), Math.round(w));
+  assert.equal(Number(svg.getAttribute("height")), Math.round(h));
+});
+
+test("a network with no devices says so rather than drawing an empty ring", () => {
+  const panel = renderTopology({ route_groups: [] }, []);
+  assert.equal(panel.querySelector("svg"), null);
+  assert.match(panel.textContent, /no devices/i);
+});

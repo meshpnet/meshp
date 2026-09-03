@@ -323,3 +323,46 @@ ul.diff li { margin: 0; }
 ul.diff li.same { color: var(--muted); }
 ul.diff li.gone { color: var(--bad); }
 ul.diff li.new { color: var(--ok); }
+
+/* --- the network, as a picture ------------------------------------------------------ */
+
+/* Everything relays (ADR-0002), so this is a hub. It is drawn rather than described
+   because the shape of a network is the one thing a table cannot show, and because the hub
+   being visible is honest about why throughput is what it is. */
+.topology { padding: 8px 16px 14px; }
+/* Its natural size where there is room, scaled down where there is not. The width and
+   height attributes carry that size; this only stops it overflowing a narrow screen. */
+.topology svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+
+.topology .spoke { stroke: var(--line); stroke-width: 1.5; }
+.topology .spoke.bad { stroke: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+.topology .spoke.warn { stroke: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+
+.topology .hub { fill: var(--bg); stroke: var(--muted); stroke-width: 1.5; }
+.topology .hub-label {
+  text-anchor: middle;
+  fill: var(--muted);
+  font: 500 11px/1 var(--sans);
+}
+
+.topology .node { fill: var(--panel); stroke-width: 2; }
+.topology .node.ok { stroke: var(--ok); }
+.topology .node.warn { stroke: var(--warn); }
+.topology .node.bad { stroke: var(--bad); fill: var(--bad); }
+.topology .node.unknown { stroke: var(--unknown); }
+
+/* The mark, not only the colour. A reader who cannot see the red still sees the ! */
+.topology .node-mark {
+  text-anchor: middle;
+  fill: var(--panel);
+  font: 700 9px/1 var(--sans);
+}
+
+.topology .node-label {
+  fill: var(--ink);
+  font: 500 11px/1 var(--sans);
+  dominant-baseline: middle;
+}
+.topology .node-label.end { text-anchor: end; }
+/* One node standing for many, drawn as more than one thing. */
+.topology .node.many { fill: var(--bg); stroke-dasharray: 3 2; }
