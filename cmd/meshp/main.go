@@ -74,6 +74,16 @@ var commands = []command{
 		help: "Read and publish a network's access policy",
 		run:  cmdACL,
 	},
+	{
+		name: "dns", args: "<list|add|remove>",
+		help: "The names an administrator writes down, beyond the ones devices resolve",
+		run:  cmdDNS,
+	},
+	{
+		name: "token", args: "<list|create|revoke>",
+		help: "API tokens you hold, which is what 'meshp login' mints",
+		run:  cmdToken,
+	},
 }
 
 // lookup finds a command by name.

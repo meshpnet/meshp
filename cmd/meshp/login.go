@@ -44,7 +44,7 @@ func cmdLogin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	password, err := askForPassword()
+	password, err := askForPassword("use --token for a script")
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func cmdLogout(ctx context.Context, args []string) error {
 	fmt.Println("because a token may not revoke itself.")
 	fmt.Println("Press enter to skip.")
 
-	password, err := askForPassword()
+	password, err := askForPassword("use --local to forget it here without revoking it")
 	if err != nil || password == "" {
 		remainsValid(cred)
 		return nil
@@ -232,10 +232,12 @@ func askFor(label, given string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// askForPassword reads without echoing.
-func askForPassword() (string, error) {
+// `instead` says what a script should do, because that differs by caller: signing in has
+// --token, and managing tokens has nothing — the control plane will not let a token manage
+// tokens, which is the property that makes one revocable.
+func askForPassword(instead string) (string, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return "", errors.New("no terminal to ask for a password; use --token for a script")
+		return "", fmt.Errorf("no terminal to ask for a password; %s", instead)
 	}
 	fmt.Print("Password: ")
 	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
