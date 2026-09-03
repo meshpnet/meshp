@@ -1351,7 +1351,7 @@ function renderSignIn(message, options = {}) {
   show(
     el(
       "div",
-      { class: "panel" },
+      { class: "panel narrow" },
       el("h1", {}, "Sign in"),
       el(
         "p",
