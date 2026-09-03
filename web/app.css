@@ -271,3 +271,31 @@ button.quiet {
   color: var(--ink);
   cursor: pointer;
 }
+
+/* --- the policy editor ------------------------------------------------------------- */
+
+/* Monospace and roomy: this is a document somebody is reading for what it says, and JSON
+   read in a proportional font is JSON misread. */
+#acl-document {
+  display: block;
+  width: 100%;
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.7rem;
+  font: 0.85rem/1.5 var(--mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+/* The diff carries a mark as well as a colour, because colour is never the only signal. */
+ul.diff {
+  font: 0.85rem/1.45 var(--mono);
+  white-space: pre;
+  overflow-x: auto;
+}
+ul.diff li { margin: 0; }
+ul.diff li.same { color: var(--muted); }
+ul.diff li.gone { color: var(--bad); }
+ul.diff li.new { color: var(--ok); }

@@ -164,3 +164,74 @@ test("the dry-run addresses a device by its membership, which is what the route 
   const panel = renderPolicyTest([d]);
   assert.equal(panel.querySelector("option").value, d.membership_id);
 });
+
+// --- the policy editor --------------------------------------------------------------------
+
+const { renderPolicyEditor, diffLines } = await import("./app.js");
+
+test("the editor is absent for somebody who may not publish a policy", async () => {
+  await granting("network.devices.revoke");
+  assert.equal(renderPolicyEditor(), null);
+});
+
+test("the editor is a box holding the document, not a form describing it", async () => {
+  await granting("network.acl.write");
+  const panel = renderPolicyEditor();
+  const box = panel.querySelector("textarea#acl-document");
+  assert.ok(box, "there is no document to edit");
+  // Keyed, so a poll reconciles it rather than replacing the node somebody is typing into.
+  assert.equal(box.dataset.key, "acl-document");
+});
+
+test("a diff shows the line that changed and the ones around it", () => {
+  // Long enough that trimming matters: a real policy is dozens of lines and the change is
+  // one of them, so showing the document back is showing the box above again.
+  const lead = Array.from({ length: 20 }, (_, i) => `  "pad${i}": ${i},`).join("\n");
+  const rows = diffLines(`{\n${lead}\n  "comment": "old",\n  "rules": []\n}\n`,
+                         `{\n${lead}\n  "comment": "new",\n  "rules": []\n}\n`);
+  const marks = rows.map((r) => r.mark + r.text.trim());
+  assert.ok(marks.includes(`-"comment": "old",`), `no removal: ${marks.join(" | ")}`);
+  assert.ok(marks.includes(`+"comment": "new",`), `no addition: ${marks.join(" | ")}`);
+  assert.ok(rows.filter((r) => r.kind === "same").length <= 4,
+    `${rows.filter((r) => r.kind === "same").length} context lines from a 24-line document`);
+});
+
+test("a first policy is all additions", () => {
+  const rows = diffLines("", '{\n  "version": 1\n}\n');
+  assert.equal(rows.filter((r) => r.kind === "gone").length, 0);
+  assert.ok(rows.some((r) => r.kind === "new"));
+});
+
+test("an unchanged document produces no marks", () => {
+  const doc = '{\n  "version": 1\n}\n';
+  const rows = diffLines(doc, doc);
+  assert.equal(rows.filter((r) => r.kind !== "same").length, 0);
+});
+
+// A rule inserted in the middle must read as an insertion, not as everything below it
+// being rewritten — the same property the CLI's diff has, for the same reason.
+test("an insertion does not rewrite what follows", () => {
+  const rows = diffLines("a\nb\nc\nd\ne\n", "a\nb\nINSERTED\nc\nd\ne\n");
+  assert.equal(rows.filter((r) => r.kind === "gone").length, 0);
+  assert.equal(rows.filter((r) => r.kind === "new").length, 1);
+});
+
+// Two changes with unchanged lines between them, which trimming the ends cannot collapse.
+// Without matching by subsequence the middle reads as five lines replaced by five rather
+// than as two lines that moved — and the test above cannot tell, because one change at the
+// edge is trimmed away before the subsequence is reached.
+test("lines between two changes are recognised rather than rewritten", () => {
+  const rows = diffLines("a\nb\nc\nd\ne\nf\ng\n", "a\nX\nc\nd\ne\nY\ng\n");
+  const gone = rows.filter((r) => r.kind === "gone").map((r) => r.text);
+  const added = rows.filter((r) => r.kind === "new").map((r) => r.text);
+  assert.deepEqual(gone, ["b", "f"], `removed ${gone.join(",")}`);
+  assert.deepEqual(added, ["X", "Y"], `added ${added.join(",")}`);
+});
+
+// The subsequence is O(n*m) over text somebody is typing into, so it is bounded.
+test("two wholly different documents are summarised rather than compared", () => {
+  const before = Array.from({ length: 500 }, (_, i) => `old ${i}`).join("\n");
+  const after = Array.from({ length: 500 }, (_, i) => `new ${i}`).join("\n");
+  const rows = diffLines(before, after);
+  assert.ok(rows.some((r) => r.text.includes("lines replaced by")), "it tried the full compare");
+});

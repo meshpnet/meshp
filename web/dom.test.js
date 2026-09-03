@@ -165,3 +165,21 @@ test("the picker keeps naming the network on screen", () => {
   assert.deepEqual([...live.options].map((o) => o.value), ["one", "two"]);
   assert.equal(live.value, "two");
 });
+
+test("a textarea keeps what somebody typed into it", () => {
+  // Its text is a child node, so a render that redraws the panel would otherwise reconcile
+  // it back to whatever the page last decided it should be — every few seconds, under
+  // somebody's cursor.
+  const live = el("textarea", { "data-key": "policy" }, "original");
+  live.value = "half a sentence somebody is still writing";
+
+  morph(live, el("textarea", { "data-key": "policy" }, "half a sentence somebody is still writing"));
+  assert.equal(live.value, "half a sentence somebody is still writing");
+});
+
+test("a textarea does take a value the page deliberately changed", () => {
+  const live = el("textarea", { "data-key": "policy" }, "old");
+  live.value = "old";
+  morph(live, el("textarea", { "data-key": "policy" }, "loaded from the control plane"));
+  assert.equal(live.value, "loaded from the control plane");
+});

@@ -71,6 +71,11 @@ function wanted(nodes) {
 // spread through twenty renderers. It is deliberately not a framework: it has no components,
 // no state and no lifecycle, and it is only ever called with a tree somebody just built.
 
+/** Whether this element's current contents live in a property rather than in its markup. */
+function holdsAValue(node) {
+  return node.tagName === "SELECT" || node.tagName === "TEXTAREA";
+}
+
 /** What identifies a node between renders, where its position is not enough. */
 function keyOf(node) {
   return node.nodeType === Node.ELEMENT_NODE ? node.getAttribute("data-key") : null;
@@ -109,14 +114,19 @@ function morph(live, next) {
   for (const attr of [...live.attributes]) {
     if (!next.hasAttribute(attr.name)) live.removeAttribute(attr.name);
   }
-  // Which option is selected is a property, not an attribute, so the loop above cannot see
-  // it, and without it the picker would go on naming the network somebody navigated away
-  // from. Read before the children are reconciled, not after: morphChildren() takes nodes
-  // out of `next` as it uses them, so by the time it returns `next` no longer holds the
-  // option this is asking about.
-  const chosen = live.tagName === "SELECT" ? next.value : null;
+  // What a control currently holds is a property, not an attribute, so the loop above
+  // cannot see it — without this the picker would go on naming the network somebody
+  // navigated away from, and a textarea would keep whatever text it was first drawn with.
+  //
+  // Read before the children are reconciled, not after: morphChildren() takes nodes out of
+  // `next` as it uses them, so by the time it returns `next` no longer holds the option
+  // this is asking about. A textarea's text is its child, which is the same problem.
+  //
+  // Assigned only when it differs. A textarea is a thing somebody types into, and writing
+  // the same string back would move their cursor to the end every few seconds.
+  const held = holdsAValue(live) ? next.value : null;
   morphChildren(live, next);
-  if (chosen !== null && live.value !== chosen) live.value = chosen;
+  if (held !== null && live.value !== held) live.value = held;
 }
 
 /**
@@ -173,4 +183,4 @@ function morphChildren(live, next) {
   }
 }
 
-export { el, wanted, keyOf, isTransient, comparable, morph, morphChildren };
+export { el, wanted, keyOf, isTransient, comparable, morph, morphChildren, holdsAValue };

@@ -30,7 +30,8 @@ IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("a" * 8, i) for i, n in enumerate
 DEVICE_IDS = {n: "%s-0000-0000-0000-00000000000%d" % ("d" * 8, i) for i, n in enumerate(NAMES)}
 
 state = {"fault": None, "rename": {}, "revoked": [], "forgotten": [], "tick": 0,
-         "fail_mint": False, "slow_mint": 0, "acl_fault": False}
+         "fail_mint": False, "slow_mint": 0, "acl_fault": False,
+         "policy": None, "policy_version": 0}
 lock = threading.Lock()
 
 
@@ -115,6 +116,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"permissions": [], "unlimited": True})
             if path == "/api/v1/networks":
                 return self.send_json(NETWORKS)
+            if path.endswith("/acl"):
+                # A network with no policy answers 404, which is a state rather than a
+                # failure — the page has to tell those apart.
+                if state["policy"] is None:
+                    return self.send_json({"error": "no_policy",
+                                           "message": "this network has no policy"}, 404)
+                return self.send_json({"version": state["policy_version"],
+                                       "created_at": "2026-09-02T00:00:00Z",
+                                       "document": state["policy"]})
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         try:
             with open(os.path.join(ROOT, name), "rb") as fh:
@@ -170,6 +180,25 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(state["slow_mint"])
             return self.send_json({"token": "mp_" + "k" * 40})
         self.send_json({"error": "not_found"}, 404)
+
+    def do_PUT(self):
+        raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        path = urlparse(self.path).path
+        if not path.endswith("/acl"):
+            return self.send_json({"error": "not_found"}, 404)
+        with lock:
+            if state["acl_fault"]:
+                # The control plane's own words, which is what the page shows verbatim.
+                return self.send_json({"error": "invalid_policy",
+                                       "message": "rule 0: names ports with protocol \"icmp\""}, 400)
+            try:
+                state["policy"] = json.loads(raw or b"{}")
+            except ValueError:
+                return self.send_json({"error": "invalid_policy",
+                                       "message": "that is not JSON"}, 400)
+            state["policy_version"] += 1
+            return self.send_json({"status": "published",
+                                   "version": state["policy_version"]})
 
     def do_DELETE(self):
         path = urlparse(self.path).path
