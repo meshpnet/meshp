@@ -522,7 +522,7 @@ function renderPolicyEditor() {
   const box = el("textarea", {
     id: "acl-document",
     "data-key": "acl-document",
-    rows: 14,
+    rows: 10,
     spellcheck: "false",
   }, policyText ?? "");
   box.addEventListener("input", () => {
@@ -580,7 +580,6 @@ function renderPolicyEditor() {
   return el(
     "div",
     { class: "panel", "data-key": "acl-editor" },
-    el("h3", {}, "Access policy"),
     policyLive === null
       ? el("p", { class: "note" },
           "This network has no policy, so every device may reach every other. " +
@@ -766,15 +765,32 @@ function renderPolicyTest(devices) {
 
   return el(
     "div",
-    { class: "panel", "data-key": "acl-test" },
-    el("h3", {}, "Access policy"),
-    el("p", { class: "note" },
-      "What the control plane would send this device, compiled from the policy in force."),
+    { class: "row", "data-key": "acl-test" },
+    el("label", { class: "note", for: "acl-test-device" }, "Compile it for"),
     picker,
-    " ",
     button,
     policyTest ? renderPolicyResult() : null,
   );
+}
+
+/**
+ * The policy, and the two things somebody does with it.
+ *
+ * One panel because it is one job: the document is edited and then checked against a
+ * device, and splitting them put the same heading on the page twice with a card boundary
+ * between two halves of the same sentence.
+ */
+function renderPolicy(devices) {
+  const editor = renderPolicyEditor();
+  if (editor === null) {
+    return el("div", { class: "panel note", "data-key": "acl" },
+      "You may not change this network's policy.");
+  }
+  // The dry-run inside the same panel, under a rule: it is the last step of publishing,
+  // not a separate feature.
+  const test = renderPolicyTest(devices);
+  if (test !== null) editor.append(test);
+  return editor;
 }
 
 /** The compiled filter, in the prefixes a device enforces rather than the tags somebody wrote. */
@@ -849,8 +865,7 @@ function renderAddDevice() {
 
   return el(
     "div",
-    { class: "panel", "data-key": "add-device" },
-    el("h3", {}, "Add a device"),
+    { class: mintedToken ? "panel" : "panel slim", "data-key": "add-device" },
     button,
     mintedToken ? renderMintedToken() : null,
   );
@@ -905,17 +920,18 @@ function renderOverview(data, networks, history) {
 
   // Keyed section by section, so that a panel which comes and goes — the one that mints a
   // token exists only for somebody who may mint one — moves nothing else on the page.
+  // Ordered by what somebody came for. The verdict answers the question the page exists to
+  // answer; the devices are what they look at next; the things that change the network come
+  // after the things that describe it, and the trail is last because it is history.
+  //
+  // A heading owns what follows it. "Devices" used to sit above three panels that were not
+  // devices, with the table below them — which is the sort of thing that reads as a page
+  // nobody laid out.
   update(
     renderNetworkBar(data, networks),
     renderVerdict(data, data.fault_count || 0),
-    el("h2", { "data-key": "carried-heading" }, "What is carried, and by what"),
-    data.route_groups.length
-      ? el("div", { "data-key": "groups" }, data.route_groups.map(renderGroup))
-      : el("div", { class: "panel note", "data-key": "groups" }, "This network has no route groups."),
+
     el("h2", { "data-key": "devices-heading" }, "Devices"),
-    renderAddDevice(),
-    renderPolicyEditor(),
-    renderPolicyTest(devices),
     el(
       "div",
       { class: "panel", "data-key": "devices" },
@@ -928,6 +944,16 @@ function renderOverview(data, networks, history) {
           )
         : null,
     ),
+    renderAddDevice(),
+
+    el("h2", { "data-key": "carried-heading" }, "What is carried, and by what"),
+    data.route_groups.length
+      ? el("div", { "data-key": "groups" }, data.route_groups.map(renderGroup))
+      : el("div", { class: "panel note", "data-key": "groups" }, "This network has no route groups."),
+
+    el("h2", { "data-key": "policy-heading" }, "Access policy"),
+    renderPolicy(devices),
+
     el("h2", { "data-key": "history-heading" }, "What has happened"),
     renderHistory(history),
   );
@@ -1006,7 +1032,7 @@ function renderNetworkBar(data, networks) {
 
   return el(
     "div",
-    { class: "panel picker", "data-key": "picker" },
+    { class: "panel slim picker", "data-key": "picker" },
     el("label", { for: "network" }, "Network"),
     select,
     el("span", { class: "note" }, `state version ${data.network.state_version}`),
