@@ -86,6 +86,12 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 /* A panel holding one control does not need to look like a section. */
 .panel.slim { padding: 10px 16px; }
 
+/* A form is read down a column, not across a screen. Sign-in spanning the full width of a
+   desktop put a password field a thousand pixels wide, which is the first thing anybody
+   sees of this control plane. */
+.panel.narrow { max-width: 420px; margin-left: auto; margin-right: auto; }
+.panel.narrow input { width: 100%; min-width: 0; }
+
 h1 { font-size: 20px; margin: 0 0 4px; }
 h2 {
   font-size: 13px;
