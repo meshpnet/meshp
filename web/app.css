@@ -79,13 +79,26 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 16px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
 }
 
+/* A panel holding one control does not need to look like a section. */
+.panel.slim { padding: 10px 16px; }
+
 h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 15px; margin: 24px 0 10px; color: var(--muted); font-weight: 600; }
+h2 {
+  font-size: 13px;
+  margin: 28px 0 10px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+h2:first-of-type { margin-top: 22px; }
+h3 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
 p { margin: 0 0 12px; }
+p:last-child { margin-bottom: 0; }
 
 code, .mono { font-family: var(--mono); font-size: 13px; }
 
@@ -96,6 +109,7 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
   gap: 10px;
   flex-wrap: wrap;
   border-left: 4px solid var(--ok);
+  padding: 18px 20px;
 }
 .verdict.problems { border-left-color: var(--bad); }
 .verdict h1 { font-size: 22px; }
@@ -105,8 +119,8 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
  * device carries which prefixes is a relationship and reads badly as rows. */
 .group {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 2fr;
-  gap: 16px;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 24px;
   align-items: start;
 }
 @media (max-width: 700px) {
@@ -170,22 +184,35 @@ form.signin { display: flex; flex-direction: column; gap: 2px; align-items: stre
 form.signin button.primary { margin-top: 14px; align-self: flex-start; }
 input[type="password"], input[type="email"], input[type="text"], select {
   font: inherit;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg);
   color: var(--ink);
-  min-width: 260px;
 }
-button.primary {
+input[type="password"], input[type="email"], input[type="text"] { min-width: 260px; }
+
+/* Controls that belong on one line, wrapping rather than overflowing on a phone. */
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.row > .result { flex-basis: 100%; }
+button {
   font: inherit;
-  padding: 8px 14px;
-  border: 1px solid transparent;
+  padding: 7px 13px;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--ink);
-  color: var(--panel);
+  background: var(--panel);
+  color: var(--ink);
   cursor: pointer;
 }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+button.primary {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--panel);
+}
+button.primary:hover:not(:disabled) { opacity: 0.85; }
 .error { color: var(--bad); }
 
 .picker { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -218,13 +245,10 @@ th.actions {
 }
 
 button.danger {
-  background: transparent;
-  border: 1px solid var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
   color: var(--bad);
-  border-radius: 4px;
-  padding: 0.2rem 0.6rem;
-  font: inherit;
-  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 13px;
 }
 
 button.danger:hover:not(:disabled) {
