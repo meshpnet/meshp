@@ -97,6 +97,15 @@ on a real screen rather than about what a reconciler does to a tree.
    minted token does: every render describes the whole page, so an answer held only in the
    DOM goes at the next poll — which is a second or two after somebody starts reading it.*
 
+10. **Typing survives the page redrawing itself.** In *Access policy*, change a line in the
+    document and leave it. The poll keeps landing — the header counts up — and what you
+    typed is still there, with the cursor where you left it. Then `POST /fixture` with
+    `{"acl_fault":true}` and publish: the control plane's own reason appears above the
+    button, verbatim, rather than a message this page wrote. *The text lives in the page's
+    state rather than in the node it was drawn into; a textarea's contents are a property
+    the attribute loop cannot see, which is the same reason the network picker needed
+    handling.*
+
 ## Note on running this
 
 The fixture sends `cache-control: no-store`, so an edit to `app.js` is picked up by a reload.

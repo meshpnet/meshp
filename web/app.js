@@ -59,6 +59,18 @@ let shownFor = null;
  */
 let policyTest = null;
 
+/**
+ * The policy as it is being edited, and the one the control plane holds.
+ *
+ * `policyText` is what is in the box, so a poll redrawing the panel draws what somebody has
+ * typed rather than what the network last published. `policyLive` is what to diff against
+ * and what tells the difference between "no changes" and "no policy".
+ */
+let policyText = null;
+let policyLive = null;
+/** What the control plane said when it refused the last document, shown verbatim. */
+let policyError = null;
+
 /** Last successful overview, kept so a failed poll can keep showing it — marked stale. */
 let lastGood = null;
 /** What was rendered beside it, so the page can redraw itself without polling again. */
@@ -492,6 +504,188 @@ function forgetButton(device, organizationID) {
 }
 
 /**
+ * The policy, edited as a document (ADR-0032 §3).
+ *
+ * Text rather than a form. An access policy is something somebody composes, and a form that
+ * reconstructed it from checkboxes would be a second grammar for the same thing — one that
+ * can express less than the document does and gets the rest subtly wrong. What is stored is
+ * what is reviewed.
+ *
+ * Nothing here decides whether a policy is valid. The control plane parses it, and asking is
+ * a dry-run: the same call that shows what a device would enforce refuses a document it
+ * cannot compile, with the reason. A page holding its own opinion of what a policy means
+ * would be a second implementation of the thing that decides who can reach what.
+ */
+function renderPolicyEditor() {
+  if (!may("network.acl.write")) return null;
+
+  const box = el("textarea", {
+    id: "acl-document",
+    "data-key": "acl-document",
+    rows: 14,
+    spellcheck: "false",
+  }, policyText ?? "");
+  box.addEventListener("input", () => {
+    // Into module state, so the next poll redraws what is being typed rather than replacing
+    // it with what the network published.
+    policyText = box.value;
+    policyError = null;
+    renderFromLastGood();
+  });
+
+  const changed = policyText !== null && policyText !== policyLive;
+
+  const publish = el(
+    "button",
+    { class: "primary", type: "button", disabled: !changed },
+    policyLive === null ? "Publish the first policy" : "Publish",
+  );
+  publish.addEventListener("click", () => {
+    const document_ = policyText;
+    if (!window.confirm(
+      policyLive === null
+        ? "Publish this? Everything it does not permit stops being reachable."
+        : "Publish this policy? Every device in the network is told immediately.",
+    )) {
+      return;
+    }
+    act(publish, async () => {
+      try {
+        await api(`/api/v1/networks/${encodeURIComponent(currentNetworkID())}/acl`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: document_,
+        });
+      } catch (err) {
+        // The control plane's own words. "rule 3: names ports with protocol icmp" is the
+        // difference between fixing a policy and guessing at it, and it is the one place
+        // where a detailed error is the whole value.
+        policyError = reason(err);
+        renderFromLastGood();
+        throw err;
+      }
+      // Both cleared so the refresh below reads them back from the control plane.
+      //
+      // A policy is stored parsed, so what comes back is canonical however it was typed —
+      // and keeping the typed text while the live copy became canonical left the editor
+      // reporting changes to a document it had just published. The same disagreement the
+      // CLI's diff had, arriving from the other side.
+      policyText = null;
+      policyLive = null;
+      policyError = null;
+      policyTest = null;
+    }, { refresh: true });
+  });
+
+  return el(
+    "div",
+    { class: "panel", "data-key": "acl-editor" },
+    el("h3", {}, "Access policy"),
+    policyLive === null
+      ? el("p", { class: "note" },
+          "This network has no policy, so every device may reach every other. " +
+          "Publishing one makes everything it does not permit unreachable.")
+      : null,
+    box,
+    policyError ? el("p", { class: "error" }, policyError) : null,
+    changed ? renderPolicyDiff() : el("p", { class: "note" }, "No changes."),
+    publish,
+  );
+}
+
+/** What publishing would change, line by line. */
+function renderPolicyDiff() {
+  const rows = diffLines(policyLive ?? "", policyText ?? "");
+  return el(
+    "div",
+    { class: "result", "data-key": "acl-diff" },
+    el("div", { class: "note" }, "Changes"),
+    el(
+      "ul",
+      { class: "faults diff" },
+      rows.map((row, i) =>
+        el("li", { class: row.kind, "data-key": `d-${i}` }, `${row.mark} ${row.text}`),
+      ),
+    ),
+  );
+}
+
+/**
+ * A line diff, showing only what moved and the lines around it.
+ *
+ * The shared ends are trimmed first, so an edit to one rule is a handful of lines however
+ * long the document is — and the middle is capped, because the subsequence below is O(n*m)
+ * over text somebody is typing into.
+ */
+function diffLines(before, after) {
+  const split = (s) => (s === "" ? [] : s.replace(/\n$/, "").split("\n"));
+  let old = split(before);
+  let next = split(after);
+
+  const head = [];
+  const tail = [];
+  while (old.length && next.length && old[0] === next[0]) {
+    head.push(old.shift());
+    next.shift();
+  }
+  while (old.length && next.length && old[old.length - 1] === next[next.length - 1]) {
+    tail.unshift(old.pop());
+    next.pop();
+  }
+
+  const rows = [];
+  // Only the last few unchanged lines before the change, and the first few after: the rest
+  // is a document somebody can already see in the box above.
+  for (const text of head.slice(-2)) rows.push({ mark: " ", kind: "same", text });
+
+  if (old.length > 400 || next.length > 400) {
+    rows.push({ mark: "…", kind: "same", text: `${old.length} lines replaced by ${next.length}` });
+  } else {
+    const common = commonLines(old, next);
+    let i = 0;
+    let j = 0;
+    for (const line of common) {
+      while (i < old.length && old[i] !== line) rows.push({ mark: "-", kind: "gone", text: old[i++] });
+      while (j < next.length && next[j] !== line) rows.push({ mark: "+", kind: "new", text: next[j++] });
+      rows.push({ mark: " ", kind: "same", text: line });
+      i++;
+      j++;
+    }
+    for (; i < old.length; i++) rows.push({ mark: "-", kind: "gone", text: old[i] });
+    for (; j < next.length; j++) rows.push({ mark: "+", kind: "new", text: next[j] });
+  }
+
+  for (const text of tail.slice(0, 2)) rows.push({ mark: " ", kind: "same", text });
+  return rows;
+}
+
+/** The longest common subsequence of two line lists. */
+function commonLines(a, b) {
+  const table = Array.from({ length: a.length + 1 }, () => new Int32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] =
+        a[i] === b[j]
+          ? table[i + 1][j + 1] + 1
+          : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const out = [];
+  for (let i = 0, j = 0; i < a.length && j < b.length; ) {
+    if (a[i] === b[j]) {
+      out.push(a[i]);
+      i++;
+      j++;
+    } else if (table[i + 1][j] >= table[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return out;
+}
+
+/**
  * What a device would enforce, asked of the control plane rather than worked out here.
  *
  * A policy is written in selectors and what reaches a device is a packet filter in
@@ -524,15 +718,41 @@ function renderPolicyTest(devices) {
     // device chosen is whatever the picker says now.
     const membershipID = picker.value;
     policyTest = null;
+
+    // The body has to be JSON to carry a document, so text that is not JSON cannot be sent
+    // at all. Said here rather than as a failed request, because this is the one class of
+    // mistake the page can name without asking.
+    let proposed;
+    if (policyText !== null && policyText !== policyLive) {
+      try {
+        proposed = JSON.parse(policyText);
+      } catch (err) {
+        policyError = `That is not JSON yet: ${err.message}`;
+        renderFromLastGood();
+        return;
+      }
+    }
+
     act(button, async () => {
       const body = await api(
         `/api/v1/networks/${encodeURIComponent(currentNetworkID())}/acl/test`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ device: membershipID }),
+          // The document being edited, not the one in force. Checking what is live is
+        // available by not having changed anything; checking what you are about to publish
+        // is the question worth asking.
+        // The document being edited, not the one in force. Checking what is live is
+        // available by not having changed anything; checking what you are about to publish
+        // is the question worth asking.
+        body: JSON.stringify(
+          proposed === undefined
+            ? { device: membershipID }
+            : { device: membershipID, document: proposed },
+        ),
         },
       );
+      policyError = null;
       policyTest = {
         membershipID,
         device: body.device,
@@ -694,6 +914,7 @@ function renderOverview(data, networks, history) {
       : el("div", { class: "panel note", "data-key": "groups" }, "This network has no route groups."),
     el("h2", { "data-key": "devices-heading" }, "Devices"),
     renderAddDevice(),
+    renderPolicyEditor(),
     renderPolicyTest(devices),
     el(
       "div",
@@ -954,6 +1175,35 @@ async function fetchHistory(networkID) {
  * anything is worse off than before this slice; somebody staring at an error where the
  * network used to be is worse off than that.
  */
+/**
+ * Reads the policy in force, once for the network being shown.
+ *
+ * A failure leaves the editor empty rather than guessing: an editor pre-filled with a
+ * document the control plane did not send is one somebody could publish believing it was
+ * already live.
+ */
+async function fetchPolicy(networkID) {
+  if (!may("network.acl.write")) return;
+  try {
+    const body = await api(`/api/v1/networks/${encodeURIComponent(networkID)}/acl`);
+    policyLive = JSON.stringify(body.document, null, 2) + "\n";
+  } catch (err) {
+    // A network with no policy is unfiltered, which is a state rather than a failure.
+    policyLive = err.status === 404 ? null : policyLive;
+  }
+  if (policyText === null) policyText = policyLive ?? starterPolicy;
+}
+
+/** What an editor offers a network that has none: deny nothing, written out. */
+const starterPolicy = `{
+  "version": 1,
+  "comment": "Every device may reach every other. Narrow this.",
+  "rules": [
+    { "src": ["*"], "dst": ["*"], "protocol": "any" }
+  ]
+}
+`;
+
 async function fetchPermissions(networkID) {
   try {
     const body = await api(`/api/v1/me/permissions?network=${encodeURIComponent(networkID)}`);
@@ -1082,10 +1332,19 @@ async function start() {
   // is already reading — and never present-then-absent, which would be worse.
   await fetchPermissions(networkID);
   if (networkID !== shownFor) {
-    // A token minted for one network must not still be on screen while another is shown.
+    // A token minted for one network must not still be on screen while another is shown,
+    // and neither must a policy: an editor holding one network's document while another is
+    // named above it is one publish away from the wrong network.
     mintedToken = null;
+    policyText = null;
+    policyLive = null;
+    policyError = null;
+    policyTest = null;
     shownFor = networkID;
   }
+  // Once per network rather than per poll, like the permissions above: a policy changes
+  // rarely, and re-reading it every few seconds would overwrite what somebody is typing.
+  await fetchPolicy(networkID);
   poll(networkID, networks);
 }
 
@@ -1129,6 +1388,9 @@ export function bootstrap() {
     mintedToken = null;
     shownFor = null;
     policyTest = null;
+    policyText = null;
+    policyLive = null;
+    policyError = null;
     renderFreshness(null);
     renderSignIn("Signed out.");
   });
@@ -1149,4 +1411,6 @@ export {
   may,
   fetchPermissions,
   renderPolicyTest,
+  renderPolicyEditor,
+  diffLines,
 };
