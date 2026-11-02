@@ -412,28 +412,49 @@ func TestANamedPortIsAskedForOnce(t *testing.T) {
 
 // Neither socket is left behind when the other cannot be had. A leaked listener would hold a
 // port for the life of the daemon and be invisible, since nothing has a handle on it.
+//
+// The setup needs a UDP port whose TCP number is free, and nothing in a test can keep a port
+// free from everybody else. With every package's tests binding ephemeral ports at once, the
+// TCP number is sometimes already held, and then bindPair fails on the TCP half instead —
+// never reaching the path under test — and the final Listen fails for a reason that has
+// nothing to do with this code. That is how this test failed once in CI.
+//
+// So an attempt counts only when it was the UDP half that was refused, and there are a few.
+// Retrying cannot hide a leak: a TCP half left open fails every attempt, on every port.
 func TestAHalfBoundPairIsClosed(t *testing.T) {
-	busyUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = busyUDP.Close() }()
-	port := busyUDP.LocalAddr().(*net.UDPAddr).AddrPort()
+	const attempts = 5
+	var last error
+	for range attempts {
+		busyUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := busyUDP.LocalAddr().(*net.UDPAddr).AddrPort()
 
-	// TCP on that number is free, so bindPair takes it and then cannot have the UDP half.
-	udp, tcp, err := bindPair(port)
-	if err == nil {
-		_ = udp.Close()
-		_ = tcp.Close()
-		t.Fatal("bindPair succeeded on a port already held for UDP")
-	}
+		udp, tcp, err := bindPair(port)
+		if err == nil {
+			_ = udp.Close()
+			_ = tcp.Close()
+			_ = busyUDP.Close()
+			t.Fatal("bindPair succeeded on a port already held for UDP")
+		}
+		if op := (*net.OpError)(nil); !errors.As(err, &op) || op.Net != "udp" {
+			// Somebody else holds the TCP number, so this attempt tested nothing.
+			_ = busyUDP.Close()
+			last = err
+			continue
+		}
 
-	// If the TCP half had been leaked, this could not take the same port.
-	again, err := net.Listen("tcp", port.String())
-	if err != nil {
-		t.Fatalf("the TCP half was left behind: %v", err)
+		// If the TCP half had been leaked, this could not take the same port.
+		again, err := net.Listen("tcp", port.String())
+		_ = busyUDP.Close()
+		if err == nil {
+			_ = again.Close()
+			return
+		}
+		last = err
 	}
-	_ = again.Close()
+	t.Fatalf("the TCP half was left behind, or no port could be tested in %d attempts: %v", attempts, last)
 }
 
 // Serve on a server that never bound returns rather than blocking, so a caller that ignored
