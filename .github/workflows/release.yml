@@ -18,6 +18,11 @@ on:
       # install path did not run the install path. The same mistake the header above
       # describes, one level further in.
       - "scripts/install-test.sh"
+      # What signs a release and what checks it before publishing (ADR-0035), and the page
+      # that publishes the key install.sh carries — a change to the key that touches only one
+      # of the two is exactly the change that has to be caught.
+      - "scripts/release-signature.sh"
+      - "SECURITY.md"
       - "deploy/systemd/**"
       - ".go-version"
       - "Makefile"
@@ -117,12 +122,13 @@ jobs:
 
       # The install script, run rather than reviewed. It is the first thing anyone touches
       # and the only piece of this repository that a stranger executes as root, so "it looks
-      # right" is not enough — this builds a release, serves it, installs from it, and then
-      # corrupts it and requires the install to be refused.
-      - name: the install path works, and refuses a tampered archive
+      # right" is not enough — this builds a release, signs it with a key made up for the
+      # purpose, serves it, installs from it, and then damages the archive, the checksums and
+      # the signature in turn and requires each install to be refused.
+      - name: the install path works, and refuses a tampered archive, checksum file or signature
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq python3 curl
+          sudo apt-get install -y -qq python3 curl openssl
           sudo -E env "PATH=$PATH" ./scripts/install-test.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -131,32 +137,157 @@ jobs:
           path: dist/
           retention-days: 7
 
+  # The same test on a Mac, because "install.sh checks the signature with what is already on
+  # the machine" is a claim about macOS's openssl as much as Linux's — and macOS ships
+  # LibreSSL, which is not OpenSSL and lacks things OpenSSL has (Ed25519 among them, which is
+  # why the key is P-256; ADR-0035). Reasoning about which commands LibreSSL accepts would
+  # leave the first person on a Mac to find out, so this asks it.
+  install-macos:
+    name: the install path on macOS, with the openssl macOS ships
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: the install path works, and refuses what it should
+        run: |
+          set -euo pipefail
+          # The system's own tools first. The runner has Homebrew's OpenSSL on its PATH, and a
+          # pass against that would prove something about a machine nobody installs on.
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+          test "$(command -v openssl)" = /usr/bin/openssl \
+            || { echo "openssl is $(command -v openssl), not the system's"; exit 1; }
+          openssl version | grep -q LibreSSL \
+            || { openssl version; echo "expected the LibreSSL macOS ships"; exit 1; }
+          sudo -E env "PATH=$PATH" ./scripts/install-test.sh
+
+  # Signing, in a job that can sign and cannot publish. The key is a secret of the `release`
+  # environment, which is restricted to v* tags, so neither a pull request nor a pushed branch
+  # can reach it however the workflow is edited, and which waits for the maintainer to approve
+  # the run, because a tag can be pushed by anything that can write here. This job holds
+  # `contents: read`, so a step in it that went bad still could not put up a release
+  # (ADR-0035).
+  sign:
+    name: sign and attest the release
+    needs: [build, install-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # the short-lived Sigstore certificate the attestation is signed with
+      attestations: write
+    steps:
+      # For scripts/: the signing script, and install.sh at this tag, whose key the signature
+      # has to verify against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+
+      # Refuses if the secret is not set. There is no unsigned path out of this workflow: a
+      # release install.sh cannot verify is one it will not install, so it is not published.
+      - name: sign the checksums
+        env:
+          MESHP_RELEASE_SIGNING_KEY: ${{ secrets.MESHP_RELEASE_SIGNING_KEY }}
+        run: ./scripts/release-signature.sh sign dist
+
+      # Against the key install.sh carries at this tag rather than one derived from the secret,
+      # so a secret that does not match the published key fails here and not on the first
+      # person to install.
+      - name: the signature verifies with the key install.sh carries
+        run: ./scripts/release-signature.sh verify dist
+
+      # Provenance anyone can check with `gh attestation verify`: which repository, workflow
+      # and commit built each file, recorded in Sigstore's public transparency log. No key to
+      # keep, and the weaker statement of the two — it says this workflow built the file, not
+      # that anybody meant to release it — which is why it is here beside the signature rather
+      # than instead of it.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signature
+          path: dist/SHA256SUMS.sig
+          retention-days: 7
+
+  # Publishing, in a job that can publish and cannot sign: no secret, no OIDC token.
   publish:
     name: publish the release
-    needs: build
+    needs: sign
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signature
+          path: dist
+
+      # Again, here, immediately before anything is published: the files this job is about to
+      # upload are the ones that were signed, the signature is install.sh's key's, and every
+      # file on the release is covered by it.
+      - name: what is about to be published is signed with the key install.sh carries
+        run: ./scripts/release-signature.sh verify dist
 
       - name: create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The generated notes, and after them how to check what they describe. Appended
+          # rather than passed with --notes, which would put it above the release itself.
+          notes="$(mktemp)"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${GITHUB_REF_NAME}" --jq .body > "$notes"
+          cat >> "$notes" <<EOF
+
+          ## Verifying this release
+
+          \`SHA256SUMS\` is signed with the meshp release key (\`SHA256SUMS.sig\`), and every
+          archive carries a build provenance attestation. \`install.sh\` checks the signature
+          before it unpacks anything. To check a download by hand, with the key from
+          SECURITY.md saved as \`meshp-release.pub\`:
+
+          \`\`\`sh
+          openssl dgst -sha256 -verify meshp-release.pub -signature SHA256SUMS.sig SHA256SUMS
+          sha256sum --ignore-missing -c SHA256SUMS
+          gh attestation verify meshp_${GITHUB_REF_NAME}_linux_amd64.tar.gz --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml \\
+            --source-ref refs/tags/${GITHUB_REF_NAME}
+          \`\`\`
+
+          The key, its fingerprint and what each check does and does not prove:
+          https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/SECURITY.md#verifying-a-release
+          EOF
           # Everything before v1.0.0 publishes as a pre-release, which is what keeps
           # /releases/latest empty. install.sh reads that endpoint and refuses rather than
           # installing something this project does not yet offer as ready.
           args=(
             --repo "${GITHUB_REPOSITORY}"
             --title "${GITHUB_REF_NAME}"
-            --generate-notes
+            --notes-file "$notes"
             --verify-tag
           )
           case "${GITHUB_REF_NAME}" in
