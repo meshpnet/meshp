@@ -209,6 +209,10 @@ type Client struct {
 	// connected is the exact failure this project keeps guarding against: a device that
 	// looks healthy and is not.
 	establishedAt time.Time
+
+	// clk is what notices this machine slept (wake.go). Replaced only by tests, and only
+	// before the client runs.
+	clk clocks
 }
 
 // New returns a Client.
@@ -219,7 +223,7 @@ func New(opts Options) *Client {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: dialTimeout}
 	}
-	c := &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, state: peerset.New()}
+	c := &Client{opts: opts, log: opts.Log, httpc: opts.HTTPClient, state: peerset.New(), clk: systemClocks()}
 	validated, err := controlurl.Validate(opts.ControlURL)
 	if err != nil {
 		c.urlErr = err
@@ -386,6 +390,14 @@ func (c *Client) Run(ctx context.Context, applier Applier) error {
 			backoff = minBackoff
 		}
 
+		// And one that ended because the lid was shut is not an outage at all. The measure
+		// above cannot see that — time.Since does not count the sleep — so it is said here: a
+		// laptop that has just woken should be back as soon as it has a network, not after a
+		// wait it earned failing to connect before it went to sleep.
+		if errors.Is(err, errSlept) {
+			backoff = minBackoff
+		}
+
 		wait := jitter(backoff)
 		// The error can carry text written by the control plane, which an agent may be
 		// pointed at rather than own.
@@ -427,11 +439,52 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		return fmt.Errorf("sessionclient: challenge: %w", err)
 	}
 
+	// Before the dial, because the dial is where the ping hook goes and the hook is one of the
+	// two places a sleep is noticed.
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// slept carries the reason a session ended because this machine slept. Whatever the
+	// cancellation looks like from the read loop — a read cut short, a writer stopped — this
+	// is what is returned in its place, so Run knows to come straight back.
+	slept := make(chan error, 1)
+	watch := newSuspendWatch(c.clk)
+	endIfSlept := func() bool {
+		gap := watch.frozen()
+		if gap < suspendThreshold {
+			return false
+		}
+		// Status first. From this moment the session is not one this device can vouch for,
+		// and nobody reading `meshp status` should be shown it while it is torn down.
+		c.setEstablished(time.Time{})
+		select {
+		case slept <- fmt.Errorf("%w for %s; the control plane will have stopped counting this session",
+			errSlept, gap.Round(time.Second)):
+		default:
+		}
+		cancel()
+		return true
+	}
+	ended := func(err error) error {
+		select {
+		case why := <-slept:
+			return why
+		default:
+			return err
+		}
+	}
+
 	wsURL := toWebSocketURL(c.opts.ControlURL) + "/api/v1/session"
 	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
 	conn, upgradeResp, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{
 		HTTPClient:      c.httpc,
 		CompressionMode: websocket.CompressionDisabled,
+		// The control plane's liveness probe is a WebSocket ping, answered by the library from
+		// inside Read unless this says otherwise (internal/session/liveness.go). It says
+		// otherwise after a sleep: a pong is this device vouching that the session is live, and
+		// a process that has just been thawed — perhaps only for a moment, in a dark wake — is
+		// not in a position to. Ending the session instead lets the next one be honest.
+		OnPingReceived: func(context.Context, []byte) bool { return !endIfSlept() },
 	})
 	cancelDial()
 	if upgradeResp != nil && upgradeResp.Body != nil {
@@ -447,8 +500,22 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		c.setEstablished(time.Time{})
 	}()
 
-	sessionCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The other place a sleep is noticed, for a control plane that does not probe or a sleep
+	// that ended between probes.
+	wakeTicker := time.NewTicker(wakeCheckInterval)
+	defer wakeTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-sessionCtx.Done():
+				return
+			case <-wakeTicker.C:
+				if endIfSlept() {
+					return
+				}
+			}
+		}
+	}()
 
 	// One writer. The heartbeat ticker and the acknowledgement path both produce
 	// messages, and concurrent writes to a WebSocket are not allowed.
@@ -486,7 +553,7 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		}},
 	}
 	if err := writeClientMessage(sessionCtx, conn, hello); err != nil {
-		return fmt.Errorf("sessionclient: sending hello: %w", err)
+		return ended(fmt.Errorf("sessionclient: sending hello: %w", err))
 	}
 
 	writerDone := make(chan error, 1)
@@ -546,9 +613,9 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		select {
 		case err := <-writerDone:
 			if err != nil {
-				return fmt.Errorf("sessionclient: writing: %w", err)
+				return ended(fmt.Errorf("sessionclient: writing: %w", err))
 			}
-			return errors.New("sessionclient: writer stopped")
+			return ended(errors.New("sessionclient: writer stopped"))
 		default:
 		}
 
@@ -556,7 +623,7 @@ func (c *Client) RunOnce(ctx context.Context, applier Applier) error {
 		msg, err := readServerMessage(readCtx, conn)
 		cancelRead()
 		if err != nil {
-			return err
+			return ended(err)
 		}
 
 		switch payload := msg.Payload.(type) {

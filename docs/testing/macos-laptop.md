@@ -63,7 +63,11 @@ its sockets do. macOS suspends processes and tears down sockets aggressively.
    has to need nothing from the person carrying the laptop.
 
 **Pass:** within one reconcile interval (a minute by default), the tunnel is up, the session
-is connected, and peers handshake again. `meshp doctor` reports nothing stranded.
+is connected, and peers handshake again. `meshp doctor` reports nothing stranded. Within about
+five seconds of waking, `meshp status` stops showing the session from before the sleep: the
+agent compares the wall clock with its monotonic one, notices it was frozen, and ends that
+session rather than waiting for a deadline that slept with it. The `connected since` it shows
+next is later than the lid opening.
 
 **Record:** how long recovery took, and whether anything needed a nudge.
 
@@ -143,14 +147,39 @@ out rather than to confirm.
 
 Server-side, and the reason it is here: a laptop that sleeps without closing its session
 leaves `membership_state.connected_since` set, so the device reads as connected on every
-replica until the session times out.
+replica until the control plane decides it has gone.
 
-1. Note the device as connected in the API.
-2. Sleep the laptop for longer than the session timeout.
-3. Poll the device's state and record how long it goes on claiming to be connected.
+**What decides that.** The control plane pings each agent every 15 seconds and ends the session
+when a pong has not come back within 30 (`internal/session/liveness.go`). Both are measured on
+the control plane's clock, and the pong is written by the agent's own read loop, so a socket
+the sleeping kernel keeps open does not count and neither does a heartbeat the agent sends on
+its own schedule. **A device stops reading as connected within 45 seconds of its agent last
+answering.** The 90-second `readIdleTimeout` in `internal/session/server.go` is still there as a
+backstop; it is not the bound, and it is what failed this check on 2026-08-31.
 
-**Pass:** it stops reading as connected within the timeout, and the bound is what the code
-says it is.
+1. Note the device as connected in the API, and its `connected_since`.
+2. Close the lid and note the time. Leave it shut for at least five minutes.
+3. Poll the device's state every few seconds and record when it stops reading as connected.
+4. Open the lid, and before anything else run
+   `pmset -g log | grep -E 'Sleep|DarkWake|Wake' | tail -40`
+   so the record covers the time it was shut.
+
+**Pass:** it stops reading as connected within 45 seconds of the machine going to sleep, plus
+one poll. That is normally seconds after the lid closes; `pmset -g log` says when it actually
+was, and an agent still running because sleep had not begun is connected, not stale.
+
+**If it reads as connected again while the lid is shut,** compare the times with `pmset -g log`
+and the daemon's log before calling it a failure. macOS runs processes during a dark wake, and
+an agent that wakes notices it was frozen, declines to answer for the old session and opens a
+new one — so a connected period that lines up with a `DarkWake`, under a `connected_since`
+*later* than the lid closing, is the device genuinely online for a moment. What fails this
+check is the pre-sleep `connected_since` surviving more than 45 seconds into the sleep, or a
+connected period with no wake to explain it.
+
+**Both ends need a build with this in it** for that last distinction to hold. The 45-second
+bound holds against any agent, because every agent ever shipped answers a WebSocket ping; but
+an older agent answers one in a dark wake too, so with an older agent a dark wake that happens
+to catch a ping can keep the pre-sleep session for another 45 seconds.
 
 ## Results
 
@@ -194,6 +223,20 @@ through light sleep, so reads keep succeeding and the deadline never trips until
 sleeps properly. If that is right, a read deadline is the wrong mechanism on a laptop and
 meshp needs liveness it drives itself. Somebody should establish which it is before choosing a
 fix — the number to beat is 90 seconds, and the observed one is six times that.
+
+*Added afterwards, from reading the code. Nothing here has been re-run on a laptop.* The
+hypothesis above cannot be the whole of it. The deadline counted only whole WebSocket messages,
+which only the agent's own goroutines write; a socket the kernel keeps alive carries keepalives
+and acknowledgements, which never reach the read. So for the session to last 9m35s, the agent
+itself must have been running, on and off, for eight minutes after the lid shut — and its
+heartbeat ticker counts on Go's monotonic clock, which stops while a Mac sleeps and runs while
+it is briefly woken with the display off. A heartbeat landing in one of those wakes bought the
+session another ninety seconds. Whether it was dark wakes or a sleep that began late is still
+not measured; `pmset -g log` for that window would have said, and check 5 now asks for it. The
+ninety seconds of stale status after waking is the same clock seen from the laptop's side: the
+agent's own read deadline had slept with everything else. The fix does not depend on which it
+was. The control plane now asks for proof the agent is running instead of waiting to be told,
+and the agent notices it was frozen; check 5 above says what that should look like.
 
 **2, 3 and 4 — not run.** All three need a route group carrying `0.0.0.0/0` assigned to this
 device with `fail_closed` enforced, and the deployment this was run against has no route groups

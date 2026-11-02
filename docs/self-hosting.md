@@ -148,6 +148,14 @@ So the overview shows every connected device, and for the ones attached to anoth
 it says `reported to another replica` in place of tunnel detail rather than implying the
 device has gone quiet.
 
+**Connected means the agent answered within the last 45 seconds.** The replica holding a
+session pings the agent every 15 seconds and ends the session when an answer has not come back
+within 30, on its own clock — so a laptop that goes to sleep stops reading as connected within
+45 seconds, whatever its sleep does to the socket. That holds while the replica is running. One
+that stops without ending its sessions — a crash, or a restart, which does not wait for them —
+leaves them recorded as open, and a device that was asleep or switched off at that moment reads
+as connected until it next reconnects.
+
 Leave it at 1, or unset, for a single-replica deployment. A replica that connects to the bus
 when there is nobody to talk to holds a database connection open for nothing.
 
