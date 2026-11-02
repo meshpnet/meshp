@@ -263,6 +263,30 @@ type Egress interface {
 	// endpoints are the control plane and the relays; excluded is everything else that must
 	// stay off the tunnel. Losing either is how a device routes its own outer packets into
 	// its own tunnel and disappears.
+	//
+	// All or nothing: a route that will not go in fails the whole claim, and whatever had
+	// gone in is taken off again. #200 asked whether that is right, because it is what turned
+	// a route that never did anything — 255.255.255.255/32, which route(8) refuses — into a
+	// laptop with no internet: the claim aborted and the lock stayed on with nothing carrying
+	// traffic. It is kept, and deliberately.
+	//
+	// Only the excluded prefixes were ever in question. An endpoint left inside the tunnel is
+	// a tunnel carrying its own packets and a control plane nobody can reach, and halves that
+	// will not go in are no claim at all; both have to fail it whatever else is decided.
+	//
+	// For the rest, a prefix the kernel will never route is knowable before the kernel is
+	// asked, so it is decided where the list is built — on macOS in directRoutes, which a test
+	// reads. A prefix that reaches the kernel and fails cannot be told apart from a failure
+	// that matters. #200's first failure looked exactly like its second and was not cosmetic:
+	// route(8) had accepted a route sending the device's own mesh address to the LAN gateway
+	// before the router's check found the address still routed somewhere else. A claim that
+	// skipped what it could not install would have reported success over that table.
+	//
+	// The cost is stated rather than hidden. With fail-closed enforced, a claim that cannot be
+	// made leaves the device refusing egress until it can be — ADR-0011 working, loudly, on
+	// every pass; without it, the group is reported unhonoured and traffic goes the way it
+	// would without meshp. Keeping that rare is CI's job, and macOS's claim is made there the
+	// way the agent makes it (TestAFullTunnelIsClaimedTheWayTheAgentClaimsIt).
 	Claim(iface string, endpoints []netip.AddrPort, excluded []netip.Prefix) error
 
 	// Release gives the routing back.
