@@ -4,7 +4,7 @@
 # .go-version by `make image`, which passes it. A floating tag means the binary that ships
 # is built by whatever toolchain the registry resolved that day — which is not the one CI
 # tested with, and not reproducible from the same commit a month later.
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION=1.26.10
 FROM golang:${GO_VERSION}-alpine AS build
 
 WORKDIR /src
