@@ -134,9 +134,12 @@ curl -fsSLO https://raw.githubusercontent.com/meshpnet/meshp/main/scripts/instal
 less install.sh && sudo sh install.sh
 ```
 
-It checks the download against the release's checksums, installs `meshp` and `meshpd`,
-and installs the agent's systemd unit without starting it — joining a network needs a
-token, so it stops before making that decision for you.
+It checks that the release's checksums are signed with the meshp release key (or, for the
+four releases from before signing, that they are the ones published) and that the download
+matches them, installs `meshp` and `meshpd`, and installs the agent's systemd unit
+without starting it — joining a network needs a token, so it stops before making that decision
+for you. [SECURITY.md](SECURITY.md#verifying-a-release) says how to check a release by hand,
+and what the signature does and does not prove.
 
 ```bash
 sudo systemctl enable --now meshpd

@@ -41,6 +41,7 @@ deliberate act with a written reason rather than a drift nobody noticed.
 | [0030](0030-fail-closed-on-windows.md) | Fail-closed egress on Windows is meshp's own WFP layer |
 | [0031](0031-the-cli-signs-in-with-a-token-it-mints.md) | `meshp login` mints an API token and keeps it for one person |
 | [0032](0032-parity-is-with-the-api.md) | The UI and the CLI are clients of the API, and parity is measured against it |
+| [0035](0035-releases-are-signed-with-a-key-install-sh-carries.md) | Releases are signed with a key install.sh carries, and attested by the workflow that built them |
 
 ## Format
 
