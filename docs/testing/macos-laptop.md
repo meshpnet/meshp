@@ -9,6 +9,15 @@ laptop: it closes, it moves between wifi and a phone hotspot, it joins a corpora
 claims the default route. Hosted runners do none of those things, which is why this is a
 document somebody follows rather than a job that runs (#160).
 
+The claim is proved the way the agent makes it, which until #200 it was not. The three bugs
+that stopped every macOS device from claiming a full tunnel lived where the agent hands the
+egress router its own name for the interface, `meshp0`, which on this platform names nothing —
+and all three were found on a laptop, because CI only ever claimed with what the router's own
+test assembled. `TestAFullTunnelIsClaimedTheWayTheAgentClaimsIt` in `internal/tunnel` now
+converges a real utun through the reconciler, under that name, and asks the routing table
+where packets would go. What it cannot do is send one through an advertiser, because a hosted
+runner has none — check 0 below is the only thing that does.
+
 **Run this before tagging a release, and before merging anything that touches
 `internal/wglink`, `internal/pf` or `internal/resolved` on macOS.** Record the results in the
 table at the bottom. An empty row is not a pass.
@@ -49,6 +58,26 @@ meshpd was started. Run it in a terminal for these checks rather than under laun
 log is in front of you.
 
 ## The checks
+
+### 0. A full tunnel carries traffic, failing closed
+
+The half of #200 that CI cannot reach. The claim test asserts that internet-bound
+destinations route into the utun and that the relay and the control plane route around it,
+but nothing on a hosted runner can say whether a packet sent that way arrives anywhere. Every
+egress check after this one assumes it does.
+
+1. With the route group assigned and `fail_closed` **enforced**, confirm the claim:
+   `route -n get 1.1.1.1` names a `utun` interface, and `route -n get <relay address>` names
+   the LAN gateway.
+2. `curl -s https://api.ipify.org` and note the address it prints.
+
+**Pass:** the address is the advertiser's, not the one this network gives you.
+
+**Run it failing closed, not with `fail_closed` disabled.** CI's claim test declines the lock
+for its own reasons, so this is the only place the two meet. The lock decides what may leave,
+and it is told which interface is the tunnel by the agent's name for it — the same name that
+was not the kernel's three times over in #200. A full tunnel that carries traffic with
+fail-closed off and nothing with it on has found that.
 
 ### 1. Sleep and wake
 
@@ -157,9 +186,9 @@ says it is.
 One row per build actually exercised. A release without a row for its build has not had this
 run.
 
-| Date | Build | macOS | 1 Sleep | 2 Networks | 3 kill -9 | 4 Other VPN | 5 connected_since | Notes |
-|---|---|---|---|---|---|---|---|---|
-| 2026-08-31 | v0.1.0-57-geb4d461 | 26.0 (25A354), MacBookPro17,1 | pass | not run | not run | not run | **fail** | First run of this document. 2–4 need an egress route group that this deployment does not have. See below. |
+| Date | Build | macOS | 0 Carries | 1 Sleep | 2 Networks | 3 kill -9 | 4 Other VPN | 5 connected_since | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-08-31 | v0.1.0-57-geb4d461 | 26.0 (25A354), MacBookPro17,1 | not run | pass | not run | not run | not run | **fail** | First run of this document. 2–4 need an egress route group that this deployment does not have. See below. Check 0 was added later (#200). |
 
 ### 2026-08-31, v0.1.0-57-geb4d461
 

@@ -721,15 +721,31 @@ jobs:
       # release changes it. If that test fails, macOS has changed and meshp cannot fail
       # closed here until somebody looks — it is not a flake and it is not the test being
       # wrong.
+      #
+      # internal/tunnel is here for the half of #200 that was still open: a full tunnel
+      # claimed the way the agent claims one. Its three bugs lived where the reconciler hands
+      # the router the label meshp0, which on macOS names nothing. wglink's claim test uses
+      # the label too, but builds its own carve-out, so what the reconciler passes was never
+      # what anything here claimed with. TestAFullTunnelIsClaimedTheWayTheAgentClaimsIt
+      # converges a real utun through Apply and asks route(8) where packets would go — the
+      # routing table rather than traffic, because a hosted runner has no advertiser to send
+      # traffic to.
+      #
+      # -p 1 as root, because two packages now take this runner's default route, wglink's
+      # claim test and that one, and go test runs package binaries side by side. Both claim
+      # the same halves and write the same claim record, and wglink's skips while another
+      # meshp tunnel is up — so concurrently they would fail each other, or skip in a way the
+      # check below reports as a failure. One at a time also means nothing else is relying on
+      # the network while a claim is holding it.
       - name: unprivileged — a refused write is an error, and scutil still exits zero
         run: |
           set -o pipefail
-          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-user.log
+          go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./internal/tunnel/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-user.log
 
-      - name: as root — a utun comes up and is observed back, and macOS sends mesh names to meshp
+      - name: as root — a utun comes up and is observed back, a full tunnel is claimed as the agent claims it, and macOS sends mesh names to meshp
         run: |
           set -o pipefail
-          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -v 2>&1 | tee macos-root.log
+          sudo -E env "PATH=$PATH" go test ./internal/wglink/ ./internal/resolved/ ./internal/version/ ./internal/nftables/ ./internal/pf/ ./internal/egresslock/ ./internal/netwatch/ ./internal/pathprobe/ ./internal/tunnel/ ./cmd/meshp/ ./cmd/meshpd/ -count=1 -p 1 -v 2>&1 | tee macos-root.log
 
       # A test that skipped in both runs never ran anywhere, which reports success while
       # testing nothing. Checked by name rather than by counting skips, because each run is
