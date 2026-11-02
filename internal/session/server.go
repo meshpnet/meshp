@@ -36,10 +36,14 @@ const (
 	// the writer goroutine indefinitely.
 	writeTimeout = 10 * time.Second
 
-	// readIdleTimeout is how long the server waits to hear anything at all. Agents
-	// heartbeat well inside this, so silence means the connection is gone in a way
-	// TCP has not noticed — a laptop closed mid-flight, or a NAT that dropped the
-	// mapping.
+	// readIdleTimeout is how long the server waits for the agent to send anything at all.
+	//
+	// A backstop now, not the bound. It is reset by every message the agent writes, so the
+	// agent decides when it moves — and a closed laptop's session stayed open under it for
+	// nearly ten minutes, which only the agent writing could have done (liveness.go). Whether
+	// a device is connected is decided by probeLiveness, on this process's clock; this is what
+	// still ends a session whose agent answers pings but has stopped writing, which a healthy
+	// one never does: it heartbeats every twenty-five seconds.
 	readIdleTimeout = 90 * time.Second
 
 	// maxMessageBytes caps one protocol message. A snapshot for a large network is
@@ -60,6 +64,16 @@ type Config struct {
 	// is told relaying is unavailable rather than met with silence (ADR-0017).
 	RelayIssuer *RelayIssuer
 
+	// LivenessInterval and LivenessTimeout replace how often an agent is asked to prove it is
+	// running and how long it has to answer. Zero means the defaults, which are what a
+	// deployment should run: they are what LivenessBound and the documentation state. They
+	// exist so a test can hold a session to the bound in milliseconds rather than a minute.
+	//
+	// Real durations, not Clock readings. The probe is enforced by the websocket library's
+	// own deadlines, which a fake clock does not reach.
+	LivenessInterval time.Duration
+	LivenessTimeout  time.Duration
+
 	Clock clock.Clock
 	Log   *slog.Logger
 }
@@ -73,6 +87,9 @@ type Server struct {
 	relay      *RelayIssuer
 	clk        clock.Clock
 	log        *slog.Logger
+
+	livenessInterval time.Duration
+	livenessTimeout  time.Duration
 }
 
 // NewServer builds a Server.
@@ -83,18 +100,26 @@ func NewServer(st *store.Store, hub *Hub, cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
+	if cfg.LivenessInterval <= 0 {
+		cfg.LivenessInterval = livenessInterval
+	}
+	if cfg.LivenessTimeout <= 0 {
+		cfg.LivenessTimeout = livenessTimeout
+	}
 	challenger, err := challenge.New(cfg.MasterSecret, ChallengePurpose, challenge.DefaultTTL, cfg.Clock)
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		store:      st,
-		hub:        hub,
-		builder:    NewStateBuilder(st).WithRelays(cfg.Relays).WithLogger(cfg.Log),
-		challenger: challenger,
-		relay:      cfg.RelayIssuer,
-		clk:        cfg.Clock,
-		log:        cfg.Log,
+		store:            st,
+		hub:              hub,
+		builder:          NewStateBuilder(st).WithRelays(cfg.Relays).WithLogger(cfg.Log),
+		challenger:       challenger,
+		relay:            cfg.RelayIssuer,
+		clk:              cfg.Clock,
+		log:              cfg.Log,
+		livenessInterval: cfg.LivenessInterval,
+		livenessTimeout:  cfg.LivenessTimeout,
 	}, nil
 }
 
@@ -278,6 +303,10 @@ func (s *Server) run(ctx context.Context, conn *websocket.Conn, sess *Session) {
 	readErr := make(chan error, 1)
 	go func() { readErr <- s.readLoop(ctx, conn, sess) }()
 
+	// Buffered so the prober never blocks on a session that has already ended.
+	unanswered := make(chan error, 1)
+	go s.probeLiveness(ctx, conn, sess, unanswered)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -292,6 +321,17 @@ func (s *Server) run(ctx context.Context, conn *websocket.Conn, sess *Session) {
 			if err != nil && !isExpectedClose(err) {
 				s.log.Info("control channel read ended", "session", sess.ID, "error", err)
 			}
+			return
+
+		case err := <-unanswered:
+			s.log.Info("control channel ended: the agent stopped answering",
+				"session", sess.ID, "membership_id", sess.MembershipID,
+				"error", err, "waited", s.livenessTimeout)
+			// No closing handshake. An agent that has not answered a ping in this long will
+			// not answer a close frame either, and Close would wait for one — holding the
+			// device's presence, which is cleared on the way out, for seconds more than the
+			// bound allows.
+			_ = conn.CloseNow()
 			return
 
 		case msg := <-sess.send:

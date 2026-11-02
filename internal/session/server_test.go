@@ -45,7 +45,9 @@ type fixture struct {
 	orgID  uuid.UUID
 }
 
-func newFixture(t *testing.T) *fixture {
+// newFixture builds a control plane over a fresh schema. Options adjust the session server's
+// configuration before it starts serving, which is the only moment it is safe to.
+func newFixture(t *testing.T, opts ...func(*Config)) *fixture {
 	t.Helper()
 	url := testdb.URL(t, "session")
 
@@ -75,7 +77,11 @@ func newFixture(t *testing.T) *fixture {
 	if testing.Verbose() {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
-	srv, err := NewServer(st, f.hub, Config{MasterSecret: []byte(testSecret), Clock: clk, Log: logger})
+	cfg := Config{MasterSecret: []byte(testSecret), Clock: clk, Log: logger}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	srv, err := NewServer(st, f.hub, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
